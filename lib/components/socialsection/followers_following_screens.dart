@@ -201,6 +201,7 @@ class _FollowersScreenState extends State<FollowersScreen> {
                                       context,
                                       MaterialPageRoute(
                                         builder: (context) => UserProfileScreen(
+                                          key: ValueKey(user['id']),
                                           user: user,
                                           showAppBar: true,
                                           accentColor: widget.accentColor,
@@ -520,6 +521,7 @@ class _FollowingScreenState extends State<FollowingScreen> {
   context,
   MaterialPageRoute(
     builder: (context) => UserProfileScreen(
+      key: ValueKey(user['id']),
       user: user,
       showAppBar: true,
       accentColor: widget.accentColor,

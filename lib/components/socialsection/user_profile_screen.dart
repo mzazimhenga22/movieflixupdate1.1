@@ -19,13 +19,15 @@ class UserProfileScreen extends StatefulWidget {
   final Map<String, dynamic> user;
   final bool showAppBar;
   final Color accentColor;
+  @override
+  final Key key; // Add key for state preservation
 
   const UserProfileScreen({
-    super.key,
+    required this.key, // Make key required
     required this.user,
     this.showAppBar = true,
     required this.accentColor,
-  });
+  }) : super(key: key);
 
   @override
   State<UserProfileScreen> createState() => _UserProfileScreenState();
@@ -205,7 +207,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   ImageProvider _buildAvatarImage() {
     if (_user['avatar'] != null && _user['avatar'].isNotEmpty) {
       if (kIsWeb || _user['avatar'].startsWith("http")) {
-        return NetworkImage(_user['avatar']);
+        return CachedNetworkImageProvider(_user['avatar']);
       } else {
         return FileImage(File(_user['avatar']));
       }
@@ -408,85 +410,87 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
-                            GestureDetector(
-                              onTap: _hasActiveStory()
-                                  ? () {
-                                      FirebaseFirestore.instance
-                                          .collection('users')
-                                          .doc(_user['id'])
-                                          .collection('stories')
-                                          .get()
-                                          .then((snapshot) {
-                                        final userStories = snapshot.docs
-                                            .map((doc) {
-                                              final data = doc.data();
-                                              return <String, dynamic>{
-                                                ...data,
-                                                'id': doc.id
-                                              };
-                                            })
-                                            .where((story) =>
-                                                DateTime.now().difference(
-                                                    DateTime.parse(story[
-                                                            'timestamp'] ??
-                                                        DateTime.now()
-                                                            .toIso8601String())) <
-                                                const Duration(hours: 24))
-                                            .toList();
-                                        if (userStories.isNotEmpty) {
-                                          Navigator.push(
-                                            context,
-                                            MaterialPageRoute(
-                                              builder: (_) => StoryScreen(
-                                                stories: userStories,
-                                                initialIndex: 0,
-                                                currentUserId:
-                                                    currentUser?.uid ?? '',
+                            RepaintBoundary(
+                              child: GestureDetector(
+                                onTap: _hasActiveStory()
+                                    ? () {
+                                        FirebaseFirestore.instance
+                                            .collection('users')
+                                            .doc(_user['id'])
+                                            .collection('stories')
+                                            .get()
+                                            .then((snapshot) {
+                                          final userStories = snapshot.docs
+                                              .map((doc) {
+                                                final data = doc.data();
+                                                return <String, dynamic>{
+                                                  ...data,
+                                                  'id': doc.id
+                                                };
+                                              })
+                                              .where((story) =>
+                                                  DateTime.now().difference(
+                                                      DateTime.parse(story[
+                                                              'timestamp'] ??
+                                                          DateTime.now()
+                                                              .toIso8601String())) <
+                                                  const Duration(hours: 24))
+                                              .toList();
+                                          if (userStories.isNotEmpty) {
+                                            Navigator.push(
+                                              context,
+                                              MaterialPageRoute(
+                                                builder: (_) => StoryScreen(
+                                                  stories: userStories,
+                                                  initialIndex: 0,
+                                                  currentUserId:
+                                                      currentUser?.uid ?? '',
+                                                ),
                                               ),
-                                            ),
-                                          );
-                                        }
-                                      });
-                                    }
-                                  : null,
-                              child: Container(
-                                decoration: _hasActiveStory()
-                                    ? BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        border: Border.all(
-                                            color:
-                                                Colors.yellow.withOpacity(0.8),
-                                            width: 2),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color:
-                                                Colors.yellow.withOpacity(0.6),
-                                            blurRadius: 8,
-                                            spreadRadius: 1,
-                                          ),
-                                        ],
-                                      )
+                                            );
+                                          }
+                                        });
+                                      }
                                     : null,
-                                child: CircleAvatar(
-                                  radius: 50,
-                                  backgroundColor: widget.accentColor,
-                                  child: ClipOval(
-                                    child: Image(
-                                      image: _buildAvatarImage(),
-                                      width: 100,
-                                      height: 100,
-                                      fit: BoxFit.cover,
-                                      errorBuilder:
-                                          (context, error, stackTrace) =>
-                                              Center(
-                                        child: Text(
-                                          displayName.isNotEmpty
-                                              ? displayName[0].toUpperCase()
-                                              : "G",
-                                          style: const TextStyle(
-                                              fontSize: 40,
-                                              color: Colors.white,
-                                              fontWeight: FontWeight.bold),
+                                child: Container(
+                                  decoration: _hasActiveStory()
+                                      ? BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                              color:
+                                                  Colors.yellow.withOpacity(0.8),
+                                              width: 2),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color:
+                                                  Colors.yellow.withOpacity(0.6),
+                                              blurRadius: 8,
+                                              spreadRadius: 1,
+                                            ),
+                                          ],
+                                        )
+                                      : null,
+                                  child: CircleAvatar(
+                                    radius: 50,
+                                    backgroundColor: widget.accentColor,
+                                    child: ClipOval(
+                                      child: Image(
+                                        image: _buildAvatarImage(),
+                                        width: 100,
+                                        height: 100,
+                                        fit: BoxFit.cover,
+                                        errorBuilder:
+                                            (context, error, stackTrace) =>
+                                                Center(
+                                          child: Text(
+                                            displayName.isNotEmpty
+                                                ? displayName[0].toUpperCase()
+                                                : "G",
+                                            style: const TextStyle(
+                                                fontSize: 40,
+                                                color: Colors.white,
+                                                fontWeight: FontWeight.bold),
+                                          ),
                                         ),
                                       ),
                                     ),
@@ -617,7 +621,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                         MaterialPageRoute(
                                           builder: (context) =>
                                               IndividualChatScreen(
-                                            // Updated to IndividualChatScreen
                                             currentUser: {
                                               'id': currentUser.uid,
                                               'username':
@@ -762,216 +765,218 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                   itemCount: posts.length,
                                   itemBuilder: (context, index) {
                                     final post = posts[index];
-                                    return Card(
-                                      elevation: 4,
-                                      shape: RoundedRectangleBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(12)),
-                                      margin: const EdgeInsets.symmetric(
-                                          vertical: 8),
-                                      child: Container(
-                                        decoration: BoxDecoration(
-                                          gradient: LinearGradient(
-                                            colors: [
-                                              widget.accentColor
-                                                  .withOpacity(0.1),
-                                              widget.accentColor
-                                                  .withOpacity(0.3)
-                                            ],
-                                            begin: Alignment.topLeft,
-                                            end: Alignment.bottomRight,
-                                          ),
-                                          borderRadius:
-                                              BorderRadius.circular(12),
-                                          border: Border.all(
-                                              color: widget.accentColor
-                                                  .withOpacity(0.3)),
-                                        ),
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            ListTile(
-                                              title: Text(
-                                                  post['user'] ?? 'Unknown',
-                                                  style: const TextStyle(
-                                                      fontWeight:
-                                                          FontWeight.bold,
-                                                      color: Colors.white,
-                                                      shadows: [
-                                                        Shadow(
-                                                            color:
-                                                                Colors.black45,
-                                                            offset:
-                                                                Offset(1, 1),
-                                                            blurRadius: 2)
-                                                      ])),
-                                              trailing: isOwnProfile
-                                                  ? IconButton(
-                                                      icon: const Icon(
-                                                          Icons.delete,
-                                                          color: Colors.red,
-                                                          size: 22),
-                                                      onPressed: () async {
-                                                        final confirm =
-                                                            await showDialog<
-                                                                bool>(
-                                                          context: context,
-                                                          builder: (context) =>
-                                                              AlertDialog(
-                                                            backgroundColor:
-                                                                const Color
-                                                                        .fromARGB(
-                                                                    255,
-                                                                    17,
-                                                                    25,
-                                                                    40),
-                                                            title: const Text(
-                                                                "Delete Post",
-                                                                style: TextStyle(
-                                                                    color: Colors
-                                                                        .white)),
-                                                            content: const Text(
-                                                                "Are you sure you want to delete this post?",
-                                                                style: TextStyle(
-                                                                    color: Colors
-                                                                        .white70)),
-                                                            actions: [
-                                                              TextButton(
-                                                                onPressed: () =>
-                                                                    Navigator.pop(
-                                                                        context,
-                                                                        false),
-                                                                child: const Text(
-                                                                    "Cancel",
-                                                                    style: TextStyle(
-                                                                        color: Colors
-                                                                            .white70)),
-                                                              ),
-                                                              ElevatedButton(
-                                                                style: ElevatedButton.styleFrom(
-                                                                    backgroundColor:
-                                                                        Colors
-                                                                            .red,
-                                                                    foregroundColor:
-                                                                        Colors
-                                                                            .white),
-                                                                onPressed: () =>
-                                                                    Navigator.pop(
-                                                                        context,
-                                                                        true),
-                                                                child: const Text(
-                                                                    "Delete"),
-                                                              ),
-                                                            ],
-                                                          ),
-                                                        );
-                                                        if (confirm == true) {
-                                                          await _deletePost(
-                                                              post['id']);
-                                                        }
-                                                      },
-                                                    )
-                                                  : null,
+                                    return RepaintBoundary(
+                                      child: Card(
+                                        elevation: 4,
+                                        shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(12)),
+                                        margin: const EdgeInsets.symmetric(
+                                            vertical: 8),
+                                        child: Container(
+                                          decoration: BoxDecoration(
+                                            gradient: LinearGradient(
+                                              colors: [
+                                                widget.accentColor
+                                                    .withOpacity(0.1),
+                                                widget.accentColor
+                                                    .withOpacity(0.3)
+                                              ],
+                                              begin: Alignment.topLeft,
+                                              end: Alignment.bottomRight,
                                             ),
-                                            if (post['media']?.isNotEmpty ??
-                                                false)
-                                              if (post['mediaType'] == 'photo')
-                                                CachedNetworkImage(
-                                                  imageUrl: post['media']!,
-                                                  height: 180,
-                                                  width: double.infinity,
-                                                  fit: BoxFit.cover,
-                                                  placeholder: (context, url) =>
-                                                      const Center(
-                                                          child:
-                                                              CircularProgressIndicator()),
-                                                  errorWidget:
-                                                      (context, url, error) =>
-                                                          Container(
+                                            borderRadius:
+                                                BorderRadius.circular(12),
+                                            border: Border.all(
+                                                color: widget.accentColor
+                                                    .withOpacity(0.3)),
+                                          ),
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              ListTile(
+                                                title: Text(
+                                                    post['user'] ?? 'Unknown',
+                                                    style: const TextStyle(
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                        color: Colors.white,
+                                                        shadows: [
+                                                          Shadow(
+                                                              color:
+                                                                  Colors.black45,
+                                                              offset:
+                                                                  Offset(1, 1),
+                                                              blurRadius: 2)
+                                                        ])),
+                                                trailing: isOwnProfile
+                                                    ? IconButton(
+                                                        icon: const Icon(
+                                                            Icons.delete,
+                                                            color: Colors.red,
+                                                            size: 22),
+                                                        onPressed: () async {
+                                                          final confirm =
+                                                              await showDialog<
+                                                                  bool>(
+                                                            context: context,
+                                                            builder: (context) =>
+                                                                AlertDialog(
+                                                              backgroundColor:
+                                                                  const Color
+                                                                          .fromARGB(
+                                                                      255,
+                                                                      17,
+                                                                      25,
+                                                                      40),
+                                                              title: const Text(
+                                                                  "Delete Post",
+                                                                  style: TextStyle(
+                                                                      color: Colors
+                                                                          .white)),
+                                                              content: const Text(
+                                                                  "Are you sure you want to delete this post?",
+                                                                  style: TextStyle(
+                                                                      color: Colors
+                                                                          .white70)),
+                                                              actions: [
+                                                                TextButton(
+                                                                  onPressed: () =>
+                                                                      Navigator.pop(
+                                                                          context,
+                                                                          false),
+                                                                  child: const Text(
+                                                                      "Cancel",
+                                                                      style: TextStyle(
+                                                                          color: Colors
+                                                                              .white70)),
+                                                                ),
+                                                                ElevatedButton(
+                                                                  style: ElevatedButton.styleFrom(
+                                                                      backgroundColor:
+                                                                          Colors
+                                                                              .red,
+                                                                      foregroundColor:
+                                                                          Colors
+                                                                              .white),
+                                                                  onPressed: () =>
+                                                                      Navigator.pop(
+                                                                          context,
+                                                                          true),
+                                                                  child: const Text(
+                                                                      "Delete"),
+                                                                ),
+                                                              ],
+                                                            ),
+                                                          );
+                                                          if (confirm == true) {
+                                                            await _deletePost(
+                                                                post['id']);
+                                                          }
+                                                        },
+                                                      )
+                                                    : null,
+                                              ),
+                                              if (post['media']?.isNotEmpty ??
+                                                  false)
+                                                if (post['mediaType'] == 'photo')
+                                                  CachedNetworkImage(
+                                                    imageUrl: post['media']!,
+                                                    height: 180,
+                                                    width: double.infinity,
+                                                    fit: BoxFit.cover,
+                                                    placeholder: (context, url) =>
+                                                        const Center(
+                                                            child:
+                                                                CircularProgressIndicator()),
+                                                    errorWidget:
+                                                        (context, url, error) =>
+                                                            Container(
+                                                      height: 180,
+                                                      color: Colors.grey[300],
+                                                      child: const Center(
+                                                          child: Icon(Icons.error,
+                                                              size: 40)),
+                                                    ),
+                                                  )
+                                                else if (post['mediaType'] ==
+                                                    'video')
+                                                  Container(
+                                                    height: 180,
+                                                    color: Colors.black,
+                                                    child: const Center(
+                                                        child: Text(
+                                                            'Video content',
+                                                            style: TextStyle(
+                                                                color: Colors
+                                                                    .white))),
+                                                  )
+                                                else
+                                                  Container(
                                                     height: 180,
                                                     color: Colors.grey[300],
                                                     child: const Center(
-                                                        child: Icon(Icons.error,
+                                                        child: Icon(Icons.image,
                                                             size: 40)),
                                                   ),
-                                                )
-                                              else if (post['mediaType'] ==
-                                                  'video')
-                                                Container(
-                                                  height: 180,
-                                                  color: Colors.black,
-                                                  child: const Center(
-                                                      child: Text(
-                                                          'Video content',
-                                                          style: TextStyle(
-                                                              color: Colors
-                                                                  .white))),
-                                                )
-                                              else
-                                                Container(
-                                                  height: 180,
-                                                  color: Colors.grey[300],
-                                                  child: const Center(
-                                                      child: Icon(Icons.image,
-                                                          size: 40)),
+                                              Padding(
+                                                padding: const EdgeInsets.all(12),
+                                                child: Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(post['post'] ?? '',
+                                                        style: const TextStyle(
+                                                            fontSize: 15,
+                                                            color:
+                                                                Colors.white70)),
+                                                    const SizedBox(height: 8),
+                                                    Text(
+                                                        "Movie: ${post['movie'] ?? 'Unknown'}",
+                                                        style: const TextStyle(
+                                                            fontStyle:
+                                                                FontStyle.italic,
+                                                            color:
+                                                                Colors.white70)),
+                                                  ],
                                                 ),
-                                            Padding(
-                                              padding: const EdgeInsets.all(12),
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
+                                              ),
+                                              const Divider(
+                                                  color: Colors.white54,
+                                                  height: 1),
+                                              Row(
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment.spaceEvenly,
                                                 children: [
-                                                  Text(post['post'] ?? '',
-                                                      style: const TextStyle(
-                                                          fontSize: 15,
-                                                          color:
-                                                              Colors.white70)),
-                                                  const SizedBox(height: 8),
+                                                  IconButton(
+                                                    icon: Icon(
+                                                      post['liked'] == true
+                                                          ? Icons.favorite
+                                                          : Icons.favorite_border,
+                                                      color: post['liked'] == true
+                                                          ? Colors.red
+                                                          : Colors.white70,
+                                                      size: 22,
+                                                    ),
+                                                    onPressed: currentUser != null
+                                                        ? () async {
+                                                            await _likePost(
+                                                                post['id'],
+                                                                post['liked'] ??
+                                                                    false,
+                                                                _user['id']);
+                                                          }
+                                                        : null,
+                                                  ),
                                                   Text(
-                                                      "Movie: ${post['movie'] ?? 'Unknown'}",
+                                                      '${post['likes_count'] ?? 0} Likes',
                                                       style: const TextStyle(
-                                                          fontStyle:
-                                                              FontStyle.italic,
-                                                          color:
-                                                              Colors.white70)),
+                                                          color: Colors.white70)),
                                                 ],
                                               ),
-                                            ),
-                                            const Divider(
-                                                color: Colors.white54,
-                                                height: 1),
-                                            Row(
-                                              mainAxisAlignment:
-                                                  MainAxisAlignment.spaceEvenly,
-                                              children: [
-                                                IconButton(
-                                                  icon: Icon(
-                                                    post['liked'] == true
-                                                        ? Icons.favorite
-                                                        : Icons.favorite_border,
-                                                    color: post['liked'] == true
-                                                        ? Colors.red
-                                                        : Colors.white70,
-                                                    size: 22,
-                                                  ),
-                                                  onPressed: currentUser != null
-                                                      ? () async {
-                                                          await _likePost(
-                                                              post['id'],
-                                                              post['liked'] ??
-                                                                  false,
-                                                              _user['id']);
-                                                        }
-                                                      : null,
-                                                ),
-                                                Text(
-                                                    '${post['likes_count'] ?? 0} Likes',
-                                                    style: const TextStyle(
-                                                        color: Colors.white70)),
-                                              ],
-                                            ),
-                                          ],
+                                            ],
+                                          ),
                                         ),
                                       ),
                                     );
@@ -1109,27 +1114,29 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                     itemBuilder: (context, index) {
                                       final otherUser = users[index];
                                       return ListTile(
-                                        leading: CircleAvatar(
-                                          backgroundColor: widget.accentColor,
-                                          backgroundImage:
-                                              otherUser['avatar']?.isNotEmpty ==
-                                                      true
-                                                  ? NetworkImage(
-                                                      otherUser['avatar'])
-                                                  : null,
-                                          child: otherUser['avatar']
-                                                      ?.isNotEmpty !=
-                                                  true
-                                              ? Text(
-                                                  otherUser['username']
-                                                          .isNotEmpty
-                                                      ? otherUser['username'][0]
-                                                          .toUpperCase()
-                                                      : "G",
-                                                  style: const TextStyle(
-                                                      color: Colors.white),
-                                                )
-                                              : null,
+                                        leading: RepaintBoundary(
+                                          child: CircleAvatar(
+                                            backgroundColor: widget.accentColor,
+                                            backgroundImage:
+                                                otherUser['avatar']?.isNotEmpty ==
+                                                        true
+                                                    ? CachedNetworkImageProvider(
+                                                        otherUser['avatar'])
+                                                    : null,
+                                            child: otherUser['avatar']
+                                                        ?.isNotEmpty !=
+                                                    true
+                                                ? Text(
+                                                    otherUser['username']
+                                                            .isNotEmpty
+                                                        ? otherUser['username'][0]
+                                                            .toUpperCase()
+                                                        : "G",
+                                                    style: const TextStyle(
+                                                        color: Colors.white),
+                                                  )
+                                                : null,
+                                          ),
                                         ),
                                         title: Text(otherUser['username'],
                                             style: const TextStyle(
@@ -1140,6 +1147,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                           MaterialPageRoute(
                                             builder: (context) =>
                                                 UserProfileScreen(
+                                              key: ValueKey(otherUser['id']),
                                               user: otherUser,
                                               showAppBar: true,
                                               accentColor: widget.accentColor,

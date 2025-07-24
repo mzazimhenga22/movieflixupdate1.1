@@ -53,33 +53,84 @@ class _MessageWidgetState extends State<MessageWidget> {
     return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 
+  Widget _buildTick() => widget.isMe
+      ? Padding(
+          padding: const EdgeInsets.only(left: 4.0),
+          child: Icon(
+            widget.isRead
+                ? Icons.done_all
+                : widget.message['delivered_at'] != null
+                    ? Icons.done_all
+                    : Icons.done,
+            size: 16,
+            color: widget.isRead
+                ? Colors.blue
+                : widget.message['delivered_at'] != null
+                    ? Colors.grey
+                    : Colors.grey[400],
+          ),
+        )
+      : const SizedBox.shrink();
+
+  Widget _buildSenderName() => (!widget.isMe && widget.message['sender_username'] != null)
+      ? Padding(
+          padding: const EdgeInsets.only(bottom: 4.0),
+          child: Text(
+            widget.message['sender_username'] ?? 'Unknown',
+            style: const TextStyle(
+                fontSize: 12, color: Colors.white70, fontWeight: FontWeight.bold),
+          ),
+        )
+      : const SizedBox.shrink();
+
+  Widget _buildTimeRow(String time) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (widget.isMe) _buildTick(),
+          if (widget.isMe) const SizedBox(width: 4),
+          Text(time, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+        ],
+      );
+
+  Widget _buildReactions(Map<String, List<String>> reactions) => reactions.isNotEmpty
+      ? Wrap(
+          children: reactions.entries.map((entry) {
+            IconData icon;
+            switch (entry.key) {
+              case 'like':
+                icon = Icons.thumb_up;
+                break;
+              case 'heart':
+                icon = Icons.favorite;
+                break;
+              default:
+                icon = Icons.emoji_emotions;
+            }
+            return Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 16, color: Colors.white),
+                  const SizedBox(width: 2),
+                  Text('${entry.value.length}', style: const TextStyle(color: Colors.white)),
+                ],
+              ),
+            );
+          }).toList(),
+        )
+      : const SizedBox.shrink();
+
   @override
   Widget build(BuildContext context) {
     final messageTime = DateTime.parse(widget.message['created_at'].toString());
     final formattedTime = DateFormat('h:mm a').format(messageTime);
-    final messageType = widget.message['type']?.toString() ?? 'text';
-
-    Widget tickWidget = widget.isMe
-        ? Padding(
-            padding: const EdgeInsets.only(left: 4.0),
-            child: Icon(
-              widget.isRead
-                  ? Icons.done_all
-                  : widget.message['delivered_at'] != null
-                      ? Icons.done_all
-                      : Icons.done,
-              size: 16,
-              color: widget.isRead
-                  ? Colors.blue
-                  : widget.message['delivered_at'] != null
-                      ? Colors.grey
-                      : Colors.grey[400],
-            ),
-          )
-        : Container();
+    final type = widget.message['type']?.toString() ?? 'text';
+    final reactions = widget.message['reactions'] as Map<String, List<String>>? ?? {};
 
     Widget content;
-    switch (messageType) {
+
+    switch (type) {
       case 'image':
         content = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -89,35 +140,19 @@ class _MessageWidgetState extends State<MessageWidget> {
               height: 150,
               width: double.infinity,
               fit: BoxFit.cover,
-              placeholder: (context, url) => const CircularProgressIndicator(),
-              errorWidget: (context, url, error) => const Icon(Icons.error),
+              placeholder: (_, __) => const CircularProgressIndicator(),
+              errorWidget: (_, __, ___) => const Icon(Icons.error),
             ),
-            if (!widget.isMe && widget.message['sender_username'] != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4.0),
-                child: Text(
-                  widget.message['sender_username'] ?? 'Unknown',
-                  style: const TextStyle(
-                      fontSize: 12,
-                      color: Colors.white70,
-                      fontWeight: FontWeight.bold),
-                ),
-              ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (widget.isMe) tickWidget,
-                if (widget.isMe) const SizedBox(width: 4),
-                Text(formattedTime,
-                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
-              ],
-            ),
+            _buildSenderName(),
+            _buildTimeRow(formattedTime),
           ],
         );
         break;
+
       case 'video':
         content = VideoPlayerWidget(url: widget.message['message']);
         break;
+
       case 'audio':
         final isPlaying = widget.currentlyPlayingId == widget.message['id'];
         content = Column(
@@ -126,18 +161,14 @@ class _MessageWidgetState extends State<MessageWidget> {
             Row(
               children: [
                 IconButton(
-                  icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow,
-                      color: Colors.white),
+                  icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow, color: Colors.white),
                   onPressed: () async {
                     if (isPlaying) {
                       await widget.audioPlayer.pause();
                       widget.setCurrentlyPlaying(null);
                     } else {
-                      if (widget.currentlyPlayingId != null) {
-                        await widget.audioPlayer.stop();
-                      }
-                      await widget.audioPlayer
-                          .setUrl(widget.message['message']);
+                      if (widget.currentlyPlayingId != null) await widget.audioPlayer.stop();
+                      await widget.audioPlayer.setUrl(widget.message['message']);
                       await widget.audioPlayer.play();
                       widget.setCurrentlyPlaying(widget.message['id']);
                     }
@@ -148,44 +179,25 @@ class _MessageWidgetState extends State<MessageWidget> {
                     stream: widget.audioPlayer.positionStream,
                     builder: (context, snapshot) {
                       final position = snapshot.data ?? Duration.zero;
-                      final duration =
-                          widget.audioPlayer.duration ?? Duration.zero;
+                      final duration = widget.audioPlayer.duration ?? Duration.zero;
                       return Slider(
-                          value: position.inSeconds.toDouble(),
-                          max: duration.inSeconds.toDouble(),
-                          onChanged: (value) => widget.audioPlayer
-                              .seek(Duration(seconds: value.toInt())));
+                        value: position.inSeconds.toDouble(),
+                        max: duration.inSeconds.toDouble(),
+                        onChanged: (value) => widget.audioPlayer.seek(Duration(seconds: value.toInt())),
+                      );
                     },
                   ),
                 ),
-                Text(
-                    '${_formatDuration(widget.audioPlayer.position)} / ${_formatDuration(widget.audioPlayer.duration)}',
+                Text('${_formatDuration(widget.audioPlayer.position)} / ${_formatDuration(widget.audioPlayer.duration)}',
                     style: const TextStyle(color: Colors.white)),
               ],
             ),
-            if (!widget.isMe && widget.message['sender_username'] != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4.0),
-                child: Text(
-                  widget.message['sender_username'] ?? 'Unknown',
-                  style: const TextStyle(
-                      fontSize: 12,
-                      color: Colors.white70,
-                      fontWeight: FontWeight.bold),
-                ),
-              ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (widget.isMe) tickWidget,
-                if (widget.isMe) const SizedBox(width: 4),
-                Text(formattedTime,
-                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
-              ],
-            ),
+            _buildSenderName(),
+            _buildTimeRow(formattedTime),
           ],
         );
         break;
+
       case 'document':
         content = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -194,33 +206,16 @@ class _MessageWidgetState extends State<MessageWidget> {
               const Icon(Icons.description, color: Colors.white),
               const SizedBox(width: 8),
               Expanded(
-                  child: Text(
-                      'Document ${widget.message['message'].split('/').last.toString()}',
-                      style: const TextStyle(color: Colors.white))),
-            ]),
-            if (!widget.isMe && widget.message['sender_username'] != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4.0),
-                child: Text(
-                  widget.message['sender_username'] ?? 'Unknown',
-                  style: const TextStyle(
-                      fontSize: 12,
-                      color: Colors.white70,
-                      fontWeight: FontWeight.bold),
-                ),
+                child: Text('Document ${widget.message['message'].split('/').last}',
+                    style: const TextStyle(color: Colors.white)),
               ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (widget.isMe) tickWidget,
-                if (widget.isMe) const SizedBox(width: 4),
-                Text(formattedTime,
-                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
-              ],
-            ),
+            ]),
+            _buildSenderName(),
+            _buildTimeRow(formattedTime),
           ],
         );
         break;
+
       default:
         content = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -228,92 +223,40 @@ class _MessageWidgetState extends State<MessageWidget> {
             if (!widget.isMe && widget.isStoryReply)
               const Padding(
                 padding: EdgeInsets.only(bottom: 4),
-                child: Row(
-                  children: [
-                    Icon(Icons.history, size: 16, color: Colors.grey),
-                    SizedBox(width: 4),
-                    Text('Story Reply',
-                        style: TextStyle(color: Colors.grey, fontSize: 12)),
-                  ],
-                ),
+                child: Row(children: [
+                  Icon(Icons.history, size: 16, color: Colors.grey),
+                  SizedBox(width: 4),
+                  Text('Story Reply', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                ]),
               ),
-            if (widget.repliedToText != null) ...[
+            if (widget.repliedToText != null)
               GestureDetector(
                 onTap: widget.onTapOriginal,
                 child: Container(
                   margin: const EdgeInsets.only(bottom: 4),
                   padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
-                      color: Colors.grey.withOpacity(0.3),
-                      borderRadius: BorderRadius.circular(8)),
+                    color: Colors.grey.withOpacity(0.3),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
                   child: Text("Replied to: ${widget.repliedToText}",
                       style: const TextStyle(color: Colors.grey, fontSize: 12),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis),
                 ),
               ),
-            ],
-            if (!widget.isMe && widget.message['sender_username'] != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4.0),
-                child: Text(
-                  widget.message['sender_username'] ?? 'Unknown',
-                  style: const TextStyle(
-                      fontSize: 12,
-                      color: Colors.white70,
-                      fontWeight: FontWeight.bold),
-                ),
-              ),
+            _buildSenderName(),
             Text(
               widget.message['message'] ?? '[No message content]',
-              style: TextStyle(
-                  fontSize: 14,
-                  color: widget.isMe ? Colors.white : Colors.black87),
+              style: TextStyle(fontSize: 14, color: widget.isMe ? Colors.white : Colors.black87),
             ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (widget.isMe) tickWidget,
-                if (widget.isMe) const SizedBox(width: 4),
-                Text(formattedTime,
-                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
-              ],
-            ),
+            _buildTimeRow(formattedTime),
             if (widget.message['is_pinned'] == true)
               const Padding(
-                  padding: EdgeInsets.only(top: 4),
-                  child: Icon(Icons.push_pin, color: Colors.orange, size: 18)),
-            if (widget.message['reactions']?.isNotEmpty ?? false)
-              Wrap(
-                children:
-                    (widget.message['reactions'] as Map<String, List<String>>)
-                        .entries
-                        .map((entry) {
-                  IconData icon;
-                  switch (entry.key) {
-                    case 'like':
-                      icon = Icons.circle;
-                      break;
-                    case 'heart':
-                      icon = Icons.favorite;
-                      break;
-                    default:
-                      icon = Icons.emoji_emotions;
-                  }
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 4),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(icon, size: 16, color: Colors.white),
-                        const SizedBox(width: 2),
-                        Text('${entry.value.length}',
-                            style: const TextStyle(color: Colors.white)),
-                      ],
-                    ),
-                  );
-                }).toList(),
+                padding: EdgeInsets.only(top: 4),
+                child: Icon(Icons.push_pin, color: Colors.orange, size: 18),
               ),
+            _buildReactions(reactions),
           ],
         );
     }
@@ -321,51 +264,43 @@ class _MessageWidgetState extends State<MessageWidget> {
     return Dismissible(
       key: Key(widget.message['id'].toString()),
       direction: DismissDirection.endToStart,
-      onDismissed: (direction) => widget.onDelete(),
+      onDismissed: (_) => widget.onDelete(),
       background: Container(
-          color: Colors.red,
-          alignment: Alignment.centerRight,
-          padding: const EdgeInsets.only(right: 16),
-          child: const Icon(Icons.delete, color: Colors.white)),
+        color: Colors.red,
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 16),
+        child: const Icon(Icons.delete, color: Colors.white),
+      ),
       child: GestureDetector(
-        onHorizontalDragUpdate: (details) =>
-            setState(() => _dragOffset += details.delta.dx),
-        onHorizontalDragEnd: (details) {
+        onHorizontalDragUpdate: (details) => setState(() => _dragOffset += details.delta.dx),
+        onHorizontalDragEnd: (_) {
           if (_dragOffset < -50) {
             widget.onReply();
-          } else if (_dragOffset > 50) {
-            widget.onShare();
-          }
+          } else if (_dragOffset > 50) widget.onShare();
           setState(() => _dragOffset = 0.0);
         },
         onLongPress: widget.onLongPress,
         child: Stack(
           children: [
-            if (_dragOffset < 0)
+            if (_dragOffset.abs() > 0)
               Positioned(
-                  right: 0,
-                  child: Container(
-                      color: Colors.blue,
-                      width: -_dragOffset,
-                      height: 100,
-                      alignment: Alignment.center,
-                      child: const Text('Reply',
-                          style: TextStyle(color: Color.fromARGB(255, 250, 0, 0))))),
-            if (_dragOffset > 0)
-              Positioned(
-                  left: 0,
-                  child: Container(
-                      color: Colors.green,
-                      width: _dragOffset,
-                      height: 100,
-                      alignment: Alignment.center,
-                      child: const Text('Share',
-                          style: TextStyle(color: Colors.white)))),
+                left: _dragOffset > 0 ? 0 : null,
+                right: _dragOffset < 0 ? 0 : null,
+                child: Container(
+                  color: _dragOffset > 0 ? Colors.green : Colors.blue,
+                  width: _dragOffset.abs(),
+                  height: 100,
+                  alignment: Alignment.center,
+                  child: Text(
+                    _dragOffset > 0 ? 'Share' : 'Reply',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ),
+              ),
             Transform.translate(
               offset: Offset(_dragOffset, 0),
               child: Align(
-                alignment:
-                    widget.isMe ? Alignment.centerRight : Alignment.centerLeft,
+                alignment: widget.isMe ? Alignment.centerRight : Alignment.centerLeft,
                 child: Container(
                   margin: const EdgeInsets.symmetric(vertical: 4),
                   padding: const EdgeInsets.all(12),
@@ -375,10 +310,7 @@ class _MessageWidgetState extends State<MessageWidget> {
                         : Colors.white.withOpacity(0.9),
                     borderRadius: BorderRadius.circular(12),
                     boxShadow: const [
-                      BoxShadow(
-                          color: Colors.black26,
-                          blurRadius: 4,
-                          offset: Offset(2, 2)),
+                      BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(2, 2)),
                     ],
                   ),
                   child: content,
@@ -428,18 +360,19 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> {
                 VideoPlayer(_controller),
                 VideoProgressIndicator(_controller, allowScrubbing: true),
                 IconButton(
-                    icon: Icon(
-                        _controller.value.isPlaying
-                            ? Icons.pause
-                            : Icons.play_arrow,
-                        color: Colors.white),
-                    onPressed: () => setState(() => _controller.value.isPlaying
+                  icon: Icon(
+                    _controller.value.isPlaying ? Icons.pause : Icons.play_arrow,
+                    color: Colors.white,
+                  ),
+                  onPressed: () => setState(
+                    () => _controller.value.isPlaying
                         ? _controller.pause()
-                        : _controller.play())),
+                        : _controller.play(),
+                  ),
+                ),
               ],
             ),
           )
         : const Center(child: CircularProgressIndicator());
   }
 }
-

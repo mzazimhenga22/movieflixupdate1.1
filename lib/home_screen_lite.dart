@@ -18,7 +18,6 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shimmer/shimmer.dart';
 import 'package:palette_generator/palette_generator.dart';
 
-
 /// HomeScreenLite widget: Lightweight version of HomeScreenMain with no blur effects
 class HomeScreenLite extends StatefulWidget {
   final String? profileName;
@@ -34,6 +33,7 @@ class HomeScreenLiteState extends State<HomeScreenLite>
   late AnimationController _textAnimationController;
   late Animation<double> _textFadeAnimation;
   final _subHomeScreenKey = GlobalKey<SubHomeScreenState>();
+  Color currentBackgroundColor = Colors.black; // State for dynamic background
 
   static const _navItems = [
     BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
@@ -91,7 +91,7 @@ class HomeScreenLiteState extends State<HomeScreenLite>
       selector: (_, settings) => settings.accentColor,
       builder: (context, accentColor, child) {
         return Scaffold(
-          backgroundColor: Colors.black, // Simple solid background
+          // Removed static backgroundColor to allow AnimatedContainer to take over
           appBar: AppBar(
             automaticallyImplyLeading: false,
             backgroundColor: accentColor.withOpacity(0.2),
@@ -112,39 +112,55 @@ class HomeScreenLiteState extends State<HomeScreenLite>
               _AppBarActions(),
             ],
           ),
-          body: RefreshIndicator(
-            onRefresh: refreshData,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minHeight: screenHeight),
-              child: SingleChildScrollView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                child: SafeArea(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const StoriesSection(),
-                        const SizedBox(height: 10),
-                        const FeaturedSliderLite(),
-                        const SizedBox(height: 20),
-                        const _SongOfMoviesCardLite(),
-                        const SizedBox(height: 20),
-                        const SizedBox(
-                          height: 430,
-                          child: Opacity(
-                            opacity: 0.7,
-                            child: ReelsSection(),
-                          ),
+          body: Stack(
+            children: [
+              // Animated background layer covering the entire screen
+              AnimatedContainer(
+                duration: const Duration(seconds: 1), // Smooth 1-second transition
+                color: currentBackgroundColor,
+                width: double.infinity,
+                height: double.infinity,
+              ),
+              // Content layer on top
+              RefreshIndicator(
+                onRefresh: refreshData,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: screenHeight),
+                  child: SingleChildScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    child: SafeArea(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const StoriesSection(),
+                            const SizedBox(height: 10),
+                            FeaturedSliderLite(
+                              onBackgroundColorChanged: (color) {
+                                setState(() => currentBackgroundColor = color);
+                              },
+                            ),
+                            const SizedBox(height: 20),
+                            const _SongOfMoviesCardLite(),
+                            const SizedBox(height: 20),
+                            const SizedBox(
+                              height: 430,
+                              child: Opacity(
+                                opacity: 0.7,
+                                child: ReelsSection(),
+                              ),
+                            ),
+                            const SizedBox(height: 20),
+                            SubHomeScreen(key: _subHomeScreenKey),
+                          ],
                         ),
-                        const SizedBox(height: 20),
-                        SubHomeScreen(key: _subHomeScreenKey),
-                      ],
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
+            ],
           ),
           floatingActionButton: FloatingActionButton(
             backgroundColor: accentColor,
@@ -299,7 +315,7 @@ class _SongOfMoviesCardLite extends StatelessWidget {
             height: 180,
             decoration: BoxDecoration(
               borderRadius: const BorderRadius.all(Radius.circular(24)),
-              color: accentColor.withOpacity(0.2), // Simplified background
+              color: accentColor.withOpacity(0.2), // Semi-transparent background
             ),
             child: const Center(
               child: Text(
@@ -343,7 +359,6 @@ class _BottomNavBarLite extends StatelessWidget {
   }
 }
 
-/// Lightweight FeaturedMovieCard without video playback
 /// Lightweight FeaturedMovieCard without video playback but with shadow effect
 class FeaturedMovieCardLite extends StatelessWidget {
   final String imageUrl;
@@ -401,7 +416,7 @@ class FeaturedMovieCardLite extends StatelessWidget {
               CachedNetworkImage(
                 imageUrl: imageUrl,
                 height: 320,
-                width: double.infinity, // Full width within constraints
+                width: double.infinity,
                 fit: BoxFit.cover,
                 placeholder: (context, url) => Shimmer.fromColors(
                   baseColor: Colors.grey[800]!,
@@ -466,10 +481,10 @@ class FeaturedMovieCardLite extends StatelessWidget {
   }
 }
 
-/// Lightweight FeaturedSlider with horizontal ListView
-/// Updated FeaturedSliderLite with single card and dynamic background
+/// Updated FeaturedSliderLite with callback for background color
 class FeaturedSliderLite extends StatefulWidget {
-  const FeaturedSliderLite({super.key});
+  final Function(Color)? onBackgroundColorChanged;
+  const FeaturedSliderLite({super.key, this.onBackgroundColorChanged});
 
   @override
   FeaturedSliderLiteState createState() => FeaturedSliderLiteState();
@@ -478,7 +493,7 @@ class FeaturedSliderLite extends StatefulWidget {
 class FeaturedSliderLiteState extends State<FeaturedSliderLite> {
   List<Map<String, dynamic>> featuredContent = [];
   int currentIndex = 0;
-  Color backgroundColor = Colors.black; // Default background color
+  Color backgroundColor = Colors.black; // Local state for extraction
   Timer? timer;
   bool isLoading = false;
   static List<Map<String, dynamic>> _cachedContent = [];
@@ -557,10 +572,14 @@ class FeaturedSliderLiteState extends State<FeaturedSliderLite> {
       );
       setState(() {
         backgroundColor = paletteGenerator.dominantColor?.color ?? Colors.black;
+        widget.onBackgroundColorChanged?.call(backgroundColor);
       });
     } catch (e) {
       debugPrint("Error extracting color: $e");
-      setState(() => backgroundColor = Colors.black);
+      setState(() {
+        backgroundColor = Colors.black;
+        widget.onBackgroundColorChanged?.call(backgroundColor);
+      });
     }
   }
 
@@ -596,12 +615,11 @@ class FeaturedSliderLiteState extends State<FeaturedSliderLite> {
       height: 320,
       child: isLoading || featuredContent.isEmpty
           ? buildFeaturedPlaceholder()
-          : Container(
-              color: backgroundColor, // Dynamic background color
+          : Padding(
               padding: const EdgeInsets.all(16.0),
               child: Center(
                 child: SizedBox(
-                  width: screenWidth * 0.9, // 90% of screen width
+                  width: screenWidth * 0.9,
                   child: FeaturedMovieCardLite(
                     imageUrl: getImageUrl(featuredContent[currentIndex]),
                     title: (featuredContent[currentIndex]['title'] as String?)?.trim().isNotEmpty == true

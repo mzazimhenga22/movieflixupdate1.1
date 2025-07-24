@@ -212,32 +212,65 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
     }
   }
 
-  Future<void> _refreshProfiles() async {
-    final user = UserManager.instance.currentUser.value;
-    if (user == null) {
-      debugPrint('❌ No user, clearing profiles');
-      _profilesController.add([]);
-      _profiles = [];
-      setState(() {});
-      return;
+Future<void> _refreshProfiles() async {
+  final user = UserManager.instance.currentUser.value;
+  if (user == null) {
+    debugPrint('❌ No user, clearing profiles');
+    _profilesController.add([]);
+    _profiles = [];
+    setState(() {});
+    return;
+  }
+  final userId = user['id']?.toString() ?? '';
+  if (userId.isEmpty) {
+    debugPrint('❌ Invalid user ID');
+    _profilesController.add([]);
+    _profiles = [];
+    setState(() {});
+    return;
+  }
+  try {
+    // Try Firestore first
+    final snapshot = await _firestore
+        .collection('profiles')
+        .where('user_id', isEqualTo: userId)
+        .where('locked', isEqualTo: 0)
+        .orderBy('created_at')
+        .get();
+    
+    List<Map<String, dynamic>> profiles = [];
+    if (snapshot.docs.isNotEmpty) {
+      debugPrint('🔄 Found ${snapshot.docs.length} profiles in Firestore');
+      for (var doc in snapshot.docs) {
+        final profileData = doc.data();
+        profileData['id'] = doc.id;
+        // Sync to local database
+        await AuthDatabase.instance.updateProfile(profileData);
+        profiles.add(profileData);
+      }
+    } else {
+      debugPrint('ℹ️ No profiles in Firestore, falling back to local database');
+      // Fall back to local database
+      profiles = await AuthDatabase.instance.getProfilesByUserId(userId);
     }
-    final userId = user['id']?.toString() ?? '';
-    if (userId.isEmpty) {
-      debugPrint('❌ Invalid user ID');
-      _profilesController.add([]);
-      _profiles = [];
-      setState(() {});
-      return;
-    }
+
+    debugPrint(
+        '🔄 Refreshed ${profiles.length} profiles: ${profiles.map((p) => p['name'])}');
+    _profiles = List.from(profiles);
+    _profilesController.add(_profiles);
+    setState(() {});
+  } catch (e) {
+    debugPrint('❌ Error refreshing profiles: $e');
+    // Fall back to local database on error
     try {
       final profiles = await AuthDatabase.instance.getProfilesByUserId(userId);
       debugPrint(
-          '🔄 Refreshed ${profiles.length} profiles: ${profiles.map((p) => p['name'])}');
+          '🔄 Fallback: Refreshed ${profiles.length} profiles from local database');
       _profiles = List.from(profiles);
       _profilesController.add(_profiles);
       setState(() {});
-    } catch (e) {
-      debugPrint('❌ Error refreshing profiles: $e');
+    } catch (localError) {
+      debugPrint('❌ Error fetching from local database: $localError');
       _profilesController.add([]);
       _profiles = [];
       setState(() {});
@@ -247,6 +280,7 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
       }
     }
   }
+}
 
   String _processUrl(String url) {
     url = url.trim();
