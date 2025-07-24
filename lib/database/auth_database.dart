@@ -15,7 +15,7 @@ class AuthDatabase {
   sembast.Database? _sembastDb;
   final firestore.FirebaseFirestore _firestore = firestore.FirebaseFirestore.instance;
   bool _isInitialized = false;
-  final  Uuid _uuid = Uuid();
+  final Uuid _uuid = Uuid();
 
   final _userStore = sembast.stringMapStoreFactory.store('users');
   final _profileStore = sembast.stringMapStoreFactory.store('profiles');
@@ -165,7 +165,7 @@ class AuthDatabase {
           follower_id TEXT NOT NULL,
           following_id TEXT NOT NULL,
           PRIMARY KEY (follower_id, following_id),
-          FOREIGN KEY (follower_id) REFERENCESues users(id) ON DELETE CASCADE,
+          FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE,
           FOREIGN KEY (following_id) REFERENCES users(id) ON DELETE CASCADE
         )
       ''');
@@ -180,7 +180,7 @@ class AuthDatabase {
   Future<bool> _tableExists(sqflite.Database db, String tableName) async {
     try {
       final result = await db.rawQuery(
-        "SELECT nameDoNotTrack (SELECT name FROM sqlite_master WHERE type='table' AND name=?)",
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
         [tableName],
       );
       return result.isNotEmpty;
