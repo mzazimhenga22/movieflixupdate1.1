@@ -30,6 +30,9 @@ import 'chat_screen.dart';
 import 'package:video_player/video_player.dart' as vp;
 import 'package:path/path.dart' as p;
 import 'PostStoryScreen.dart';
+import 'chatutils.dart' as chatUtils;
+
+
 
 class VideoPlayer extends StatefulWidget {
   final String videoUrl;
@@ -1016,27 +1019,45 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen>
                       onPressed: () async {
                         final choice = await showModalBottomSheet<String>(
                           context: context,
-                          builder: (context) => Container(
-  color: Colors.black87, // Or any dark color you like
-  child: SafeArea(
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        ListTile(
-          leading: const Icon(Icons.photo, color: Colors.white),
-          title: const Text("Upload Photo", style: TextStyle(color: Colors.white)),
-          onTap: () => Navigator.pop(context, 'photo'),
-        ),
-        ListTile(
-          leading: const Icon(Icons.videocam, color: Colors.white),
-          title: const Text("Upload Video", style: TextStyle(color: Colors.white)),
-          onTap: () => Navigator.pop(context, 'video'),
-        ),
-      ],
-    ),
-  ),
-),
-
+                          builder:
+                              (context) => Container(
+                                color:
+                                    Colors
+                                        .black87, // Or any dark color you like
+                                child: SafeArea(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      ListTile(
+                                        leading: const Icon(
+                                          Icons.photo,
+                                          color: Colors.white,
+                                        ),
+                                        title: const Text(
+                                          "Upload Photo",
+                                          style: TextStyle(color: Colors.white),
+                                        ),
+                                        onTap:
+                                            () =>
+                                                Navigator.pop(context, 'photo'),
+                                      ),
+                                      ListTile(
+                                        leading: const Icon(
+                                          Icons.videocam,
+                                          color: Colors.white,
+                                        ),
+                                        title: const Text(
+                                          "Upload Video",
+                                          style: TextStyle(color: Colors.white),
+                                        ),
+                                        onTap:
+                                            () =>
+                                                Navigator.pop(context, 'video'),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
                         );
                         if (choice != null) {
                           final picked = await pickFile(choice);
@@ -1849,29 +1870,30 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen>
         actions: [
           IconButton(
             icon: const Icon(Icons.message, color: Colors.white, size: 22),
-            onPressed:
-                () =>
-                    _currentUser != null
-                        ? Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder:
-                                (_) => MessagesScreen(
-                                  currentUser: _currentUser!,
-                                  otherUsers:
-                                      _users
-                                          .where(
-                                            (u) =>
-                                                u['email'] !=
-                                                _currentUser!['email'],
-                                          )
-                                          .toList(),
-                                ),
-                          ),
-                        )
-                        : ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text("User data not loaded")),
+            onPressed: () {
+              if (_currentUser != null) {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder:
+                        (_) => MessagesScreen(
+                          currentUser: _currentUser!,
+                          otherUsers:
+                              _users
+                                  .where(
+                                    (u) => u['email'] != _currentUser!['email'],
+                                  )
+                                  .toList(),
+                                   accentColor: widget.accentColor,
                         ),
+                  ),
+                );
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("User data not loaded")),
+                );
+              }
+            },
           ),
           IconButton(
             icon: const Icon(Icons.search, color: Colors.white, size: 22),
@@ -2021,14 +2043,22 @@ class NewChatScreen extends StatefulWidget {
 
 class NewChatScreenState extends State<NewChatScreen> {
   void _startChat(Map<String, dynamic> user) {
+    String chatId = chatUtils.getChatId(widget.currentUser['id'], user['id']); // ✅ Use getChatId from chatutils
+
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder:
-            (_) => IndividualChatScreen(
-              currentUser: widget.currentUser,
-              otherUser: {'id': user['id'], 'username': user['username']},
-            ),
+        builder: (_) => ChatScreen(
+          chatId: chatId,
+          currentUser: widget.currentUser,
+          otherUser: {
+            'id': user['id'],
+            'username': user['username'],
+            'photoUrl': user['photoUrl'],
+          },
+          authenticatedUser: widget.currentUser,
+          storyInteractions: const [],
+        ),
       ),
     );
   }
@@ -2104,21 +2134,23 @@ class NewChatScreenState extends State<NewChatScreen> {
                       child: ListView.separated(
                         padding: const EdgeInsets.all(16),
                         itemCount: widget.otherUsers.length,
-                        separatorBuilder:
-                            (_, __) =>
-                                const Divider(height: 1, color: Colors.white54),
+                        separatorBuilder: (_, __) =>
+                            const Divider(height: 1, color: Colors.white54),
                         itemBuilder: (context, index) {
                           final user = widget.otherUsers[index];
                           return ListTile(
                             leading: CircleAvatar(
                               backgroundColor: widget.accentColor,
                               child: Text(
-                                user['username'][0].toUpperCase(),
+                                user['username'] != null &&
+                                        user['username'].isNotEmpty
+                                    ? user['username'][0].toUpperCase()
+                                    : '?',
                                 style: const TextStyle(color: Colors.white),
                               ),
                             ),
                             title: Text(
-                              user['username']!,
+                              user['username'] ?? 'Unknown',
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 14,

@@ -15,7 +15,7 @@ class AuthDatabase {
   sembast.Database? _sembastDb;
   final firestore.FirebaseFirestore _firestore = firestore.FirebaseFirestore.instance;
   bool _isInitialized = false;
-  final  Uuid _uuid = Uuid();
+  final Uuid _uuid = Uuid();
 
   final _userStore = sembast.stringMapStoreFactory.store('users');
   final _profileStore = sembast.stringMapStoreFactory.store('profiles');
@@ -165,7 +165,7 @@ class AuthDatabase {
           follower_id TEXT NOT NULL,
           following_id TEXT NOT NULL,
           PRIMARY KEY (follower_id, following_id),
-          FOREIGN KEY (follower_id) REFERENCESues users(id) ON DELETE CASCADE,
+          FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE,
           FOREIGN KEY (following_id) REFERENCES users(id) ON DELETE CASCADE
         )
       ''');
@@ -180,7 +180,7 @@ class AuthDatabase {
   Future<bool> _tableExists(sqflite.Database db, String tableName) async {
     try {
       final result = await db.rawQuery(
-        "SELECT nameDoNotTrack (SELECT name FROM sqlite_master WHERE type='table' AND name=?)",
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
         [tableName],
       );
       return result.isNotEmpty;
@@ -259,6 +259,7 @@ class AuthDatabase {
       'scheduled_at': data['scheduled_at']?.toString(),
       'delete_after': data['delete_after']?.toString(),
     };
+    
   }
 
   Map<String, dynamic> _normalizeUserData(Map<String, dynamic> user) {
@@ -472,21 +473,30 @@ class AuthDatabase {
     }
   }
 
-  Future<void> _insertOrUpdateMessage(Map<String, dynamic> message) async {
-    final messageId = message['id']?.toString() ?? '';
-    if (messageId.isEmpty) throw Exception('Message ID cannot be empty');
-    final messageData = _normalizeMessageData(message);
-    if (kIsWeb) {
-      await _messageStore.record(messageId).put(await database, messageData);
-    } else {
-      final db = await database as sqflite.Database;
-      await db.insert(
-        'messages',
-        {...messageData, 'reactions': jsonEncode(messageData['reactions'])},
-        conflictAlgorithm: sqflite.ConflictAlgorithm.replace,
-      );
+ Future<void> _insertOrUpdateMessage(Map<String, dynamic> message) async {
+  final messageId = message['id']?.toString() ?? '';
+  if (messageId.isEmpty) throw Exception('Message ID cannot be empty');
+  final messageData = _normalizeMessageData(message);
+  debugPrint("Inserting message $messageId with sender_id: ${messageData['sender_id']}");
+  if (kIsWeb) {
+    await _messageStore.record(messageId).put(await database, messageData);
+  } else {
+    final db = await database as sqflite.Database;
+    await db.insert(
+      'messages',
+      {...messageData, 'reactions': jsonEncode(messageData['reactions'])},
+      conflictAlgorithm: sqflite.ConflictAlgorithm.replace,
+    );
+  }
+  // Verify insertion
+  if (!kIsWeb) {
+    final db = await database as sqflite.Database;
+    final result = await db.query('messages', where: 'id = ?', whereArgs: [messageId]);
+    if (result.isNotEmpty) {
+      debugPrint("Inserted message $messageId: ${result.first}");
     }
   }
+}
 
   Future<void> _deleteMessageLocally(String messageId) async {
     if (kIsWeb) {

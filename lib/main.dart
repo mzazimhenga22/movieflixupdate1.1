@@ -8,6 +8,7 @@ import 'package:movie_app/database/auth_database.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:movie_app/l10n/app_localizations.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:movie_app/components/socialsection/ProfileScreen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -54,9 +55,7 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: Colors.black,
-        colorScheme: ColorScheme.dark(
-          primary: settings.accentColor,
-        ),
+        colorScheme: ColorScheme.dark(primary: settings.accentColor),
         appBarTheme: AppBarTheme(
           backgroundColor: Colors.black,
           foregroundColor: settings.accentColor,
@@ -79,6 +78,17 @@ class MyApp extends StatelessWidget {
       ],
       supportedLocales: AppLocalizations.supportedLocales,
       home: const SplashScreen(),
+
+      // ✅ Register route with arguments
+      onGenerateRoute: (RouteSettings settings) {
+        if (settings.name == '/profile') {
+          final user = settings.arguments as Map<String, dynamic>;
+          return MaterialPageRoute(
+            builder: (context) => ProfileScreen(user: user),
+          );
+        }
+        return null;
+      },
     );
   }
 }

@@ -1341,7 +1341,6 @@ class _GroupChatScreenState extends State<GroupChatScreen>
           audioPlayer: _audioPlayer,
           setCurrentlyPlaying: _setCurrentlyPlaying,
           currentlyPlayingId: _currentlyPlayingId,
-          encrypter: _encrypter,
           isRead:
               message['read_by'].contains(widget.currentUser['id'].toString()),
           isStoryReply: false,

@@ -3,7 +3,6 @@ import 'package:intl/intl.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:video_player/video_player.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:encrypt/encrypt.dart' as encrypt;
 
 class MessageWidget extends StatefulWidget {
   final Map<String, dynamic> message;
@@ -17,7 +16,6 @@ class MessageWidget extends StatefulWidget {
   final AudioPlayer audioPlayer;
   final Function(String?) setCurrentlyPlaying;
   final String? currentlyPlayingId;
-  final encrypt.Encrypter encrypter;
   final bool isRead;
   final bool isStoryReply;
 
@@ -34,7 +32,6 @@ class MessageWidget extends StatefulWidget {
     required this.audioPlayer,
     required this.setCurrentlyPlaying,
     required this.currentlyPlayingId,
-    required this.encrypter,
     required this.isRead,
     required this.isStoryReply,
   });
@@ -126,7 +123,20 @@ class _MessageWidgetState extends State<MessageWidget> {
     final messageTime = DateTime.parse(widget.message['created_at'].toString());
     final formattedTime = DateFormat('h:mm a').format(messageTime);
     final type = widget.message['type']?.toString() ?? 'text';
-    final reactions = widget.message['reactions'] as Map<String, List<String>>? ?? {};
+
+    // SAFELY cast and transform reactions
+    final Map<String, List<String>> reactions = {};
+    final rawReactions = widget.message['reactions'];
+
+    if (rawReactions is Map) {
+      rawReactions.forEach((key, value) {
+        if (value is List) {
+          reactions[key.toString()] = value.map((v) => v.toString()).toList();
+        }
+      });
+    }
+
+    print("Message ${widget.message['id']}: isMe=${widget.isMe}, sender_id=${widget.message['sender_id']}, expected currentUserId=${widget.message['sender_id'] == 'AQ3a6f3q6Cae0TVjF6qDm7oN3fA3'}"); // Log isMe and sender_id
 
     Widget content;
 
@@ -247,8 +257,11 @@ class _MessageWidgetState extends State<MessageWidget> {
               ),
             _buildSenderName(),
             Text(
-              widget.message['message'] ?? '[No message content]',
-              style: TextStyle(fontSize: 14, color: widget.isMe ? Colors.white : Colors.black87),
+              widget.message['message']?.toString() ?? '[No message content]',
+              style: TextStyle(
+                fontSize: 14,
+                color: widget.isMe ? const Color.fromARGB(255, 197, 0, 0) : Colors.black87,
+              ),
             ),
             _buildTimeRow(formattedTime),
             if (widget.message['is_pinned'] == true)

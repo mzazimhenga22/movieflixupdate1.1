@@ -615,37 +615,48 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                   ),
                                   const SizedBox(height: 16),
                                   ElevatedButton.icon(
-                                    onPressed: () {
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (context) =>
-                                              IndividualChatScreen(
-                                            currentUser: {
-                                              'id': currentUser.uid,
-                                              'username':
-                                                  currentUser.displayName ??
-                                                      'User',
-                                            },
-                                            otherUser: _user,
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                    icon: const Icon(Icons.message, size: 20),
-                                    label: const Text("Message",
-                                        style: TextStyle(fontSize: 16)),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: widget.accentColor,
-                                      foregroundColor: Colors.white,
-                                      shape: RoundedRectangleBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(12)),
-                                      padding: const EdgeInsets.symmetric(
-                                          vertical: 12, horizontal: 20),
-                                      minimumSize:
-                                          const Size(double.infinity, 48),
-                                    ),
+onPressed: () {
+  final chatId = currentUser.uid.compareTo(_user['id']) < 0
+      ? '${currentUser.uid}_${_user['id']}'
+      : '${_user['id']}_${currentUser.uid}';
+
+  Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (context) => ChatScreen(
+        chatId: chatId,
+        currentUser: {
+          'id': currentUser.uid,
+          'username': currentUser.displayName ?? 'User',
+        },
+        otherUser: _user,
+        authenticatedUser: {
+          'id': currentUser.uid,
+          'username': currentUser.displayName ?? 'User',
+        },
+        storyInteractions: const [],
+      ),
+    ),
+  );
+},
+icon: const Icon(Icons.message, size: 20),
+label: const Text(
+  "Message",
+  style: TextStyle(fontSize: 16),
+),
+style: ElevatedButton.styleFrom(
+  backgroundColor: widget.accentColor,
+  foregroundColor: Colors.white,
+  shape: RoundedRectangleBorder(
+    borderRadius: BorderRadius.circular(12),
+  ),
+  padding: const EdgeInsets.symmetric(
+    vertical: 12,
+    horizontal: 20,
+  ),
+  minimumSize: const Size(double.infinity, 48),
+),
+
                                   ),
                                 ],
                               ),

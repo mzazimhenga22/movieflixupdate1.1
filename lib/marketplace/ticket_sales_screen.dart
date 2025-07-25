@@ -102,9 +102,13 @@ class _TicketSalesScreenState extends State<TicketSalesScreen> {
     }
   }
 
+  String _generateChatId(String id1, String id2) {
+    return id1.hashCode <= id2.hashCode ? '$id1-$id2' : '$id2-$id1';
+  }
+
   @override
   Widget build(BuildContext context) {
-    const accent = Colors.blueAccent; // Fallback accent color
+    const accent = Colors.blueAccent;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -270,7 +274,7 @@ class _TicketSalesScreenState extends State<TicketSalesScreen> {
               onPressed: () async {
                 developer.log('Navigating to CheckoutScreen',
                     name: 'Navigation');
-                final currentContext = context; // Store context before async
+                final currentContext = context;
                 final itemsList = (await _ticketsFuture)
                     .where((t) =>
                         _cart.containsKey(t.id!) && t is MarketplaceTicket)
@@ -360,26 +364,39 @@ class _TicketSalesScreenState extends State<TicketSalesScreen> {
             onPressed: () {
               Navigator.pop(context);
               developer.log(
-                  'Navigating to IndividualChatScreen for ticket ${ticket.id}',
-                  name: 'Navigation');
+                'Navigating to ChatScreen for ticket ${ticket.id}',
+                name: 'Navigation',
+              );
+
+              final chatId = _generateChatId(
+                widget.userEmail,
+                ticket.sellerEmail ?? 'seller@example.com',
+              );
+
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => IndividualChatScreen(
+                  builder: (_) => ChatScreen(
+                    chatId: chatId,
                     currentUser: {
-                      'id': widget.userEmail, // Using email as a unique ID
+                      'id': widget.userEmail,
                       'username': widget.userName,
                     },
                     otherUser: {
                       'id': ticket.sellerEmail ?? 'seller@example.com',
                       'username': ticket.sellerName ?? 'Seller',
                     },
+                    authenticatedUser: {
+                      'id': widget.userEmail,
+                      'username': widget.userName,
+                    },
+                    storyInteractions: const [],
                   ),
                 ),
               );
             },
-            child:
-                Text('Chat', style: GoogleFonts.poppins(color: Colors.white)),
+            child: Text('Chat',
+                style: GoogleFonts.poppins(color: Colors.white)),
           ),
         ],
       ),
