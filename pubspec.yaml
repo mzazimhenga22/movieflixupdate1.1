@@ -33,7 +33,6 @@ dependencies:
   just_audio: ^0.10.4
   just_waveform: ^0.0.7
 
-
   # Device Features
   screen_brightness: ^2.1.0
   image_picker: ^1.1.2
@@ -51,7 +50,6 @@ dependencies:
   flutter_local_notifications: ^19.4.0
   flutter_webrtc: ^1.0.0
   system_info: ^1.0.1
-
 
   # Storage & Database
   shared_preferences: ^2.5.3
@@ -94,7 +92,9 @@ dependencies:
   crypto: ^3.0.3
   stream_transform: ^2.0.0
   fl_pip: 3.2.1
-  flutter_keyboard_visibility: ^6.0.0
+  flutter_keyboard_visibility:
+    git:
+      url: https://github.com/mzazimhenga22/flutter_keyboard_visibility.git
 
   # Downloads
   flutter_downloader: ^1.12.0
@@ -128,10 +128,10 @@ flutter:
     - assets/icon/movieposter.jpg
     - assets/cinema.jpg
 
-
 flutter_launcher_icons:
   android: true
   ios: true
   image_path: "assets/icon/movieflixiconv1.png"
   adaptive_icon_background: "#ffffff"
   adaptive_icon_foreground: "assets/icon/movieflixiconv1.png"
+
