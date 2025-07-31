@@ -94,7 +94,7 @@ dependencies:
   fl_pip: 3.2.1
   flutter_keyboard_visibility:
     git:
-      url: https://github.com/mzazimhenga22/flutter_keyboard_visibility.git
+      url: https://github.com/floatvoid/flutter_keyboard_visibility.git
 
   # Downloads
   flutter_downloader: ^1.12.0
