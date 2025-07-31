@@ -94,7 +94,7 @@ dependencies:
   crypto: ^3.0.3
   stream_transform: ^2.0.0
   fl_pip: 3.2.1
-  flutter_keyboard_visibility: ^5.4.1
+  flutter_keyboard_visibility: ^6.0.0
 
   # Downloads
   flutter_downloader: ^1.12.0
