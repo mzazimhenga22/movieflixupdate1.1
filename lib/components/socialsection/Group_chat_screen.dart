@@ -10,7 +10,6 @@ import 'widgets/typing_area.dart';
 import 'widgets/GroupChatList.dart';
 import 'package:movie_app/utils/read_status_utils.dart';
 
-
 class GroupChatScreen extends StatefulWidget {
   final String chatId;
   final Map<String, dynamic> currentUser;
@@ -34,7 +33,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   List<Map<String, dynamic>> groupMembers = [];
   Map<String, dynamic>? groupData;
   int _onlineCount = 0;
-  Map<String, dynamic>? replyingTo;
+  QueryDocumentSnapshot<Object?>? replyingTo;
+  bool _isLoading = true; // Track loading state
 
   @override
   void initState() {
@@ -42,7 +42,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     _loadChatBackground();
     _loadGroupDataAndListen();
     markGroupAsRead(widget.chatId, widget.currentUser['id']);
-
   }
 
   Future<void> _loadChatBackground() async {
@@ -52,7 +51,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     });
   }
 
-  void _onReplyToMessage(Map<String, dynamic> message) {
+  void _onReplyToMessage(QueryDocumentSnapshot<Object?> message) {
     setState(() {
       replyingTo = message;
     });
@@ -65,36 +64,50 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   void _loadGroupDataAndListen() async {
-    final chatDoc = await FirebaseFirestore.instance
-        .collection('groups')
-        .doc(widget.chatId)
-        .get();
+    try {
+      final chatDoc = await FirebaseFirestore.instance
+          .collection('groups')
+          .doc(widget.chatId)
+          .get();
 
-    if (chatDoc.exists && chatDoc.data()!['isGroup'] == true) {
-      final memberIds = List<String>.from(chatDoc.data()!['userIds'] ?? []);
-      final membersSnapshots = await Future.wait(memberIds.map(
-        (uid) => FirebaseFirestore.instance.collection('users').doc(uid).get(),
-      ));
+      if (chatDoc.exists && chatDoc.data()!['isGroup'] == true) {
+        final memberIds = List<String>.from(chatDoc.data()!['userIds'] ?? []);
+        final membersSnapshots = await Future.wait(memberIds.map(
+          (uid) => FirebaseFirestore.instance.collection('users').doc(uid).get(),
+        ));
 
-      setState(() {
-        groupData = chatDoc.data();
-        groupMembers = membersSnapshots
-            .where((doc) => doc.exists)
-            .map((doc) => doc.data()!..['id'] = doc.id)
-            .toList();
-      });
-
-      FirebaseFirestore.instance
-          .collection('users')
-          .where(FieldPath.documentId, whereIn: memberIds)
-          .snapshots()
-          .listen((snapshot) {
-        int online =
-            snapshot.docs.where((doc) => doc.data()['isOnline'] == true).length;
         setState(() {
-          _onlineCount = online;
+          groupData = chatDoc.data();
+          groupMembers = membersSnapshots
+              .where((doc) => doc.exists)
+              .map((doc) => doc.data()!..['id'] = doc.id)
+              .toList();
+          _isLoading = false; // Data loaded
         });
+
+        FirebaseFirestore.instance
+            .collection('users')
+            .where(FieldPath.documentId, whereIn: memberIds)
+            .snapshots()
+            .listen((snapshot) {
+          int online =
+              snapshot.docs.where((doc) => doc.data()['isOnline'] == true).length;
+          setState(() {
+            _onlineCount = online;
+          });
+        });
+      } else {
+        setState(() {
+          _isLoading = false; // Handle case where group doesn't exist
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _isLoading = false; // Handle error
       });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load group data: $e')),
+      );
     }
   }
 
@@ -123,8 +136,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }, SetOptions(merge: true));
   }
 
-  
-
   void sendFile(File file) {
     print("Sending file: ${file.path}");
     // TODO: Implement file upload and sending
@@ -152,6 +163,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       });
     } catch (e) {
       print("Voice call failed: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to start voice call: $e')),
+      );
     }
   }
 
@@ -172,6 +186,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       });
     } catch (e) {
       print("Video call failed: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to start video call: $e')),
+      );
     }
   }
 
@@ -179,9 +196,67 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   Widget build(BuildContext context) {
     final screenHeight = MediaQuery.of(context).size.height;
 
-    if (groupData == null) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
+    if (_isLoading || groupData == null) {
+      return Scaffold(
+        body: Container(
+          decoration: BoxDecoration(
+            gradient: RadialGradient(
+              center: const Alignment(-0.1, -0.4),
+              radius: 1.2,
+              colors: [widget.accentColor.withOpacity(0.4), Colors.black],
+            ),
+          ),
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  width: 60,
+                  height: 60,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      colors: [
+                        widget.accentColor,
+                        widget.accentColor.withOpacity(0.6),
+                      ],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                  ),
+                  child: const CircularProgressIndicator(
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    strokeWidth: 3,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Loading Group Chat...',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    shadows: [
+                      Shadow(
+                        blurRadius: 4,
+                        color: widget.accentColor.withOpacity(0.5),
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Fetching group details',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       );
     }
 

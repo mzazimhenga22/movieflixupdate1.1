@@ -1,4 +1,3 @@
-
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -153,30 +152,29 @@ class _MessagesScreenState extends State<MessagesScreen> with SingleTickerProvid
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               Container(
-  width: 80,
-  height: 80,
-  decoration: const BoxDecoration(
-    shape: BoxShape.circle,
-    gradient: LinearGradient(
-      colors: [Color.fromARGB(255, 224, 0, 0), Color(0xFF8E2DE2)], // Example gradient
-      begin: Alignment.topLeft,
-      end: Alignment.bottomRight,
-    ),
-  ),
-  child: widget.currentUser['photoUrl'] != null
-      ? CircleAvatar(
-          radius: 40,
-          backgroundImage: NetworkImage(widget.currentUser['photoUrl']),
-          backgroundColor: Colors.transparent,
-        )
-      : Center(
-          child: Text(
-            widget.currentUser['username']?[0]?.toUpperCase() ?? 'U',
-            style: const TextStyle(color: Colors.white, fontSize: 24),
-          ),
-        ),
-),
-
+                                width: 80,
+                                height: 80,
+                                decoration: const BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  gradient: LinearGradient(
+                                    colors: [Color.fromARGB(255, 224, 0, 0), Color(0xFF8E2DE2)],
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                  ),
+                                ),
+                                child: widget.currentUser['photoUrl'] != null
+                                    ? CircleAvatar(
+                                        radius: 40,
+                                        backgroundImage: NetworkImage(widget.currentUser['photoUrl']),
+                                        backgroundColor: Colors.transparent,
+                                      )
+                                    : Center(
+                                        child: Text(
+                                          widget.currentUser['username']?[0]?.toUpperCase() ?? 'U',
+                                          style: const TextStyle(color: Colors.white, fontSize: 24),
+                                        ),
+                                      ),
+                              ),
                               const SizedBox(height: 8),
                               Text(
                                 widget.currentUser['username'] ?? 'User',
@@ -200,52 +198,55 @@ class _MessagesScreenState extends State<MessagesScreen> with SingleTickerProvid
                 ),
                 actions: controller.selectedChatId != null
                     ? [
-                        FutureBuilder<bool>(
-                          future: controller.isUserBlocked(controller.selectedOtherUser?['id']),
-                          builder: (context, snapshot) {
-                            final isBlocked = snapshot.data ?? false;
-                            return IconButton(
-                              icon: Icon(
-                                isBlocked ? Icons.lock_open : Icons.block,
-                                color: widget.accentColor,
-                              ),
-                              onPressed: isBlocked ? controller.unblockUser : controller.blockUser,
-                              tooltip: isBlocked ? 'Unblock User' : 'Block User',
-                            );
-                          },
+                        if (controller.selectedOtherUser != null) // Only for 1:1 chats
+                          IconButton(
+                            icon: Icon(
+                              controller.isUserBlocked(controller.selectedOtherUser!['id'])
+                                  ? Icons.lock_open
+                                  : Icons.block,
+                              color: widget.accentColor,
+                            ),
+                            onPressed: controller.isUserBlocked(controller.selectedOtherUser!['id'])
+                                ? controller.unblockUser
+                                : controller.blockUser,
+                            tooltip: controller.isUserBlocked(controller.selectedOtherUser!['id'])
+                                ? 'Unblock User'
+                                : 'Block User',
+                          ),
+                        IconButton(
+                          icon: Icon(
+                            controller.isUserMuted(controller.selectedOtherUser != null
+                                    ? controller.selectedOtherUser!['id']
+                                    : controller.selectedChatId!)
+                                ? Icons.volume_up
+                                : Icons.volume_off,
+                            color: widget.accentColor,
+                          ),
+                          onPressed: controller.isUserMuted(controller.selectedOtherUser != null
+                                  ? controller.selectedOtherUser!['id']
+                                  : controller.selectedChatId!)
+                              ? (controller.selectedOtherUser != null ? controller.unmuteUser : controller.unmuteGroup)
+                              : (controller.selectedOtherUser != null ? controller.muteUser : controller.muteGroup),
+                          tooltip: controller.isUserMuted(controller.selectedOtherUser != null
+                                  ? controller.selectedOtherUser!['id']
+                                  : controller.selectedChatId!)
+                              ? 'Unmute'
+                              : 'Mute',
                         ),
-                        FutureBuilder<bool>(
-                          future: controller.isUserMuted(controller.selectedOtherUser?['id']),
-                          builder: (context, snapshot) {
-                            final isMuted = snapshot.data ?? false;
-                            return IconButton(
-                              icon: Icon(
-                                isMuted ? Icons.volume_up : Icons.volume_off,
-                                color: widget.accentColor,
-                              ),
-                              onPressed: isMuted ? controller.unmuteUser : controller.muteUser,
-                              tooltip: isMuted ? 'Unmute User' : 'Mute User',
-                            );
-                          },
-                        ),
-                        FutureBuilder<bool>(
-                          future: controller.isChatPinned(controller.selectedChatId!),
-                          builder: (context, snapshot) {
-                            final isPinned = snapshot.data ?? false;
-                            return IconButton(
-                              icon: Icon(
-                                isPinned ? Icons.push_pin_outlined : Icons.push_pin,
-                                color: widget.accentColor,
-                              ),
-                              onPressed: isPinned ? controller.unpinConversation : controller.pinConversation,
-                              tooltip: isPinned ? 'Unpin Conversation' : 'Pin Conversation',
-                            );
-                          },
+                        IconButton(
+                          icon: Icon(
+                            controller.isChatPinned(controller.selectedChatId!) ? Icons.push_pin_outlined : Icons.push_pin,
+                            color: widget.accentColor,
+                          ),
+                          onPressed: controller.isChatPinned(controller.selectedChatId!)
+                              ? controller.unpinConversation
+                              : controller.pinConversation,
+                          tooltip: controller.isChatPinned(controller.selectedChatId!) ? 'Unpin Conversation' : 'Pin Conversation',
                         ),
                         IconButton(
                           icon: Icon(Icons.delete, color: widget.accentColor),
                           onPressed: controller.deleteConversation,
-                          tooltip: 'Delete Conversation',
+                          tooltip: controller.selectedOtherUser != null ? 'Delete Conversation' : 'Leave Group',
                         ),
                         IconButton(
                           icon: Icon(Icons.close, color: widget.accentColor),
@@ -305,7 +306,62 @@ class _MessagesScreenState extends State<MessagesScreen> with SingleTickerProvid
                                   future: fetchChatsAndGroups(currentUserId, tab),
                                   builder: (context, snapshot) {
                                     if (!snapshot.hasData) {
-                                      return const Center(child: CircularProgressIndicator());
+                                      return ListView.builder(
+                                        physics: const NeverScrollableScrollPhysics(),
+                                        shrinkWrap: true,
+                                        padding: const EdgeInsets.all(16.0),
+                                        itemCount: 5, // Skeleton items
+                                        itemBuilder: (context, index) => Padding(
+                                          padding: const EdgeInsets.symmetric(vertical: 8),
+                                          child: Card(
+                                            elevation: 4,
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius: BorderRadius.circular(12),
+                                            ),
+                                            child: Container(
+                                              decoration: BoxDecoration(
+                                                gradient: LinearGradient(
+                                                  colors: [
+                                                    widget.accentColor.withOpacity(0.1),
+                                                    widget.accentColor.withOpacity(0.3),
+                                                  ],
+                                                  begin: Alignment.topLeft,
+                                                  end: Alignment.bottomRight,
+                                                ),
+                                                borderRadius: BorderRadius.circular(12),
+                                                border: Border.all(
+                                                  color: widget.accentColor.withOpacity(0.3),
+                                                ),
+                                              ),
+                                              child: ListTile(
+                                                leading: Container(
+                                                  width: 40,
+                                                  height: 40,
+                                                  decoration: BoxDecoration(
+                                                    shape: BoxShape.circle,
+                                                    color: Colors.white.withOpacity(0.2),
+                                                  ),
+                                                ),
+                                                title: Container(
+                                                  width: 100,
+                                                  height: 16,
+                                                  color: Colors.white.withOpacity(0.2),
+                                                ),
+                                                subtitle: Container(
+                                                  width: 150,
+                                                  height: 12,
+                                                  color: Colors.white.withOpacity(0.1),
+                                                ),
+                                                trailing: Container(
+                                                  width: 50,
+                                                  height: 12,
+                                                  color: Colors.white.withOpacity(0.1),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      );
                                     }
 
                                     final chats = snapshot.data!.where((doc) {
@@ -453,26 +509,14 @@ class _MessagesScreenState extends State<MessagesScreen> with SingleTickerProvid
                                                   .doc(otherUserId)
                                                   .get(),
                                               builder: (context, userSnapshot) {
-                                                if (!userSnapshot.hasData) return const SizedBox();
-
-                                                final userDoc = userSnapshot.data!;
-                                                final userData = userDoc.data() as Map<String, dynamic>?;
-
-                                                final photoUrl = userData?['photoUrl'] ?? '';
-                                                final username = userData?['username'] ?? 'Unknown';
-
-                                                return FutureBuilder<bool>(
-                                                  future: controller.isUserBlocked(otherUserId),
-                                                  builder: (context, blockSnapshot) {
-                                                    if (!blockSnapshot.hasData) return const SizedBox();
-                                                    final isBlocked = blockSnapshot.data!;
-
-                                                    return Card(
+                                                if (!userSnapshot.hasData) {
+                                                  return Padding(
+                                                    padding: const EdgeInsets.symmetric(vertical: 8),
+                                                    child: Card(
                                                       elevation: 4,
                                                       shape: RoundedRectangleBorder(
                                                         borderRadius: BorderRadius.circular(12),
                                                       ),
-                                                      margin: const EdgeInsets.symmetric(vertical: 8),
                                                       child: Container(
                                                         decoration: BoxDecoration(
                                                           gradient: LinearGradient(
@@ -489,105 +533,160 @@ class _MessagesScreenState extends State<MessagesScreen> with SingleTickerProvid
                                                           ),
                                                         ),
                                                         child: ListTile(
-                                                          selected: chatId == controller.selectedChatId,
-                                                          selectedTileColor: widget.accentColor.withOpacity(0.1),
-                                                          leading: CircleAvatar(
-                                                            backgroundImage: photoUrl.isNotEmpty
-                                                                ? NetworkImage(photoUrl)
-                                                                : null,
-                                                            child: photoUrl.isEmpty
-                                                                ? Text(
-                                                                    username.isNotEmpty
-                                                                        ? username[0].toUpperCase()
-                                                                        : 'M',
-                                                                    style: const TextStyle(color: Colors.white),
-                                                                  )
-                                                                : null,
+                                                          leading: Container(
+                                                            width: 40,
+                                                            height: 40,
+                                                            decoration: BoxDecoration(
+                                                              shape: BoxShape.circle,
+                                                              color: Colors.white.withOpacity(0.2),
+                                                            ),
                                                           ),
-                                                          title: Row(
-                                                            mainAxisSize: MainAxisSize.min,
-                                                            children: [
-                                                              Text(
-                                                                username,
-                                                                style: TextStyle(
-                                                                  color: widget.accentColor,
+                                                          title: Container(
+                                                            width: 100,
+                                                            height: 16,
+                                                            color: Colors.white.withOpacity(0.2),
+                                                          ),
+                                                          subtitle: Container(
+                                                            width: 150,
+                                                            height: 12,
+                                                            color: Colors.white.withOpacity(0.1),
+                                                          ),
+                                                          trailing: Container(
+                                                            width: 50,
+                                                            height: 12,
+                                                            color: Colors.white.withOpacity(0.1),
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  );
+                                                }
+
+                                                final userDoc = userSnapshot.data!;
+                                                final userData = userDoc.data() as Map<String, dynamic>?;
+
+                                                final photoUrl = userData?['photoUrl'] ?? '';
+                                                final username = userData?['username'] ?? 'Unknown';
+
+                                                return Card(
+                                                  elevation: 4,
+                                                  shape: RoundedRectangleBorder(
+                                                    borderRadius: BorderRadius.circular(12),
+                                                  ),
+                                                  margin: const EdgeInsets.symmetric(vertical: 8),
+                                                  child: Container(
+                                                    decoration: BoxDecoration(
+                                                      gradient: LinearGradient(
+                                                        colors: [
+                                                          widget.accentColor.withOpacity(0.1),
+                                                          widget.accentColor.withOpacity(0.3),
+                                                        ],
+                                                        begin: Alignment.topLeft,
+                                                        end: Alignment.bottomRight,
+                                                      ),
+                                                      borderRadius: BorderRadius.circular(12),
+                                                      border: Border.all(
+                                                        color: widget.accentColor.withOpacity(0.3),
+                                                      ),
+                                                    ),
+                                                    child: ListTile(
+                                                      selected: chatId == controller.selectedChatId,
+                                                      selectedTileColor: widget.accentColor.withOpacity(0.1),
+                                                      leading: CircleAvatar(
+                                                        backgroundImage: photoUrl.isNotEmpty
+                                                            ? NetworkImage(photoUrl)
+                                                            : null,
+                                                        child: photoUrl.isEmpty
+                                                            ? Text(
+                                                                username.isNotEmpty
+                                                                    ? username[0].toUpperCase()
+                                                                    : 'M',
+                                                                style: const TextStyle(color: Colors.white),
+                                                              )
+                                                            : null,
+                                                      ),
+                                                      title: Row(
+                                                        mainAxisSize: MainAxisSize.min,
+                                                        children: [
+                                                          Text(
+                                                            username,
+                                                            style: TextStyle(
+                                                              color: widget.accentColor,
+                                                              fontWeight: FontWeight.bold,
+                                                            ),
+                                                          ),
+                                                          if (unreadCount > 0) ...[
+                                                            const SizedBox(width: 6),
+                                                            Container(
+                                                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                              decoration: BoxDecoration(
+                                                                color: widget.accentColor,
+                                                                borderRadius: BorderRadius.circular(10),
+                                                              ),
+                                                              child: Text(
+                                                                '$unreadCount',
+                                                                style: const TextStyle(
+                                                                  color: Colors.white,
+                                                                  fontSize: 10,
                                                                   fontWeight: FontWeight.bold,
                                                                 ),
                                                               ),
-                                                              if (unreadCount > 0) ...[
-                                                                const SizedBox(width: 6),
-                                                                Container(
-                                                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                                                  decoration: BoxDecoration(
-                                                                    color: widget.accentColor,
-                                                                    borderRadius: BorderRadius.circular(10),
-                                                                  ),
-                                                                  child: Text(
-                                                                    '$unreadCount',
-                                                                    style: const TextStyle(
-                                                                      color: Colors.white,
-                                                                      fontSize: 10,
-                                                                      fontWeight: FontWeight.bold,
-                                                                    ),
+                                                            ),
+                                                          ],
+                                                        ],
+                                                      ),
+                                                      subtitle: Text(
+                                                        lastMessage,
+                                                        style: TextStyle(
+                                                          color: controller.isUserBlocked(otherUserId) ? Colors.grey : Colors.white,
+                                                        ),
+                                                        overflow: TextOverflow.ellipsis,
+                                                      ),
+                                                      trailing: timestamp != null
+                                                          ? Text(
+                                                              TimeOfDay.fromDateTime(timestamp).format(context),
+                                                              style: TextStyle(
+                                                                fontSize: 12,
+                                                                color: widget.accentColor,
+                                                              ),
+                                                            )
+                                                          : null,
+                                                      onTap: controller.isUserBlocked(otherUserId)
+                                                          ? null
+                                                          : () {
+                                                              Navigator.push(
+                                                                context,
+                                                                MaterialPageRoute(
+                                                                  builder: (_) => ChatScreen(
+                                                                    chatId: chatId,
+                                                                    currentUser: widget.currentUser,
+                                                                    otherUser: {
+                                                                      'id': otherUserId,
+                                                                      'username': username,
+                                                                      'photoUrl': photoUrl,
+                                                                    },
+                                                                    authenticatedUser: widget.currentUser,
+                                                                    storyInteractions: const [],
                                                                   ),
                                                                 ),
-                                                              ],
-                                                            ],
-                                                          ),
-                                                          subtitle: Text(
-                                                            lastMessage,
-                                                            style: TextStyle(
-                                                              color: isBlocked ? Colors.grey : Colors.white,
-                                                            ),
-                                                            overflow: TextOverflow.ellipsis,
-                                                          ),
-                                                          trailing: timestamp != null
-                                                              ? Text(
-                                                                  TimeOfDay.fromDateTime(timestamp).format(context),
-                                                                  style: TextStyle(
-                                                                    fontSize: 12,
-                                                                    color: widget.accentColor,
-                                                                  ),
-                                                                )
-                                                              : null,
-                                                          onTap: isBlocked
-                                                              ? null
-                                                              : () {
-                                                                  Navigator.push(
-                                                                    context,
-                                                                    MaterialPageRoute(
-                                                                      builder: (_) => ChatScreen(
-                                                                        chatId: chatId,
-                                                                        currentUser: widget.currentUser,
-                                                                        otherUser: {
-                                                                          'id': otherUserId,
-                                                                          'username': username,
-                                                                          'photoUrl': photoUrl,
-                                                                        },
-                                                                        authenticatedUser: widget.currentUser,
-                                                                        storyInteractions: const [],
-                                                                      ),
-                                                                    ),
-                                                                  );
-                                                                },
-                                                          onLongPress: () {
-                                                            if (controller.selectedChatId == chatId) {
-                                                              controller.clearSelection();
-                                                            } else {
-                                                              setState(() {
-                                                                controller.selectedChatId = chatId;
-                                                                controller.selectedOtherUser = {
-                                                                  'id': otherUserId,
-                                                                  'username': username,
-                                                                  'photoUrl': photoUrl,
-                                                                };
-                                                              });
-                                                            }
-                                                          },
-                                                        ),
-                                                      ),
-                                                    );
-                                                  },
+                                                              );
+                                                            },
+                                                      onLongPress: () {
+                                                        if (controller.selectedChatId == chatId) {
+                                                          controller.clearSelection();
+                                                        } else {
+                                                          setState(() {
+                                                            controller.selectedChatId = chatId;
+                                                            controller.selectedOtherUser = {
+                                                              'id': otherUserId,
+                                                              'username': username,
+                                                              'photoUrl': photoUrl,
+                                                            };
+                                                          });
+                                                        }
+                                                      },
+                                                    ),
+                                                  ),
                                                 );
                                               },
                                             );

@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_sound/flutter_sound.dart';
@@ -10,8 +11,8 @@ class TypingArea extends StatefulWidget {
   final void Function(File file)? onSendFile;
   final void Function(File audio)? onSendAudio;
   final Color accentColor;
-  final Map<String, dynamic>? replyingTo; // NEW
-  final VoidCallback? onCancelReply; // NEW
+  final QueryDocumentSnapshot<Object?>? replyingTo; // Updated type
+  final VoidCallback? onCancelReply;
 
   const TypingArea({
     super.key,
@@ -108,7 +109,7 @@ class _TypingAreaState extends State<TypingArea> {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        // 🔁 Reply Preview UI (Improved)
+        // 🔁 Reply Preview UI
         if (widget.replyingTo != null)
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -230,7 +231,7 @@ class _TypingAreaState extends State<TypingArea> {
               onEmojiSelected: (category, emoji) {
                 _controller.text += emoji.emoji;
               },
-              config: Config(),
+              config: const Config(),
             ),
           ),
       ],

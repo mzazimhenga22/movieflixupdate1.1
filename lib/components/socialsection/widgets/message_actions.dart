@@ -1,5 +1,8 @@
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'message_actions_overlay.dart';
+
 
 
 void showMessageActions({
@@ -8,42 +11,49 @@ void showMessageActions({
   required bool isMe,
   required VoidCallback onReply,
   required VoidCallback onPin,
+  required VoidCallback onDelete,
+  required VoidCallback onBlock,
+  required VoidCallback onForward,
+  required VoidCallback onEdit,
+  required ValueChanged<String> onReactEmoji,
 }) {
-  showModalBottomSheet(
+  showDialog(
     context: context,
-    builder: (context) => Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        ListTile(
-          leading: const Icon(Icons.reply),
-          title: const Text('Reply'),
-          onTap: () {
-            Navigator.pop(context);
-            onReply();
-          },
+    barrierDismissible: true,
+    barrierColor: Colors.transparent,
+    builder: (context) => MessageActionsOverlay(
+      messageWidget: Text(
+        message['text'],
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 16,
         ),
-        if (isMe)
-          ListTile(
-            leading: const Icon(Icons.push_pin),
-            title: const Text('Pin Message'),
-            onTap: () {
-              Navigator.pop(context);
-              onPin();
-            },
-          ),
-        // TODO: Add Delete, Edit, Forward, React etc.
-        ListTile(
-          leading: const Icon(Icons.delete),
-          title: const Text('Delete'),
-          onTap: () {
-            Navigator.pop(context);
-            // Placeholder for delete logic
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Delete not implemented yet')),
-            );
-          },
-        ),
-      ],
+      ),
+      onReactEmoji: onReactEmoji,
+      onReply: () {
+        Navigator.pop(context);
+        onReply();
+      },
+      onPin: () {
+        Navigator.pop(context);
+        onPin();
+      },
+      onDelete: () {
+        Navigator.pop(context);
+        onDelete();
+      },
+      onBlock: () {
+        Navigator.pop(context);
+        onBlock();
+      },
+      onForward: () {
+        Navigator.pop(context);
+        onForward();
+      },
+      onEdit: () {
+        Navigator.pop(context);
+        onEdit();
+      },
     ),
   );
 }

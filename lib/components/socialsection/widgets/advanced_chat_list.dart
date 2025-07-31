@@ -1,8 +1,6 @@
-// /chat/advanced_chat_list.dart
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'message_bubble.dart';
-import 'message_actions.dart';
 import 'reply_preview.dart';
 import 'pinned_message_bar.dart';
 import 'mark_read_unread.dart';
@@ -11,11 +9,13 @@ class AdvancedChatList extends StatefulWidget {
   final String chatId;
   final Map<String, dynamic> currentUser;
   final Map<String, dynamic> otherUser;
+  final void Function(QueryDocumentSnapshot<Object?> message, bool isMe) onMessageLongPressed;
 
   const AdvancedChatList({
     required this.chatId,
     required this.currentUser,
     required this.otherUser,
+    required this.onMessageLongPressed,
     super.key,
   });
 
@@ -24,14 +24,14 @@ class AdvancedChatList extends StatefulWidget {
 }
 
 class _AdvancedChatListState extends State<AdvancedChatList> {
-  DocumentSnapshot? replyingTo;
+  QueryDocumentSnapshot<Object?>? replyingTo;
   DocumentSnapshot? pinnedMessage;
 
   @override
   void initState() {
     super.initState();
     _fetchPinnedMessage();
-    _markChatAsRead(); //
+    _markChatAsRead();
   }
 
   void _fetchPinnedMessage() async {
@@ -40,7 +40,6 @@ class _AdvancedChatListState extends State<AdvancedChatList> {
         .doc(widget.chatId)
         .get();
 
-    // ✅ Check if field exists and is not null
     if (doc.exists &&
         doc.data() != null &&
         doc.data()!.containsKey('pinnedMessageId')) {
@@ -64,26 +63,12 @@ class _AdvancedChatListState extends State<AdvancedChatList> {
     await MessageStatusUtils.markAsRead(
       chatId: widget.chatId,
       userId: widget.currentUser['id'],
-      isGroup: false, // this is for individual chat
+      isGroup: false,
     );
-  }
-
-  void _onReply(DocumentSnapshot message) {
-    setState(() => replyingTo = message);
   }
 
   void _onCancelReply() {
     setState(() => replyingTo = null);
-  }
-
-  Future<void> _pinMessage(DocumentSnapshot msg) async {
-    await FirebaseFirestore.instance
-        .collection('chats')
-        .doc(widget.chatId)
-        .set({
-      'pinnedMessageId': msg.id,
-    }, SetOptions(merge: true));
-    setState(() => pinnedMessage = msg);
   }
 
   @override
@@ -116,16 +101,12 @@ class _AdvancedChatListState extends State<AdvancedChatList> {
                 reverse: true,
                 itemCount: messages.length,
                 itemBuilder: (context, index) {
-                  final message = messages[index];
+                  final message = messages[index] as QueryDocumentSnapshot<Object?>;
                   final isMe = message['senderId'] == widget.currentUser['id'];
+
                   return GestureDetector(
-                    onLongPress: () => showMessageActions(
-                      context: context,
-                      message: message, // ← keep it as DocumentSnapshot
-                      isMe: isMe,
-                      onReply: () => _onReply(message),
-                      onPin: () => _pinMessage(message),
-                    ),
+                    onLongPress: () =>
+                        widget.onMessageLongPressed(message, isMe),
                     child: MessageBubble(
                       message: message,
                       currentUser: widget.currentUser,

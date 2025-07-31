@@ -8,7 +8,7 @@ import 'widgets/chat_app_bar.dart';
 import 'widgets/typing_area.dart';
 import 'widgets/advanced_chat_list.dart';
 import 'package:movie_app/utils/read_status_utils.dart';
-
+import 'widgets/message_actions.dart'; // Updated import
 
 class ChatScreen extends StatefulWidget {
   final String chatId;
@@ -34,6 +34,8 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   String? backgroundUrl;
+  DocumentSnapshot? selectedMessage;
+  bool isActionOverlayVisible = false;
 
   @override
   void initState() {
@@ -62,7 +64,8 @@ class _ChatScreenState extends State<ChatScreen> {
         .collection('users')
         .doc(widget.currentUser['id'])
         .get();
-    final blockedUsers = List<String>.from(userDoc.get('blockedUsers') ?? []);
+
+    final blockedUsers = List<String>.from(userDoc.data()?['blockedUsers'] ?? []);
     return blockedUsers.contains(userId);
   }
 
@@ -99,32 +102,27 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void sendFile(File file) async {
-    final isBlocked = await _isUserBlocked(widget.otherUser['id']);
-    if (isBlocked) {
+    if (await _isUserBlocked(widget.otherUser['id'])) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Cannot send file to blocked user')),
       );
       return;
     }
     print("Sending file: ${file.path}");
-    // TODO: Upload file to Firebase Storage and send file message
   }
 
   void sendAudio(File audio) async {
-    final isBlocked = await _isUserBlocked(widget.otherUser['id']);
-    if (isBlocked) {
+    if (await _isUserBlocked(widget.otherUser['id'])) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Cannot send audio to blocked user')),
       );
       return;
     }
     print("Sending audio: ${audio.path}");
-    // TODO: Upload audio and send audio message
   }
 
   void startVoiceCall() async {
-    final isBlocked = await _isUserBlocked(widget.otherUser['id']);
-    if (isBlocked) {
+    if (await _isUserBlocked(widget.otherUser['id'])) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Cannot call blocked user')),
       );
@@ -146,8 +144,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void startVideoCall() async {
-    final isBlocked = await _isUserBlocked(widget.otherUser['id']);
-    if (isBlocked) {
+    if (await _isUserBlocked(widget.otherUser['id'])) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Cannot call blocked user')),
       );
@@ -167,6 +164,61 @@ class _ChatScreenState extends State<ChatScreen> {
       'status': 'ongoing',
     });
   }
+
+void _showMessageActions(QueryDocumentSnapshot<Object?> message, bool isMe) {
+  showMessageActions(
+    context: context,
+    message: message,
+    isMe: isMe,
+    onReply: () {
+      // Implement reply logic
+    },
+    onPin: () async {
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(widget.chatId)
+          .set({'pinnedMessageId': message.id}, SetOptions(merge: true));
+    },
+    onDelete: () async {
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(widget.chatId)
+          .collection('messages')
+          .doc(message.id)
+          .delete();
+    },
+    onBlock: () async {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(widget.currentUser['id'])
+          .update({
+        'blockedUsers': FieldValue.arrayUnion([widget.otherUser['id']])
+      });
+    },
+    onForward: () {
+      Navigator.pushNamed(context, '/forward', arguments: {
+        'message': message,
+        'currentUser': widget.currentUser,
+      });
+    },
+    onEdit: () {
+      Navigator.pushNamed(context, '/editMessage', arguments: {
+        'message': message,
+        'chatId': widget.chatId,
+      });
+    },
+    onReactEmoji: (emoji) async {
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(widget.chatId)
+          .collection('messages')
+          .doc(message.id)
+          .update({
+        'reactions': FieldValue.arrayUnion([emoji])
+      });
+    },
+  );
+}
 
   @override
   Widget build(BuildContext context) {
@@ -245,7 +297,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                       borderRadius: BorderRadius.circular(16),
                       border: Border.all(
-                          color: widget.accentColor.withOpacity(0.1)),
+                        color: widget.accentColor.withOpacity(0.1),
+                      ),
                     ),
                     child: ConstrainedBox(
                       constraints: BoxConstraints(minHeight: screenHeight),
@@ -256,15 +309,15 @@ class _ChatScreenState extends State<ChatScreen> {
                               chatId: widget.chatId,
                               currentUser: widget.currentUser,
                               otherUser: widget.otherUser,
+                              onMessageLongPressed: _showMessageActions,
                             ),
                           ),
                           TypingArea(
-  onSendMessage: sendMessage,
-  onSendFile: sendFile,
-  onSendAudio: sendAudio,
-  accentColor: widget.accentColor,
-),
-
+                            onSendMessage: sendMessage,
+                            onSendFile: sendFile,
+                            onSendAudio: sendAudio,
+                            accentColor: widget.accentColor,
+                          ),
                         ],
                       ),
                     ),

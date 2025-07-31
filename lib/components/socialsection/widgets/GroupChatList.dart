@@ -1,16 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'message_bubble.dart';
-import 'message_actions.dart';
+import 'message_actions.dart'; // Updated import name to match
 import 'pinned_message_bar.dart';
 import 'mark_read_unread.dart';
-
 
 class GroupChatList extends StatefulWidget {
   final String groupId;
   final Map<String, dynamic> currentUser;
   final List<Map<String, dynamic>> groupMembers;
-  final void Function(Map<String, dynamic> message)? onReplyToMessage; // added
+  final void Function(QueryDocumentSnapshot<Object?> message)? onReplyToMessage;
 
   const GroupChatList({
     required this.groupId,
@@ -58,16 +57,15 @@ class _GroupChatListState extends State<GroupChatList> {
     }
   }
 
-
   void _markGroupAsRead() async {
-  await MessageStatusUtils.markAsRead(
-    chatId: widget.groupId,
-    userId: widget.currentUser['id'],
-    isGroup: true,
-  );
-}
+    await MessageStatusUtils.markAsRead(
+      chatId: widget.groupId,
+      userId: widget.currentUser['id'],
+      isGroup: true,
+    );
+  }
 
-  Future<void> _pinMessage(DocumentSnapshot msg) async {
+  Future<void> _pinMessage(QueryDocumentSnapshot<Object?> msg) async {
     await FirebaseFirestore.instance
         .collection('groups')
         .doc(widget.groupId)
@@ -110,7 +108,7 @@ class _GroupChatListState extends State<GroupChatList> {
                 reverse: true,
                 itemCount: messages.length,
                 itemBuilder: (context, index) {
-                  final message = messages[index];
+                  final message = messages[index] as QueryDocumentSnapshot<Object?>;
                   final isMe = message['senderId'] == widget.currentUser['id'];
                   final sender = _getSenderInfo(message['senderId']);
 
@@ -121,10 +119,54 @@ class _GroupChatListState extends State<GroupChatList> {
                       isMe: isMe,
                       onReply: () {
                         if (widget.onReplyToMessage != null) {
-                          widget.onReplyToMessage!(message.data() as Map<String, dynamic>);
+                          widget.onReplyToMessage!(message);
                         }
                       },
                       onPin: () => _pinMessage(message),
+                      onDelete: () async {
+                        await FirebaseFirestore.instance
+                            .collection('groups')
+                            .doc(widget.groupId)
+                            .collection('messages')
+                            .doc(message.id)
+                            .delete();
+                      },
+                      onBlock: () async {
+                        await FirebaseFirestore.instance
+                            .collection('users')
+                            .doc(widget.currentUser['id'])
+                            .update({
+                          'blockedUsers': FieldValue.arrayUnion([message['senderId']])
+                        });
+                      },
+                      onForward: () {
+                        Navigator.pushNamed(context, '/forward', arguments: {
+                          'message': message,
+                          'currentUser': widget.currentUser,
+                        });
+                      },
+                      onEdit: () {
+                        if (isMe) {
+                          Navigator.pushNamed(context, '/editMessage', arguments: {
+                            'message': message,
+                            'chatId': widget.groupId,
+                          });
+                        } else {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Cannot edit messages sent by others')),
+                          );
+                        }
+                      },
+                      onReactEmoji: (emoji) async {
+                        await FirebaseFirestore.instance
+                            .collection('groups')
+                            .doc(widget.groupId)
+                            .collection('messages')
+                            .doc(message.id)
+                            .update({
+                          'reactions': FieldValue.arrayUnion([emoji])
+                        });
+                      },
                     ),
                     child: MessageBubble(
                       message: message,
