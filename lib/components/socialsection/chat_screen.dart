@@ -9,7 +9,7 @@ import 'widgets/typing_area.dart';
 import 'widgets/advanced_chat_list.dart';
 import 'package:movie_app/utils/read_status_utils.dart';
 import 'widgets/message_actions.dart';
-import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
+import 'package:flutter_keyboard_visibility_temp_fork/flutter_keyboard_visibility_temp_fork.dart';
 
 class ChatScreen extends StatefulWidget {
   final String chatId;
