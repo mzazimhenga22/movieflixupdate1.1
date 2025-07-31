@@ -114,6 +114,12 @@
 @import firebase_storage;
 #endif
 
+#if __has_include(<fl_pip/FlPiPPlugin.h>)
+#import <fl_pip/FlPiPPlugin.h>
+#else
+@import fl_pip;
+#endif
+
 #if __has_include(<flutter_downloader/FlutterDownloaderPlugin.h>)
 #import <flutter_downloader/FlutterDownloaderPlugin.h>
 #else
@@ -124,6 +130,12 @@
 #import <flutter_inappwebview_ios/InAppWebViewFlutterPlugin.h>
 #else
 @import flutter_inappwebview_ios;
+#endif
+
+#if __has_include(<flutter_keyboard_visibility/FlutterKeyboardVisibilityPlugin.h>)
+#import <flutter_keyboard_visibility/FlutterKeyboardVisibilityPlugin.h>
+#else
+@import flutter_keyboard_visibility;
 #endif
 
 #if __has_include(<flutter_local_notifications/FlutterLocalNotificationsPlugin.h>)
@@ -249,8 +261,10 @@
   [FLTFirebasePerformancePlugin registerWithRegistrar:[registry registrarForPlugin:@"FLTFirebasePerformancePlugin"]];
   [FirebaseRemoteConfigPlugin registerWithRegistrar:[registry registrarForPlugin:@"FirebaseRemoteConfigPlugin"]];
   [FLTFirebaseStoragePlugin registerWithRegistrar:[registry registrarForPlugin:@"FLTFirebaseStoragePlugin"]];
+  [FlPiPPlugin registerWithRegistrar:[registry registrarForPlugin:@"FlPiPPlugin"]];
   [FlutterDownloaderPlugin registerWithRegistrar:[registry registrarForPlugin:@"FlutterDownloaderPlugin"]];
   [InAppWebViewFlutterPlugin registerWithRegistrar:[registry registrarForPlugin:@"InAppWebViewFlutterPlugin"]];
+  [FlutterKeyboardVisibilityPlugin registerWithRegistrar:[registry registrarForPlugin:@"FlutterKeyboardVisibilityPlugin"]];
   [FlutterLocalNotificationsPlugin registerWithRegistrar:[registry registrarForPlugin:@"FlutterLocalNotificationsPlugin"]];
   [FlutterSound registerWithRegistrar:[registry registrarForPlugin:@"FlutterSound"]];
   [FlutterWebRTCPlugin registerWithRegistrar:[registry registrarForPlugin:@"FlutterWebRTCPlugin"]];

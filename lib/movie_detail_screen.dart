@@ -265,96 +265,102 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
     );
   }
 
-  Future<void> _launchStreamingPlayer(
-      Map<String, dynamic> details, bool isTvShow, String resolution, bool subtitles) async {
-    if (!mounted) return;
-    _showLoadingDialog();
+Future<void> _launchStreamingPlayer(
+    Map<String, dynamic> details, bool isTvShow, String resolution, bool subtitles) async {
+  if (!mounted) return;
+  _showLoadingDialog();
 
-    Map<String, String> streamingInfo = {};
-    List<String> episodeFiles = [];
-    try {
-      if (isTvShow) {
-        final seasons = details['seasons'] as List<dynamic>?;
-        if (seasons != null && seasons.isNotEmpty) {
-          final selectedSeason = seasons.firstWhere(
-            (season) => season['episodes'] != null && (season['episodes'] as List).isNotEmpty,
-            orElse: () => throw Exception('No episodes available'),
-          );
-          final episodes = selectedSeason['episodes'] as List<dynamic>;
-          final firstEpisode = episodes[0];
-          final seasonNumber = selectedSeason['season_number']?.toInt() ?? 1;
-          final episodeNumber = firstEpisode['episode_number']?.toInt() ?? 1;
+  Map<String, String> streamingInfo = {};
+  List<String> episodeFiles = [];
+  int initialSeasonNumber = 1;
+  int initialEpisodeNumber = 1;
 
-          streamingInfo = await StreamingService.getStreamingLink(
-            tmdbId: details['id']?.toString() ?? 'Unknown Show',
-            title: details['name']?.toString() ?? details['title']?.toString() ?? 'Unknown Show',
-            releaseYear: _releaseYear ?? 1970,
-            season: seasonNumber,
-            episode: episodeNumber,
-            resolution: resolution,
-            enableSubtitles: subtitles,
-          );
-          episodeFiles = episodes.map<String>((e) => '').toList();
-        } else {
-          throw Exception('No seasons available');
-        }
-      } else {
+  try {
+    if (isTvShow) {
+      final seasons = details['seasons'] as List<dynamic>?;
+      if (seasons != null && seasons.isNotEmpty) {
+        final selectedSeason = seasons.firstWhere(
+          (season) => season['episodes'] != null && (season['episodes'] as List).isNotEmpty,
+          orElse: () => throw Exception('No episodes available'),
+        );
+        final episodes = selectedSeason['episodes'] as List<dynamic>;
+        final firstEpisode = episodes[0];
+        initialSeasonNumber = selectedSeason['season_number']?.toInt() ?? 1;
+        initialEpisodeNumber = firstEpisode['episode_number']?.toInt() ?? 1;
+
         streamingInfo = await StreamingService.getStreamingLink(
-          tmdbId: details['id']?.toString() ?? 'Unknown Movie',
-          title: details['title']?.toString() ?? details['name']?.toString() ?? 'Unknown Movie',
+          tmdbId: details['id']?.toString() ?? 'Unknown Show',
+          title: details['name']?.toString() ?? details['title']?.toString() ?? 'Unknown Show',
           releaseYear: _releaseYear ?? 1970,
+          season: initialSeasonNumber,
+          episode: initialEpisodeNumber,
           resolution: resolution,
           enableSubtitles: subtitles,
         );
+        episodeFiles = episodes.map<String>((e) => '').toList(); // Kept for compatibility
+      } else {
+        throw Exception('No seasons available');
       }
-    } catch (e) {
-      if (mounted) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Unable to start streaming. Please try again later.")),
-        );
-      }
-      return;
-    }
-
-    if (!mounted) {
-      Navigator.pop(context);
-      return;
-    }
-
-    final streamUrl = streamingInfo['url'] ?? '';
-    final urlType = streamingInfo['type'] ?? 'unknown';
-    final subtitleUrl = streamingInfo['subtitleUrl'];
-
-    if (streamUrl.isEmpty) {
-      Navigator.pop(context);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Streaming unavailable at this time.")),
-        );
-      }
-      return;
-    }
-
-    Navigator.pop(context);
-    if (mounted) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => MainVideoPlayer(
-            videoPath: streamUrl,
-            title: streamingInfo['title'] ?? details['title'] ?? details['name'] ?? 'Untitled',
-            releaseYear: _releaseYear ?? 1970,
-            isFullSeason: isTvShow,
-            episodeFiles: episodeFiles,
-            similarMovies: _similarMovies,
-            subtitleUrl: subtitleUrl,
-            isHls: urlType == 'm3u8',
-          ),
-        ),
+    } else {
+      streamingInfo = await StreamingService.getStreamingLink(
+        tmdbId: details['id']?.toString() ?? 'Unknown Movie',
+        title: details['title']?.toString() ?? details['name']?.toString() ?? 'Unknown Movie',
+        releaseYear: _releaseYear ?? 1970,
+        resolution: resolution,
+        enableSubtitles: subtitles,
       );
     }
+  } catch (e) {
+    if (mounted) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Unable to start streaming. Please try again later.")),
+      );
+    }
+    return;
   }
+
+  if (!mounted) {
+    Navigator.pop(context);
+    return;
+  }
+
+  final streamUrl = streamingInfo['url'] ?? '';
+  final urlType = streamingInfo['type'] ?? 'unknown';
+  final subtitleUrl = streamingInfo['subtitleUrl'];
+
+  if (streamUrl.isEmpty) {
+    Navigator.pop(context);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Streaming unavailable at this time.")),
+      );
+    }
+    return;
+  }
+
+  Navigator.pop(context);
+  if (mounted) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => MainVideoPlayer(
+          videoPath: streamUrl,
+          title: streamingInfo['title'] ?? details['title'] ?? details['name'] ?? 'Untitled',
+          releaseYear: _releaseYear ?? 1970,
+          isFullSeason: isTvShow,
+          episodeFiles: episodeFiles,
+          similarMovies: _similarMovies,
+          subtitleUrl: subtitleUrl,
+          isHls: urlType == 'm3u8',
+          seasons: isTvShow ? details['seasons']?.cast<Map<String, dynamic>>() : null,
+          initialSeasonNumber: isTvShow ? initialSeasonNumber : null,
+          initialEpisodeNumber: isTvShow ? initialEpisodeNumber : null,
+        ),
+      ),
+    );
+  }
+}
 
   void _showLoadingDialog() {
     if (!mounted) return;

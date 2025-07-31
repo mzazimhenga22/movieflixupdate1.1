@@ -93,6 +93,8 @@ dependencies:
   palette_generator: ^0.3.3
   crypto: ^3.0.3
   stream_transform: ^2.0.0
+  fl_pip: 3.2.1
+  flutter_keyboard_visibility: ^5.4.1
 
   # Downloads
   flutter_downloader: ^1.12.0

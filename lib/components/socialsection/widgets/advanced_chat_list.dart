@@ -9,13 +9,17 @@ class AdvancedChatList extends StatefulWidget {
   final String chatId;
   final Map<String, dynamic> currentUser;
   final Map<String, dynamic> otherUser;
-  final void Function(QueryDocumentSnapshot<Object?> message, bool isMe) onMessageLongPressed;
+  final void Function(QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey bubbleKey) onMessageLongPressed;
+  final QueryDocumentSnapshot<Object?>? replyingTo;
+  final VoidCallback? onCancelReply;
 
   const AdvancedChatList({
     required this.chatId,
     required this.currentUser,
     required this.otherUser,
     required this.onMessageLongPressed,
+    this.replyingTo,
+    this.onCancelReply,
     super.key,
   });
 
@@ -24,8 +28,8 @@ class AdvancedChatList extends StatefulWidget {
 }
 
 class _AdvancedChatListState extends State<AdvancedChatList> {
-  QueryDocumentSnapshot<Object?>? replyingTo;
   DocumentSnapshot? pinnedMessage;
+  final ScrollController _scrollController = ScrollController();
 
   @override
   void initState() {
@@ -40,9 +44,7 @@ class _AdvancedChatListState extends State<AdvancedChatList> {
         .doc(widget.chatId)
         .get();
 
-    if (doc.exists &&
-        doc.data() != null &&
-        doc.data()!.containsKey('pinnedMessageId')) {
+    if (doc.exists && doc.data() != null && doc.data()!.containsKey('pinnedMessageId')) {
       final pinnedId = doc['pinnedMessageId'];
       if (pinnedId != null) {
         final pinned = await FirebaseFirestore.instance
@@ -67,10 +69,6 @@ class _AdvancedChatListState extends State<AdvancedChatList> {
     );
   }
 
-  void _onCancelReply() {
-    setState(() => replyingTo = null);
-  }
-
   @override
   Widget build(BuildContext context) {
     final messagesRef = FirebaseFirestore.instance
@@ -86,31 +84,42 @@ class _AdvancedChatListState extends State<AdvancedChatList> {
             pinnedText: pinnedMessage!['text'],
             onDismiss: () => setState(() => pinnedMessage = null),
           ),
-        if (replyingTo != null)
+        if (widget.replyingTo != null)
           ReplyPreview(
-            replyText: replyingTo!['text'],
-            onCancel: _onCancelReply,
+            replyText: widget.replyingTo!['text'],
+            onCancel: widget.onCancelReply ?? () {},
           ),
         Expanded(
           child: StreamBuilder<QuerySnapshot>(
             stream: messagesRef.snapshots(),
             builder: (context, snapshot) {
-              if (!snapshot.hasData) return const CircularProgressIndicator();
+              if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+
               final messages = snapshot.data!.docs;
+
               return ListView.builder(
+                controller: _scrollController,
                 reverse: true,
                 itemCount: messages.length,
                 itemBuilder: (context, index) {
                   final message = messages[index] as QueryDocumentSnapshot<Object?>;
                   final isMe = message['senderId'] == widget.currentUser['id'];
+                  final bubbleKey = GlobalKey();
 
                   return GestureDetector(
-                    onLongPress: () =>
-                        widget.onMessageLongPressed(message, isMe),
+                    onLongPress: () async {
+                      await Scrollable.ensureVisible(
+                        bubbleKey.currentContext!,
+                        duration: const Duration(milliseconds: 300),
+                        curve: Curves.easeInOut,
+                      );
+                      widget.onMessageLongPressed(message, isMe, bubbleKey);
+                    },
                     child: MessageBubble(
                       message: message,
                       currentUser: widget.currentUser,
                       otherUser: widget.otherUser,
+                      bubbleKey: bubbleKey,
                     ),
                   );
                 },
@@ -120,5 +129,11 @@ class _AdvancedChatListState extends State<AdvancedChatList> {
         ),
       ],
     );
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 }

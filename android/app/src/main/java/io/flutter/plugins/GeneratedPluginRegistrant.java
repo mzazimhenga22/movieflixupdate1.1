@@ -106,6 +106,11 @@ public final class GeneratedPluginRegistrant {
       Log.e(TAG, "Error registering plugin firebase_storage, io.flutter.plugins.firebase.storage.FlutterFirebaseStoragePlugin", e);
     }
     try {
+      flutterEngine.getPlugins().add(new fl.pip.FlPiPPlugin());
+    } catch (Exception e) {
+      Log.e(TAG, "Error registering plugin fl_pip, fl.pip.FlPiPPlugin", e);
+    }
+    try {
       flutterEngine.getPlugins().add(new vn.hunghd.flutterdownloader.FlutterDownloaderPlugin());
     } catch (Exception e) {
       Log.e(TAG, "Error registering plugin flutter_downloader, vn.hunghd.flutterdownloader.FlutterDownloaderPlugin", e);
@@ -114,6 +119,11 @@ public final class GeneratedPluginRegistrant {
       flutterEngine.getPlugins().add(new com.pichillilorenzo.flutter_inappwebview_android.InAppWebViewFlutterPlugin());
     } catch (Exception e) {
       Log.e(TAG, "Error registering plugin flutter_inappwebview_android, com.pichillilorenzo.flutter_inappwebview_android.InAppWebViewFlutterPlugin", e);
+    }
+    try {
+      flutterEngine.getPlugins().add(new com.jrai.flutter_keyboard_visibility.FlutterKeyboardVisibilityPlugin());
+    } catch (Exception e) {
+      Log.e(TAG, "Error registering plugin flutter_keyboard_visibility, com.jrai.flutter_keyboard_visibility.FlutterKeyboardVisibilityPlugin", e);
     }
     try {
       flutterEngine.getPlugins().add(new com.dexterous.flutterlocalnotifications.FlutterLocalNotificationsPlugin());

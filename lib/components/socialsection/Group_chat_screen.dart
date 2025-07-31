@@ -8,7 +8,9 @@ import 'Group_profile_screen.dart';
 import 'widgets/GroupChatAppBar.dart';
 import 'widgets/typing_area.dart';
 import 'widgets/GroupChatList.dart';
+import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
 import 'package:movie_app/utils/read_status_utils.dart';
+import 'widgets/message_actions.dart';
 
 class GroupChatScreen extends StatefulWidget {
   final String chatId;
@@ -34,7 +36,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   Map<String, dynamic>? groupData;
   int _onlineCount = 0;
   QueryDocumentSnapshot<Object?>? replyingTo;
-  bool _isLoading = true; // Track loading state
+  bool _isLoading = true;
+  bool isActionOverlayVisible = false;
 
   @override
   void initState() {
@@ -46,21 +49,124 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   Future<void> _loadChatBackground() async {
     final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      backgroundUrl = prefs.getString('chat_background');
-    });
+    setState(() => backgroundUrl = prefs.getString('chat_background'));
   }
 
   void _onReplyToMessage(QueryDocumentSnapshot<Object?> message) {
-    setState(() {
-      replyingTo = message;
-    });
+    setState(() => replyingTo = message);
   }
 
   void _onCancelReply() {
+    setState(() => replyingTo = null);
+  }
+
+  void _showMessageActions(
+      QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey bubbleKey) {
     setState(() {
-      replyingTo = null;
+      isActionOverlayVisible = true;
     });
+    showMessageActions(
+      context: context,
+      message: message,
+      isMe: isMe,
+      messageKey: bubbleKey,
+      onReply: () {
+        _onReplyToMessage(message);
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onPin: () async {
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(widget.chatId)
+            .set({
+          'pinnedMessageId': message.id,
+          'pinnedMessageText': message['text'],
+          'pinnedMessageSenderId': message['senderId'],
+        }, SetOptions(merge: true));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Container(
+              padding: const EdgeInsets.all(8.0),
+              decoration: BoxDecoration(
+                color: widget.accentColor,
+                borderRadius: BorderRadius.circular(8.0),
+              ),
+              child: Text(
+                message['text'],
+                style: const TextStyle(color: Colors.black),
+              ),
+            ),
+          ),
+        );
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onDelete: () async {
+        final data = message.data() as Map<String, dynamic>;
+        final deletedFor = List<String>.from(data['deletedFor'] ?? []);
+        deletedFor.add(widget.currentUser['id']);
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(widget.chatId)
+            .collection('messages')
+            .doc(message.id)
+            .update({'deletedFor': deletedFor});
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onBlock: () async {
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(widget.currentUser['id'])
+            .update({
+          'blockedUsers': FieldValue.arrayUnion([message['senderId']])
+        });
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onForward: () {
+        Navigator.pushNamed(context, '/forward', arguments: {
+          'message': message,
+          'currentUser': widget.currentUser,
+        });
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onEdit: () {
+        if (isMe) {
+          Navigator.pushNamed(context, '/editMessage', arguments: {
+            'message': message,
+            'chatId': widget.chatId,
+          });
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Cannot edit others\' messages')),
+          );
+        }
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onReactEmoji: (emoji) async {
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(widget.chatId)
+            .collection('messages')
+            .doc(message.id)
+            .update({
+          'reactions': FieldValue.arrayUnion([emoji])
+        });
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+    );
   }
 
   void _loadGroupDataAndListen() async {
@@ -73,7 +179,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       if (chatDoc.exists && chatDoc.data()!['isGroup'] == true) {
         final memberIds = List<String>.from(chatDoc.data()!['userIds'] ?? []);
         final membersSnapshots = await Future.wait(memberIds.map(
-          (uid) => FirebaseFirestore.instance.collection('users').doc(uid).get(),
+          (uid) =>
+              FirebaseFirestore.instance.collection('users').doc(uid).get(),
         ));
 
         setState(() {
@@ -82,7 +189,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               .where((doc) => doc.exists)
               .map((doc) => doc.data()!..['id'] = doc.id)
               .toList();
-          _isLoading = false; // Data loaded
+          _isLoading = false;
         });
 
         FirebaseFirestore.instance
@@ -90,43 +197,38 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             .where(FieldPath.documentId, whereIn: memberIds)
             .snapshots()
             .listen((snapshot) {
-          int online =
-              snapshot.docs.where((doc) => doc.data()['isOnline'] == true).length;
-          setState(() {
-            _onlineCount = online;
-          });
+          final online =
+              snapshot.docs.where((d) => d.data()['isOnline'] == true).length;
+          setState(() => _onlineCount = online);
         });
       } else {
-        setState(() {
-          _isLoading = false; // Handle case where group doesn't exist
-        });
+        setState(() => _isLoading = false);
       }
     } catch (e) {
-      setState(() {
-        _isLoading = false; // Handle error
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load group data: $e')),
-      );
+      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Failed: $e')));
     }
   }
 
   void sendMessage(String text) async {
     if (text.trim().isEmpty) return;
-
-    final messageData = {
+    final msg = {
       'text': text,
       'senderId': widget.currentUser['id'],
       'timestamp': FieldValue.serverTimestamp(),
       'type': 'text',
+      if (replyingTo != null) ...{
+        'replyToId': replyingTo!.id,
+        'replyToText': replyingTo!['text'],
+        'replyToSenderId': replyingTo!['senderId'],
+      },
     };
-
     await FirebaseFirestore.instance
         .collection('groups')
         .doc(widget.chatId)
         .collection('messages')
-        .add(messageData);
-
+        .add(msg);
     await FirebaseFirestore.instance
         .collection('groups')
         .doc(widget.chatId)
@@ -134,62 +236,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       'lastMessage': text,
       'timestamp': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
-  }
-
-  void sendFile(File file) {
-    print("Sending file: ${file.path}");
-    // TODO: Implement file upload and sending
-  }
-
-  void sendAudio(File audio) {
-    print("Sending audio: ${audio.path}");
-    // TODO: Implement audio upload and sending
-  }
-
-  void startVoiceCall() async {
-    try {
-      final callId = await GroupRtcManager.startGroupCall(
-        caller: widget.currentUser,
-        participants: groupMembers,
-        isVideo: false,
-      );
-
-      await FirebaseFirestore.instance.collection('calls').doc(callId).set({
-        'type': 'voice',
-        'groupId': widget.chatId,
-        'callerId': widget.currentUser['id'],
-        'timestamp': FieldValue.serverTimestamp(),
-        'status': 'ongoing',
-      });
-    } catch (e) {
-      print("Voice call failed: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to start voice call: $e')),
-      );
-    }
-  }
-
-  void startVideoCall() async {
-    try {
-      final callId = await GroupRtcManager.startGroupCall(
-        caller: widget.currentUser,
-        participants: groupMembers,
-        isVideo: true,
-      );
-
-      await FirebaseFirestore.instance.collection('calls').doc(callId).set({
-        'type': 'video',
-        'groupId': widget.chatId,
-        'callerId': widget.currentUser['id'],
-        'timestamp': FieldValue.serverTimestamp(),
-        'status': 'ongoing',
-      });
-    } catch (e) {
-      print("Video call failed: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to start video call: $e')),
-      );
-    }
+    setState(() => replyingTo = null);
   }
 
   @override
@@ -198,65 +245,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
     if (_isLoading || groupData == null) {
       return Scaffold(
-        body: Container(
-          decoration: BoxDecoration(
-            gradient: RadialGradient(
-              center: const Alignment(-0.1, -0.4),
-              radius: 1.2,
-              colors: [widget.accentColor.withOpacity(0.4), Colors.black],
-            ),
-          ),
-          child: Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  width: 60,
-                  height: 60,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      colors: [
-                        widget.accentColor,
-                        widget.accentColor.withOpacity(0.6),
-                      ],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    ),
-                  ),
-                  child: const CircularProgressIndicator(
-                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                    strokeWidth: 3,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'Loading Group Chat...',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    shadows: [
-                      Shadow(
-                        blurRadius: 4,
-                        color: widget.accentColor.withOpacity(0.5),
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Fetching group details',
-                  style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 14,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+        body: Center(child: CircularProgressIndicator()),
       );
     }
 
@@ -270,16 +259,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           onlineCount: _onlineCount,
           totalMembers: groupMembers.length,
           onBack: () => Navigator.pop(context),
-          onGroupInfoTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => GroupProfileScreen(groupId: widget.chatId),
-              ),
-            );
-          },
-          onVideoCall: startVideoCall,
-          onVoiceCall: startVoiceCall,
+          onGroupInfoTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => GroupProfileScreen(groupId: widget.chatId),
+            ),
+          ),
+          onVideoCall: () => {},
+          onVoiceCall: () => {},
           accentColor: widget.accentColor,
         ),
       ),
@@ -299,35 +286,43 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       radius: 1.6,
                       colors: [
                         widget.accentColor.withOpacity(0.2),
-                        Colors.transparent,
+                        Colors.transparent
                       ],
-                      stops: const [0.0, 1.0],
                     ),
                     borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: widget.accentColor.withOpacity(0.1)),
+                    border:
+                        Border.all(color: widget.accentColor.withOpacity(0.1)),
                   ),
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(minHeight: screenHeight),
-                    child: Column(
-                      children: [
-                        Expanded(
-                          child: GroupChatList(
-                            groupId: widget.chatId,
-                            currentUser: widget.currentUser,
-                            groupMembers: groupMembers,
-                            onReplyToMessage: _onReplyToMessage,
-                          ),
-                        ),
-                        TypingArea(
-                          onSendMessage: sendMessage,
-                          onSendFile: sendFile,
-                          onSendAudio: sendAudio,
-                          accentColor: widget.accentColor,
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: GroupChatList(
+                          groupId: widget.chatId,
+                          currentUser: widget.currentUser,
+                          groupMembers: groupMembers,
+                          onMessageLongPressed: _showMessageActions,
                           replyingTo: replyingTo,
                           onCancelReply: _onCancelReply,
                         ),
-                      ],
-                    ),
+                      ),
+                      KeyboardVisibilityBuilder(
+                        builder: (context, isVisible) => Padding(
+                          padding: EdgeInsets.only(
+                              bottom: MediaQuery.of(context).viewInsets.bottom),
+                          child: TypingArea(
+                            onSendMessage: sendMessage,
+                            onSendFile: (file) {},
+                            onSendAudio: (audio) {},
+                            isGroup: true,
+                            accentColor: widget.accentColor,
+                            replyingTo: replyingTo,
+                            currentUser: {'id': 'abc123', 'username': 'Alice'},
+                            otherUser: {'id': 'xyz456', 'username': 'Bob'},
+                            onCancelReply: _onCancelReply,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -338,26 +333,16 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     );
   }
 
-  Widget _buildBackground() {
-    return backgroundUrl != null
-        ? Container(
-            decoration: BoxDecoration(
-              image: DecorationImage(
-                image: backgroundUrl!.startsWith('http')
-                    ? NetworkImage(backgroundUrl!)
-                    : AssetImage(backgroundUrl!) as ImageProvider,
-                fit: BoxFit.cover,
-              ),
+  Widget _buildBackground() => backgroundUrl != null
+      ? DecoratedBox(
+          decoration: BoxDecoration(
+            image: DecorationImage(
+              image: backgroundUrl!.startsWith('http')
+                  ? NetworkImage(backgroundUrl!)
+                  : AssetImage(backgroundUrl!) as ImageProvider,
+              fit: BoxFit.cover,
             ),
-          )
-        : Container(
-            decoration: BoxDecoration(
-              gradient: RadialGradient(
-                center: const Alignment(-0.1, -0.4),
-                radius: 1.2,
-                colors: [widget.accentColor.withOpacity(0.4), Colors.black],
-              ),
-            ),
-          );
-  }
+          ),
+        )
+      : Container(color: widget.accentColor.withOpacity(0.4));
 }

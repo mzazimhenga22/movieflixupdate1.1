@@ -12,6 +12,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:system_info/system_info.dart';
+import 'sub_video_player.dart';
+import 'package:fl_pip/fl_pip.dart' show FlPiP;
 
 class Subtitle {
   final Duration start;
@@ -19,6 +21,102 @@ class Subtitle {
   final String text;
 
   Subtitle({required this.start, required this.end, required this.text});
+}
+
+class EpisodeSelectorDialog extends StatefulWidget {
+  final List<Map<String, dynamic>> seasons;
+  final int currentSeasonNumber;
+  final int currentEpisodeNumber;
+  final void Function(int seasonNumber, int episodeNumber) onEpisodeSelected;
+
+  const EpisodeSelectorDialog({
+    super.key,
+    required this.seasons,
+    required this.currentSeasonNumber,
+    required this.currentEpisodeNumber,
+    required this.onEpisodeSelected,
+  });
+
+  @override
+  EpisodeSelectorDialogState createState() => EpisodeSelectorDialogState();
+}
+
+class EpisodeSelectorDialogState extends State<EpisodeSelectorDialog> {
+  late int _selectedSeasonNumber;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedSeasonNumber = widget.currentSeasonNumber;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selectedSeason = widget.seasons.firstWhere(
+      (season) => season['season_number'] == _selectedSeasonNumber,
+      orElse: () => widget.seasons.first,
+    );
+    final episodes = selectedSeason['episodes'] as List<dynamic>? ?? [];
+
+    return AlertDialog(
+      backgroundColor: Colors.black87,
+      title: const Text('Select Episode', style: TextStyle(color: Colors.white)),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            DropdownButton<int>(
+              value: _selectedSeasonNumber,
+              dropdownColor: Colors.black87,
+              style: const TextStyle(color: Colors.white),
+              items: widget.seasons.map((season) {
+                return DropdownMenuItem<int>(
+                  value: season['season_number'] as int,
+                  child: Text('Season ${season['season_number']}'),
+                );
+              }).toList(),
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() {
+                    _selectedSeasonNumber = value;
+                  });
+                }
+              },
+            ),
+            const SizedBox(height: 16),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: episodes.length,
+                itemBuilder: (context, index) {
+                  final episode = episodes[index];
+                  final episodeNumber = episode['episode_number'] as int;
+                  final isCurrent = _selectedSeasonNumber == widget.currentSeasonNumber &&
+                      episodeNumber == widget.currentEpisodeNumber;
+                  return ListTile(
+                    title: Text(
+                      'Episode $episodeNumber: ${episode['name'] ?? 'Episode $episodeNumber'}',
+                      style: TextStyle(
+                        color: isCurrent ? Colors.grey : Colors.white,
+                      ),
+                    ),
+                    enabled: !isCurrent,
+                    onTap: () {
+                      if (!isCurrent) {
+                        Navigator.pop(context);
+                        widget.onEpisodeSelected(_selectedSeasonNumber, episodeNumber);
+                      }
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class MainVideoPlayer extends StatefulWidget {
@@ -33,6 +131,15 @@ class MainVideoPlayer extends StatefulWidget {
   final bool isHls;
   final bool isLocal;
   final Duration? initialPosition;
+  final List<Map<String, dynamic>>? seasons;
+  final int? initialSeasonNumber;
+  final int? initialEpisodeNumber;
+  final bool enableSkipIntro;
+  final List<Chapter>? chapters;
+  final bool enablePiP;
+  final bool enableOffline;
+  final List<AudioTrack>? audioTracks;
+  final List<SubtitleTrack>? subtitleTracks;
 
   const MainVideoPlayer({
     super.key,
@@ -47,27 +154,29 @@ class MainVideoPlayer extends StatefulWidget {
     required this.isHls,
     this.isLocal = false,
     this.initialPosition,
+    this.seasons,
+    this.initialSeasonNumber,
+    this.initialEpisodeNumber,
+    this.enableSkipIntro = false,
+    this.chapters,
+    this.enablePiP = false,
+    this.enableOffline = false,
+    this.audioTracks,
+    this.subtitleTracks,
   });
 
   @override
   MainVideoPlayerState createState() => MainVideoPlayerState();
 }
 
-final int cpuCores = SysInfo.processors.length;
-final int totalRam = SysInfo.getTotalPhysicalMemory();
- // This is async
-
-
-class MainVideoPlayerState extends State<MainVideoPlayer>
-    with WidgetsBindingObserver {
+class MainVideoPlayerState extends State<MainVideoPlayer> with WidgetsBindingObserver {
   late VideoPlayerController _controller;
+  Map<String, dynamic>? _streamingInfo;
   bool _isInitialized = false;
   String? _errorMessage;
   bool _isBuffering = false;
-
   bool _showControls = false;
   Timer? _hideTimer;
-
   double _volume = 1.0;
   bool _isMuted = false;
   double _brightness = 0.5;
@@ -76,12 +185,10 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
   bool _isAdjustingVolume = false;
   double? _startX;
   double _playbackSpeed = 1.0;
-
   List<Subtitle> _subtitles = [];
   String _currentSubtitle = "";
   final List<String> _qualities = ["Auto", "360p", "480p", "720p", "1080p"];
   String _selectedQuality = "Auto";
-
   Color _controlColor = Colors.white;
   double _iconSize = 30;
   final Map<String, double> _iconSizePresets = {
@@ -90,23 +197,26 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
     'Large': 63,
   };
   String _iconSizeKey = 'Small';
-
   String _currentVideoPath = "";
   String _title = "";
   int? _currentEpisodeNumber;
+  int? _currentSeasonNumber;
   bool _showNextEpisodeBar = false;
   Map<String, String>? _nextEpisodeData;
   bool _showRecommendationsBar = false;
   Map<String, dynamic>? _recommendationData;
   Timer? _recommendationTimer;
-
   bool _showSubtitles = true;
-
   Offset? _lastTapPosition;
   String? _seekFeedback;
   Duration? _seekTargetDuration;
   double? _dragStartX;
   Duration? _dragStartPosition;
+  bool _showSkipButton = false;
+  Duration? _skipStart;
+  Duration? _skipEnd;
+  String? _selectedAudioTrack;
+  String? _selectedSubtitleTrack;
 
   @override
   void initState() {
@@ -117,6 +227,9 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
     _initializeVideoPath().then((_) => _initializeVideo());
     _initializeBrightness();
     _loadSubtitles();
+    if (widget.enableSkipIntro && widget.chapters != null) {
+      _prepareSkip();
+    }
   }
 
   @override
@@ -151,10 +264,8 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
       'subtitles': _showSubtitles,
       'episodeFiles': widget.isFullSeason ? widget.episodeFiles : [],
       'similarMovies': widget.similarMovies,
-      if (widget.isFullSeason) 'season': 1,
-      if (widget.isFullSeason)
-        'episode':
-            _currentEpisodeNumber ?? _extractEpisodeNumber(widget.videoPath),
+      if (widget.isFullSeason) 'season': _currentSeasonNumber ?? 1,
+      if (widget.isFullSeason) 'episode': _currentEpisodeNumber ?? 1,
     };
 
     jsonList.removeWhere((jsonStr) {
@@ -183,8 +294,8 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
     setState(() {
       _errorMessage = null;
       _currentVideoPath = widget.videoPath;
-      _currentEpisodeNumber =
-          widget.isFullSeason ? _extractEpisodeNumber(widget.videoPath) : null;
+      _currentSeasonNumber = widget.initialSeasonNumber ?? 1;
+      _currentEpisodeNumber = widget.initialEpisodeNumber ?? (widget.isFullSeason ? _extractEpisodeNumber(widget.videoPath) : null) ?? 1;
     });
   }
 
@@ -210,14 +321,24 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
           return;
         }
         _controller = VideoPlayerController.file(file);
+        _streamingInfo = {'creditsStartTime': null};
       } else {
+        final streamingInfo = await StreamingService.getStreamingLink(
+          tmdbId: widget.title.hashCode.toString(),
+          title: widget.title,
+          releaseYear: widget.releaseYear,
+          season: _currentSeasonNumber,
+          episode: _currentEpisodeNumber,
+          resolution: _selectedQuality,
+          enableSubtitles: _showSubtitles,
+        );
+        _streamingInfo = streamingInfo;
         _controller = VideoPlayerController.networkUrl(
           Uri.parse(_currentVideoPath),
           formatHint: widget.isHls ? VideoFormat.hls : VideoFormat.other,
           httpHeaders: {
             'Accept': '*/*',
-            'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           },
           videoPlayerOptions: VideoPlayerOptions(
             allowBackgroundPlayback: false,
@@ -240,6 +361,12 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
         await _controller.play();
         await _controller.setPlaybackSpeed(_playbackSpeed);
         _adjustQualityBasedOnHardware();
+        if (widget.audioTracks != null && widget.audioTracks!.isNotEmpty) {
+          _selectedAudioTrack = widget.audioTracks!.first.label;
+        }
+        if (widget.subtitleTracks != null && widget.subtitleTracks!.isNotEmpty) {
+          _selectedSubtitleTrack = widget.subtitleTracks!.first.label;
+        }
       }
     } catch (error) {
       if (mounted) {
@@ -263,38 +390,32 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
     }
   }
 
-Future<void> _adjustQualityBasedOnHardware() async {
-  try {
-    final deviceInfo = DeviceInfoPlugin();
-    bool isHighEndTV = false;
+  Future<void> _adjustQualityBasedOnHardware() async {
+    try {
+      final deviceInfo = DeviceInfoPlugin();
+      bool isHighEndTV = false;
 
-    if (Platform.isAndroid) {
-      final androidInfo = await deviceInfo.androidInfo;
-      final sdkInt = androidInfo.version.sdkInt;
+      if (Platform.isAndroid) {
+        final androidInfo = await deviceInfo.androidInfo;
+        final sdkInt = androidInfo.version.sdkInt;
+        final cpuCores = SysInfo.processors.length;
+        final totalRam = SysInfo.getTotalPhysicalMemory();
+        isHighEndTV = sdkInt >= 30 && cpuCores >= 4 && totalRam >= (2 * 1024 * 1024 * 1024);
+      } else {
+        isHighEndTV = true;
+      }
 
-      final int cpuCores = SysInfo.processors.length;
-      final int totalRam = SysInfo.getTotalPhysicalMemory();
-
-      // Example threshold for high-end Android TV
-      isHighEndTV = sdkInt >= 30 && cpuCores >= 4 && totalRam >= (2 * 1024 * 1024 * 1024);
-    } else {
-      isHighEndTV = true; // Assume high end for iOS, desktop, etc.
+      if (isHighEndTV && _selectedQuality != "1080p") {
+        setState(() => _selectedQuality = "1080p");
+        await _fetchNewQualityStream("1080p");
+      } else if (!isHighEndTV && _selectedQuality != "720p" && _selectedQuality != "480p") {
+        setState(() => _selectedQuality = "720p");
+        await _fetchNewQualityStream("720p");
+      }
+    } catch (e) {
+      debugPrint('Error adjusting quality: $e');
     }
-
-    if (isHighEndTV && _selectedQuality != "1080p") {
-      setState(() => _selectedQuality = "1080p");
-      await _fetchNewQualityStream("1080p");
-    } else if (!isHighEndTV && _selectedQuality != "720p" && _selectedQuality != "480p") {
-      setState(() => _selectedQuality = "720p");
-      await _fetchNewQualityStream("720p");
-    }
-  } catch (e) {
-    debugPrint('Error adjusting quality: $e');
   }
-}
-
-
-
 
   String? _getNextLowerQuality(String currentQuality) {
     switch (currentQuality) {
@@ -315,6 +436,7 @@ Future<void> _adjustQualityBasedOnHardware() async {
         _isBuffering = _controller.value.isBuffering;
         _updateSubtitle();
         _checkForEndOfContent();
+        _checkSkipIntro();
       });
     }
   }
@@ -344,70 +466,68 @@ Future<void> _adjustQualityBasedOnHardware() async {
     }
   }
 
-Future<void> _loadSubtitles() async {
-  String? content;
-  if (widget.isLocal && widget.localSubtitlePath != null) {
-    try {
-      final file = File(widget.localSubtitlePath!);
-      if (await file.exists()) {
-        content = await file.readAsString();
-      } else {
-        debugPrint('Local subtitle file not found');
+  Future<void> _loadSubtitles() async {
+    String? content;
+    if (widget.isLocal && widget.localSubtitlePath != null) {
+      try {
+        final file = File(widget.localSubtitlePath!);
+        if (await file.exists()) {
+          content = await file.readAsString();
+        } else {
+          debugPrint('Local subtitle file not found');
+        }
+      } catch (e) {
+        debugPrint('Failed to load local subtitles: $e');
       }
-    } catch (e) {
-      debugPrint('Failed to load local subtitles: $e');
-    }
-  } else if (widget.subtitleUrl != null && widget.subtitleUrl!.isNotEmpty) {
-    try {
-      final response = await http.get(Uri.parse(widget.subtitleUrl!));
-      if (response.statusCode == 200) {
-        content = utf8.decode(response.bodyBytes);
-      } else {
-        debugPrint('Failed to fetch network subtitles: ${response.statusCode}');
+    } else if (widget.subtitleUrl != null && widget.subtitleUrl!.isNotEmpty) {
+      try {
+        final response = await http.get(Uri.parse(widget.subtitleUrl!));
+        if (response.statusCode == 200) {
+          content = utf8.decode(response.bodyBytes);
+        } else {
+          debugPrint('Failed to fetch network subtitles: ${response.statusCode}');
+        }
+      } catch (e) {
+        debugPrint('Failed to load network subtitles: $e');
       }
-    } catch (e) {
-      debugPrint('Failed to load network subtitles: $e');
+    }
+    if (content != null && mounted) {
+      final subtitleText = content;
+      setState(() {
+        _subtitles = subtitleText.startsWith('WEBVTT')
+            ? _parseVtt(subtitleText)
+            : _parseSrt(subtitleText);
+      });
     }
   }
-if (content != null && mounted) {
-  final subtitleText = content; // now treated as non-null
-  setState(() {
-    _subtitles = subtitleText.startsWith('WEBVTT')
-        ? _parseVtt(subtitleText)
-        : _parseSrt(subtitleText);
-  });
-}
 
-
-}
-
-List<Subtitle> _parseSrt(String srt) {
-  final List<Subtitle> subtitles = [];
-  final regex = RegExp(
-      r'(\d+)\s+(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})\s+([\s\S]*?)(?=\n\n|\$)');
-  final matches = regex.allMatches(srt);
-  for (final match in matches) {
-    final start = _parseDuration(match.group(2)!);
-    final end = _parseDuration(match.group(3)!);
-    final text = match.group(4)!.trim().replaceAll('\n', ' ');
-    subtitles.add(Subtitle(start: start, end: end, text: text));
+  List<Subtitle> _parseSrt(String srt) {
+    final List<Subtitle> subtitles = [];
+    final regex = RegExp(
+        r'(\d+)\s+(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})\s+([\s\S]*?)(?=\n\n|\$)');
+    final matches = regex.allMatches(srt);
+    for (final match in matches) {
+      final start = _parseDuration(match.group(2)!);
+      final end = _parseDuration(match.group(3)!);
+      final text = match.group(4)!.trim().replaceAll('\n', ' ');
+      subtitles.add(Subtitle(start: start, end: end, text: text));
+    }
+    return subtitles;
   }
-  return subtitles;
-}
 
-List<Subtitle> _parseVtt(String vtt) {
-  final List<Subtitle> subtitles = [];
-  final regex = RegExp(
-      r'(\d{2}:\d{2}:\d{2}\.\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}\.\d{3})\s+([\s\S]*?)(?=\n\n|\$)');
-  final matches = regex.allMatches(vtt);
-  for (final match in matches) {
-    final start = _parseDuration(match.group(1)!);
-    final end = _parseDuration(match.group(2)!);
-    final text = match.group(3)!.trim().replaceAll('\n', ' ');
-    subtitles.add(Subtitle(start: start, end: end, text: text));
+  List<Subtitle> _parseVtt(String vtt) {
+    final List<Subtitle> subtitles = [];
+    final regex = RegExp(
+        r'(\d{2}:\d{2}:\d{2}\.\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}\.\d{3})\s+([\s\S]*?)(?=\n\n|\$)');
+    final matches = regex.allMatches(vtt);
+    for (final match in matches) {
+      final start = _parseDuration(match.group(1)!);
+      final end = _parseDuration(match.group(2)!);
+      final text = match.group(3)!.trim().replaceAll('\n', ' ');
+      subtitles.add(Subtitle(start: start, end: end, text: text));
+    }
+    return subtitles;
   }
-  return subtitles;
-}
 
   Duration _parseDuration(String timeString) {
     final parts = timeString.split(RegExp(r'[:,]'));
@@ -420,20 +540,42 @@ List<Subtitle> _parseVtt(String vtt) {
   }
 
   void _updateSubtitle() {
-    if (!_showSubtitles ||
-        _subtitles.isEmpty ||
-        !_controller.value.isInitialized) {
+    if (!_showSubtitles || _subtitles.isEmpty || !_controller.value.isInitialized) {
       return;
     }
     final position = _controller.value.position;
     final current = _subtitles.firstWhere(
         (sub) => position >= sub.start && position <= sub.end,
-        orElse: () =>
-            Subtitle(start: Duration.zero, end: Duration.zero, text: ""));
+        orElse: () => Subtitle(start: Duration.zero, end: Duration.zero, text: ""));
     if (mounted) {
       setState(() {
         _currentSubtitle = current.text;
       });
+    }
+  }
+
+  void _prepareSkip() {
+    final intro = widget.chapters!.firstWhere(
+      (c) => c.title.toLowerCase() == 'intro',
+      orElse: () => Chapter(title: 'Intro', start: Duration.zero, end: Duration.zero),
+    );
+    _skipStart = intro.start;
+    _skipEnd = intro.end;
+    _controller.addListener(_checkSkipIntro);
+  }
+
+  void _checkSkipIntro() {
+    if (!widget.enableSkipIntro || !_controller.value.isInitialized || _skipStart == null || _skipEnd == null) return;
+    final position = _controller.value.position;
+    setState(() {
+      _showSkipButton = position >= _skipStart! && position < _skipEnd!;
+    });
+  }
+
+  void _skipIntro() {
+    if (_skipEnd != null) {
+      _controller.seekTo(_skipEnd!);
+      setState(() => _showSkipButton = false);
     }
   }
 
@@ -479,6 +621,7 @@ List<Subtitle> _parseVtt(String vtt) {
     _hideTimer?.cancel();
     _recommendationTimer?.cancel();
     _controller.removeListener(_videoListener);
+    _controller.removeListener(_checkSkipIntro);
     _controller.pause().then((_) => _controller.dispose());
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
@@ -506,16 +649,13 @@ List<Subtitle> _parseVtt(String vtt) {
   }
 
   void _onHorizontalDragUpdate(DragUpdateDetails details) {
-    if (!_controller.value.isInitialized ||
-        _dragStartX == null ||
-        _dragStartPosition == null) {
+    if (!_controller.value.isInitialized || _dragStartX == null || _dragStartPosition == null) {
       return;
     }
     final screenWidth = MediaQuery.of(context).size.width;
     final dx = details.globalPosition.dx - _dragStartX!;
     final offset = dx / screenWidth * _controller.value.duration.inSeconds;
-    final newPosition = (_dragStartPosition!.inSeconds + offset)
-        .clamp(0, _controller.value.duration.inSeconds);
+    final newPosition = (_dragStartPosition!.inSeconds + offset).clamp(0, _controller.value.duration.inSeconds);
     setState(() {
       _seekTargetDuration = Duration(seconds: newPosition.round());
       _showControls = true;
@@ -573,9 +713,7 @@ List<Subtitle> _parseVtt(String vtt) {
     final quality = await showMenu<String>(
       context: context,
       position: const RelativeRect.fromLTRB(100, 100, 100, 100),
-      items: _qualities
-          .map((q) => PopupMenuItem<String>(value: q, child: Text(q)))
-          .toList(),
+      items: _qualities.map((q) => PopupMenuItem<String>(value: q, child: Text(q))).toList(),
     );
     if (quality != null && quality != _selectedQuality) {
       setState(() {
@@ -592,14 +730,16 @@ List<Subtitle> _parseVtt(String vtt) {
         tmdbId: widget.title.hashCode.toString(),
         title: widget.title,
         releaseYear: widget.releaseYear,
+        season: _currentSeasonNumber,
+        episode: _currentEpisodeNumber,
         resolution: quality == "Auto" ? "auto" : quality,
         enableSubtitles: _showSubtitles,
       );
+      _streamingInfo = streamingInfo;
       final newUrl = streamingInfo['url'] ?? _currentVideoPath;
       final newSubtitleUrl = streamingInfo['subtitleUrl'];
       final isHls = streamingInfo['type'] == 'm3u8';
-      await _switchVideo(newUrl, widget.title,
-          newSubtitleUrl: newSubtitleUrl, isHls: isHls);
+      await _switchVideo(newUrl, widget.title, newSubtitleUrl: newSubtitleUrl, isHls: isHls);
     } catch (e) {
       debugPrint('Failed to fetch new quality stream: $e');
       if (mounted) {
@@ -632,6 +772,88 @@ List<Subtitle> _parseVtt(String vtt) {
     }
   }
 
+  void _showAudioTrackMenu() async {
+    if (widget.audioTracks == null || widget.audioTracks!.isEmpty) return;
+    final selected = await showMenu<String>(
+      context: context,
+      position: const RelativeRect.fromLTRB(100, 100, 100, 100),
+      items: widget.audioTracks!.map((track) => PopupMenuItem<String>(
+        value: track.label,
+        child: Text(track.label, style: const TextStyle(color: Colors.white)),
+      )).toList(),
+      color: Colors.black87,
+    );
+    if (selected != null) {
+      _selectAudioTrack(selected);
+    }
+  }
+
+  void _showSubtitleTrackMenu() async {
+    if (widget.subtitleTracks == null || widget.subtitleTracks!.isEmpty) return;
+    final selected = await showMenu<String>(
+      context: context,
+      position: const RelativeRect.fromLTRB(100, 100, 100, 100),
+      items: widget.subtitleTracks!.map((track) => PopupMenuItem<String>(
+        value: track.label,
+        child: Text(track.label, style: const TextStyle(color: Colors.white)),
+      )).toList(),
+      color: Colors.black87,
+    );
+    if (selected != null) {
+      _selectSubtitleTrack(selected);
+    }
+  }
+
+  void _selectAudioTrack(String? label) {
+    if (label == null || widget.audioTracks == null) return;
+    final track = widget.audioTracks!.firstWhere(
+      (t) => t.label == label,
+      orElse: () => widget.audioTracks!.first,
+    );
+    // TODO: Implement platform-specific audio track switching
+    setState(() {
+      _selectedAudioTrack = track.label;
+    });
+  }
+
+  void _selectSubtitleTrack(String? label) {
+    if (label == null || widget.subtitleTracks == null) return;
+    final track = widget.subtitleTracks!.firstWhere(
+      (t) => t.label == label,
+      orElse: () => widget.subtitleTracks!.first,
+    );
+    // TODO: Implement subtitle track switching
+    setState(() {
+      _selectedSubtitleTrack = track.label;
+    });
+  }
+
+  Future<void> _enterPiP() async {
+    if (!widget.enablePiP) return;
+
+    if (kIsWeb) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('PiP not supported on web')),
+        );
+      }
+      return;
+    }
+
+    try {
+      final pip = FlPiP();
+      await pip.enable();
+      _controller.pause();
+    } catch (e) {
+      debugPrint('Failed to enter PiP: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to enter PiP')),
+        );
+      }
+    }
+  }
+
   void _showSettingsMenu() {
     showModalBottomSheet(
       context: context,
@@ -644,30 +866,21 @@ List<Subtitle> _parseVtt(String vtt) {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text('Customize Player',
-                  style: TextStyle(color: Colors.white, fontSize: 18)),
+              const Text('Customize Player', style: TextStyle(color: Colors.white, fontSize: 18)),
               const SizedBox(height: 12),
               Row(
                 children: [
-                  const Text('Control Color:',
-                      style: TextStyle(color: Colors.white)),
+                  const Text('Control Color:', style: TextStyle(color: Colors.white)),
                   const SizedBox(width: 8),
                   DropdownButton<Color>(
                     value: _controlColor,
                     dropdownColor: Colors.black87,
                     items: const [
                       DropdownMenuItem(
-                          value: Colors.white,
-                          child: Text('White',
-                              style: TextStyle(color: Colors.white))),
+                          value: Colors.white, child: Text('White', style: TextStyle(color: Colors.white))),
                       DropdownMenuItem(
-                          value: Colors.yellow,
-                          child: Text('Yellow',
-                              style: TextStyle(color: Colors.yellow))),
-                      DropdownMenuItem(
-                          value: Colors.red,
-                          child:
-                              Text('Red', style: TextStyle(color: Colors.red))),
+                          value: Colors.yellow, child: Text('Yellow', style: TextStyle(color: Colors.yellow))),
+                      DropdownMenuItem(value: Colors.red, child: Text('Red', style: TextStyle(color: Colors.red))),
                     ],
                     onChanged: (color) {
                       if (mounted) {
@@ -682,8 +895,7 @@ List<Subtitle> _parseVtt(String vtt) {
               const SizedBox(height: 16),
               Row(
                 children: [
-                  const Text('Icon Size:',
-                      style: TextStyle(color: Colors.white)),
+                  const Text('Icon Size:', style: TextStyle(color: Colors.white)),
                   const SizedBox(width: 16),
                   Expanded(
                     child: CupertinoSegmentedControl<String>(
@@ -692,11 +904,8 @@ List<Subtitle> _parseVtt(String vtt) {
                         return MapEntry(
                           label,
                           Padding(
-                            padding: const EdgeInsets.symmetric(
-                                vertical: 8, horizontal: 4),
-                            child: Text(label,
-                                style: const TextStyle(color: Colors.white),
-                                textAlign: TextAlign.center),
+                            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                            child: Text(label, style: const TextStyle(color: Colors.white), textAlign: TextAlign.center),
                           ),
                         );
                       }),
@@ -723,6 +932,13 @@ List<Subtitle> _parseVtt(String vtt) {
                     _startHideTimer();
                   }
                 },
+                onKeyEvent: (node, event) {
+                  if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                    Navigator.pop(context);
+                    return KeyEventResult.handled;
+                  }
+                  return KeyEventResult.ignored;
+                },
               ),
             ],
           ),
@@ -742,23 +958,17 @@ List<Subtitle> _parseVtt(String vtt) {
     final duration = _controller.value.duration;
     final remaining = duration - position;
 
-    if (remaining <= const Duration(seconds: 30)) {
-      if (widget.isFullSeason && !_showNextEpisodeBar) {
-        setState(() {
-          _showNextEpisodeBar = true;
-          _showControls = true;
-        });
-        _fetchNextEpisode();
-      } else if (!widget.isFullSeason && !_showRecommendationsBar) {
-        setState(() {
-          _showRecommendationsBar = true;
-          _showControls = true;
-        });
-        _fetchRecommendations();
-      }
-    }
+    final creditsStartTime = _streamingInfo?['creditsStartTime'] != null
+        ? Duration(seconds: _streamingInfo!['creditsStartTime'] as int)
+        : duration * 0.93;
 
-    if (remaining <= Duration.zero) {
+    if (position >= creditsStartTime && !_showNextEpisodeBar && widget.isFullSeason) {
+      setState(() {
+        _showNextEpisodeBar = true;
+        _showControls = true;
+      });
+      _fetchNextEpisode();
+    } else if (remaining <= Duration.zero) {
       if (widget.isFullSeason && _nextEpisodeData != null) {
         _playNextEpisode();
       } else if (!widget.isFullSeason && _recommendationData != null) {
@@ -767,36 +977,140 @@ List<Subtitle> _parseVtt(String vtt) {
     }
   }
 
-  void _fetchNextEpisode() {
-    if (_currentEpisodeNumber == null ||
-        !widget.isFullSeason ||
-        widget.episodeFiles.isEmpty) {
+  void _fetchNextEpisode() async {
+    if (_currentSeasonNumber == null || _currentEpisodeNumber == null || !widget.isFullSeason || widget.seasons == null) {
       return;
     }
-    final currentIndex = widget.episodeFiles.indexOf(_currentVideoPath);
-    if (currentIndex != -1 && currentIndex < widget.episodeFiles.length - 1) {
-      final nextVideoPath = widget.episodeFiles[currentIndex + 1];
-      if (mounted) {
-        setState(() {
-          _nextEpisodeData = {'videoPath': nextVideoPath};
-        });
+    final currentSeason = widget.seasons!.firstWhere(
+      (season) => season['season_number'] == _currentSeasonNumber,
+      orElse: () => {},
+    );
+    final episodes = currentSeason['episodes'] as List<dynamic>? ?? [];
+    final currentIndex = episodes.indexWhere((e) => e['episode_number'] == _currentEpisodeNumber);
+    if (currentIndex != -1 && currentIndex < episodes.length - 1) {
+      final nextEpisode = episodes[currentIndex + 1];
+      final nextEpisodeNumber = nextEpisode['episode_number'] as int;
+      try {
+        final streamingInfo = await StreamingService.getStreamingLink(
+          tmdbId: widget.title.hashCode.toString(),
+          title: widget.title,
+          releaseYear: widget.releaseYear,
+          season: _currentSeasonNumber!,
+          episode: nextEpisodeNumber,
+          resolution: _selectedQuality,
+          enableSubtitles: _showSubtitles,
+        );
+        final nextVideoPath = streamingInfo['url'] ?? '';
+        final synopsis = nextEpisode['overview'] ?? 'No synopsis available';
+        if (nextVideoPath.isNotEmpty && mounted) {
+          setState(() {
+            _nextEpisodeData = {
+              'videoPath': nextVideoPath,
+              'title': '${widget.title} - S${_currentSeasonNumber!.toString().padLeft(2, '0')}E${nextEpisodeNumber.toString().padLeft(2, '0')}',
+              'episodeNumber': nextEpisodeNumber.toString(),
+              'synopsis': synopsis,
+            };
+          });
+        } else {
+          final fallbackVideoPath = 'S${_currentSeasonNumber}E${nextEpisodeNumber}';
+          if (mounted) {
+            setState(() {
+              _nextEpisodeData = {
+                'videoPath': fallbackVideoPath,
+                'title': '${widget.title} - S${_currentSeasonNumber}E${nextEpisodeNumber}',
+                'episodeNumber': nextEpisodeNumber.toString(),
+                'synopsis': synopsis,
+              };
+            });
+          }
+        }
+      } catch (e) {
+        debugPrint('Failed to fetch next episode: $e');
+        final fallbackVideoPath = 'S${_currentSeasonNumber}E${nextEpisodeNumber}';
+        final synopsis = nextEpisode['overview'] ?? 'No synopsis available';
+        if (mounted) {
+          setState(() {
+            _nextEpisodeData = {
+              'videoPath': fallbackVideoPath,
+              'title': '${widget.title} - S${_currentSeasonNumber}E${nextEpisodeNumber}',
+              'episodeNumber': nextEpisodeNumber.toString(),
+              'synopsis': synopsis,
+            };
+          });
+        }
       }
     }
+  }
+
+  void _showNextEpisodePreview() {
+    if (_nextEpisodeData == null) return;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.black87,
+        title: Text(
+          _nextEpisodeData!['title'] ?? 'Next Episode',
+          style: const TextStyle(color: Colors.white),
+        ),
+        content: Text(
+          _nextEpisodeData!['synopsis'] ?? 'No synopsis available',
+          style: const TextStyle(color: Colors.white),
+        ),
+        actions: [
+          Focus(
+            child: TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close', style: TextStyle(color: Colors.white)),
+            ),
+            onFocusChange: (hasFocus) {
+              if (hasFocus) {
+                _startHideTimer();
+              }
+            },
+            onKeyEvent: (node, event) {
+              if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                Navigator.pop(context);
+                return KeyEventResult.handled;
+              }
+              return KeyEventResult.ignored;
+            },
+          ),
+          Focus(
+            child: TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _playNextEpisode();
+              },
+              child: const Text('Play Now', style: TextStyle(color: Colors.white)),
+            ),
+            onFocusChange: (hasFocus) {
+              if (hasFocus) {
+                _startHideTimer();
+              }
+            },
+            onKeyEvent: (node, event) {
+              if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                Navigator.pop(context);
+                _playNextEpisode();
+                return KeyEventResult.handled;
+              }
+              return KeyEventResult.ignored;
+            },
+          ),
+        ],
+      ),
+    ).then((_) => _startHideTimer());
   }
 
   Future<void> _fetchRecommendations() async {
     if (widget.similarMovies.isEmpty) return;
     final recommendation = widget.similarMovies.first;
     try {
-      final releaseDate = recommendation['release_date'] as String? ??
-          recommendation['first_air_date'] as String? ??
-          '1970-01-01';
+      final releaseDate = recommendation['release_date'] as String? ?? recommendation['first_air_date'] as String? ?? '1970-01-01';
       final releaseYear = int.parse(releaseDate.split('-')[0]);
       final streamingInfo = await StreamingService.getStreamingLink(
         tmdbId: recommendation['id'].toString(),
-        title: recommendation['title']?.toString() ??
-            recommendation['name']?.toString() ??
-            'Untitled',
+        title: recommendation['title']?.toString() ?? recommendation['name']?.toString() ?? 'Untitled',
         releaseYear: releaseYear,
         resolution: _selectedQuality,
         enableSubtitles: _showSubtitles,
@@ -804,10 +1118,7 @@ List<Subtitle> _parseVtt(String vtt) {
       if (mounted) {
         setState(() {
           _recommendationData = {
-            'title': streamingInfo['title'] ??
-                recommendation['title'] ??
-                recommendation['name'] ??
-                'Untitled',
+            'title': streamingInfo['title'] ?? recommendation['title'] ?? recommendation['name'] ?? 'Untitled',
             'videoPath': streamingInfo['url'] ?? '',
           };
         });
@@ -826,8 +1137,7 @@ List<Subtitle> _parseVtt(String vtt) {
   }
 
   void _playRecommendedMovie() {
-    if (_recommendationData == null ||
-        _recommendationData!['videoPath'].isEmpty) {
+    if (_recommendationData == null || _recommendationData!['videoPath'].isEmpty) {
       return;
     }
     final nextVideoPath = _recommendationData!['videoPath'];
@@ -837,23 +1147,7 @@ List<Subtitle> _parseVtt(String vtt) {
     }
   }
 
-  Future<void> _switchEpisode(String videoPath) async {
-    if (!mounted) return;
-    setState(() {
-      _currentVideoPath = videoPath;
-      _currentEpisodeNumber = _extractEpisodeNumber(videoPath);
-      _showNextEpisodeBar = false;
-      _nextEpisodeData = null;
-      _isInitialized = false;
-    });
-    await _controller.pause();
-    await _controller.dispose();
-    await _initializeVideo();
-    await _loadSubtitles();
-  }
-
-  Future<void> _switchVideo(String videoPath, String title,
-      {String? newSubtitleUrl, bool isHls = false}) async {
+  Future<void> _switchVideo(String videoPath, String title, {String? newSubtitleUrl, bool isHls = false}) async {
     if (!mounted) return;
     setState(() {
       _currentVideoPath = videoPath;
@@ -875,6 +1169,15 @@ List<Subtitle> _parseVtt(String vtt) {
       localSubtitlePath: widget.localSubtitlePath,
       isHls: isHls,
       isLocal: widget.isLocal,
+      seasons: widget.seasons,
+      initialSeasonNumber: _currentSeasonNumber,
+      initialEpisodeNumber: _currentEpisodeNumber,
+      enableSkipIntro: widget.enableSkipIntro,
+      chapters: widget.chapters,
+      enablePiP: widget.enablePiP,
+      enableOffline: widget.enableOffline,
+      audioTracks: widget.audioTracks,
+      subtitleTracks: widget.subtitleTracks,
     );
     setState(() {
       _currentVideoPath = newWidget.videoPath;
@@ -884,30 +1187,65 @@ List<Subtitle> _parseVtt(String vtt) {
     await _loadSubtitles();
   }
 
-  void _showEpisodeMenu() async {
-    if (!widget.isFullSeason || widget.episodeFiles.isEmpty) return;
-    final episode = await showMenu<String>(
-      context: context,
-      position: const RelativeRect.fromLTRB(100, 100, 100, 100),
-      items: widget.episodeFiles
-          .asMap()
-          .entries
-          .map((entry) => PopupMenuItem<String>(
-              value: entry.value, child: Text("Episode ${entry.key + 1}")))
-          .toList(),
-    );
-    if (episode != null && episode != _currentVideoPath) {
-      await _switchEpisode(episode);
+  Future<void> _switchToEpisode(int seasonNumber, int episodeNumber) async {
+    try {
+      final streamingInfo = await StreamingService.getStreamingLink(
+        tmdbId: widget.title.hashCode.toString(),
+        title: widget.title,
+        releaseYear: widget.releaseYear,
+        season: seasonNumber,
+        episode: episodeNumber,
+        resolution: _selectedQuality,
+        enableSubtitles: _showSubtitles,
+      );
+      _streamingInfo = streamingInfo;
+      final newUrl = streamingInfo['url'] ?? '';
+      final newSubtitleUrl = streamingInfo['subtitleUrl'];
+      final isHls = streamingInfo['type'] == 'm3u8';
+      final newTitle = '${widget.title} - S${seasonNumber.toString().padLeft(2, '0')}E${episodeNumber.toString().padLeft(2, '0')}';
+
+      if (newUrl.isNotEmpty) {
+        await _switchVideo(
+          newUrl,
+          newTitle,
+          newSubtitleUrl: newSubtitleUrl,
+          isHls: isHls,
+        );
+        setState(() {
+          _currentSeasonNumber = seasonNumber;
+          _currentEpisodeNumber = episodeNumber;
+        });
+      } else {
+        throw Exception('No streaming URL found');
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Failed to load episode: $e")),
+        );
+      }
     }
-    _startHideTimer();
+  }
+
+  void _showEpisodeMenu() {
+    if (!widget.isFullSeason || widget.seasons == null || widget.seasons!.isEmpty) return;
+    showDialog(
+      context: context,
+      builder: (context) => EpisodeSelectorDialog(
+        seasons: widget.seasons!,
+        currentSeasonNumber: _currentSeasonNumber ?? 1,
+        currentEpisodeNumber: _currentEpisodeNumber ?? 1,
+        onEpisodeSelected: _switchToEpisode,
+      ),
+    ).then((_) => _startHideTimer());
   }
 
   void _playNextEpisode() {
-    if (_nextEpisodeData == null || _nextEpisodeData!['videoPath'] == null) {
+    if (_nextEpisodeData == null || _nextEpisodeData!['videoPath'] == null || _nextEpisodeData!['episodeNumber'] == null) {
       return;
     }
-    final nextVideoPath = _nextEpisodeData!['videoPath']!;
-    _switchEpisode(nextVideoPath);
+    final nextEpisodeNumber = int.parse(_nextEpisodeData!['episodeNumber']!);
+    _switchToEpisode(_currentSeasonNumber!, nextEpisodeNumber);
   }
 
   Widget _buildControls() {
@@ -935,8 +1273,7 @@ List<Subtitle> _parseVtt(String vtt) {
                   children: [
                     Focus(
                       child: IconButton(
-                        icon: Icon(Icons.arrow_back,
-                            color: _controlColor, size: _iconSize),
+                        icon: Icon(Icons.arrow_back, color: _controlColor, size: _iconSize),
                         onPressed: () {
                           if (mounted) Navigator.pop(context);
                         },
@@ -947,8 +1284,7 @@ List<Subtitle> _parseVtt(String vtt) {
                         }
                       },
                       onKeyEvent: (node, event) {
-                        if (event is KeyDownEvent &&
-                            event.logicalKey == LogicalKeyboardKey.select) {
+                        if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                           if (mounted) Navigator.pop(context);
                           return KeyEventResult.handled;
                         }
@@ -960,9 +1296,7 @@ List<Subtitle> _parseVtt(String vtt) {
                         _title,
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                            color: _controlColor,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold),
+                            color: _controlColor, fontSize: 18, fontWeight: FontWeight.bold),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -970,8 +1304,7 @@ List<Subtitle> _parseVtt(String vtt) {
                       children: [
                         Focus(
                           child: IconButton(
-                            icon: Icon(Icons.high_quality,
-                                color: _controlColor, size: _iconSize),
+                            icon: Icon(Icons.high_quality, color: _controlColor, size: _iconSize),
                             onPressed: _showQualityMenu,
                           ),
                           onFocusChange: (hasFocus) {
@@ -980,8 +1313,7 @@ List<Subtitle> _parseVtt(String vtt) {
                             }
                           },
                           onKeyEvent: (node, event) {
-                            if (event is KeyDownEvent &&
-                                event.logicalKey == LogicalKeyboardKey.select) {
+                            if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                               _showQualityMenu();
                               return KeyEventResult.handled;
                             }
@@ -990,8 +1322,7 @@ List<Subtitle> _parseVtt(String vtt) {
                         ),
                         Focus(
                           child: IconButton(
-                            icon: Icon(Icons.speed,
-                                color: _controlColor, size: _iconSize),
+                            icon: Icon(Icons.speed, color: _controlColor, size: _iconSize),
                             onPressed: _showSpeedMenu,
                           ),
                           onFocusChange: (hasFocus) {
@@ -1000,18 +1331,54 @@ List<Subtitle> _parseVtt(String vtt) {
                             }
                           },
                           onKeyEvent: (node, event) {
-                            if (event is KeyDownEvent &&
-                                event.logicalKey == LogicalKeyboardKey.select) {
+                            if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                               _showSpeedMenu();
                               return KeyEventResult.handled;
                             }
                             return KeyEventResult.ignored;
                           },
                         ),
+                        if (widget.audioTracks != null && widget.audioTracks!.isNotEmpty)
+                          Focus(
+                            child: IconButton(
+                              icon: Icon(Icons.audiotrack, color: _controlColor, size: _iconSize),
+                              onPressed: _showAudioTrackMenu,
+                            ),
+                            onFocusChange: (hasFocus) {
+                              if (hasFocus) {
+                                _startHideTimer();
+                              }
+                            },
+                            onKeyEvent: (node, event) {
+                              if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                                _showAudioTrackMenu();
+                                return KeyEventResult.handled;
+                              }
+                              return KeyEventResult.ignored;
+                            },
+                          ),
+                        if (widget.subtitleTracks != null && widget.subtitleTracks!.isNotEmpty)
+                          Focus(
+                            child: IconButton(
+                              icon: Icon(Icons.subtitles, color: _controlColor, size: _iconSize),
+                              onPressed: _showSubtitleTrackMenu,
+                            ),
+                            onFocusChange: (hasFocus) {
+                              if (hasFocus) {
+                                _startHideTimer();
+                              }
+                            },
+                            onKeyEvent: (node, event) {
+                              if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                                _showSubtitleTrackMenu();
+                                return KeyEventResult.handled;
+                              }
+                              return KeyEventResult.ignored;
+                            },
+                          ),
                         Focus(
                           child: IconButton(
-                            icon: Icon(Icons.settings,
-                                color: _controlColor, size: _iconSize),
+                            icon: Icon(Icons.settings, color: _controlColor, size: _iconSize),
                             onPressed: _showSettingsMenu,
                           ),
                           onFocusChange: (hasFocus) {
@@ -1020,8 +1387,7 @@ List<Subtitle> _parseVtt(String vtt) {
                             }
                           },
                           onKeyEvent: (node, event) {
-                            if (event is KeyDownEvent &&
-                                event.logicalKey == LogicalKeyboardKey.select) {
+                            if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                               _showSettingsMenu();
                               return KeyEventResult.handled;
                             }
@@ -1031,9 +1397,7 @@ List<Subtitle> _parseVtt(String vtt) {
                         Focus(
                           child: IconButton(
                             icon: Icon(
-                                _showSubtitles
-                                    ? Icons.closed_caption
-                                    : Icons.closed_caption_off,
+                                _showSubtitles ? Icons.closed_caption : Icons.closed_caption_off,
                                 color: _controlColor,
                                 size: _iconSize),
                             onPressed: () {
@@ -1049,8 +1413,7 @@ List<Subtitle> _parseVtt(String vtt) {
                             }
                           },
                           onKeyEvent: (node, event) {
-                            if (event is KeyDownEvent &&
-                                event.logicalKey == LogicalKeyboardKey.select) {
+                            if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                               setState(() {
                                 _showSubtitles = !_showSubtitles;
                               });
@@ -1063,8 +1426,7 @@ List<Subtitle> _parseVtt(String vtt) {
                         if (widget.isFullSeason)
                           Focus(
                             child: IconButton(
-                              icon: Icon(Icons.list,
-                                  color: _controlColor, size: _iconSize),
+                              icon: Icon(Icons.list, color: _controlColor, size: _iconSize),
                               onPressed: _showEpisodeMenu,
                             ),
                             onFocusChange: (hasFocus) {
@@ -1073,9 +1435,27 @@ List<Subtitle> _parseVtt(String vtt) {
                               }
                             },
                             onKeyEvent: (node, event) {
-                              if (event is KeyDownEvent &&
-                                  event.logicalKey == LogicalKeyboardKey.select) {
+                              if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                                 _showEpisodeMenu();
+                                return KeyEventResult.handled;
+                              }
+                              return KeyEventResult.ignored;
+                            },
+                          ),
+                        if (widget.enablePiP)
+                          Focus(
+                            child: IconButton(
+                              icon: Icon(Icons.picture_in_picture, color: _controlColor, size: _iconSize),
+                              onPressed: _enterPiP,
+                            ),
+                            onFocusChange: (hasFocus) {
+                              if (hasFocus) {
+                                _startHideTimer();
+                              }
+                            },
+                            onKeyEvent: (node, event) {
+                              if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                                _enterPiP();
                                 return KeyEventResult.handled;
                               }
                               return KeyEventResult.ignored;
@@ -1100,10 +1480,7 @@ List<Subtitle> _parseVtt(String vtt) {
                     color: Colors.white,
                     fontSize: 16,
                     shadows: [
-                      Shadow(
-                          offset: Offset(1, 1),
-                          color: Colors.black,
-                          blurRadius: 2)
+                      Shadow(offset: Offset(1, 1), color: Colors.black, blurRadius: 2)
                     ]),
               ),
             ),
@@ -1116,10 +1493,8 @@ List<Subtitle> _parseVtt(String vtt) {
                     iconSize: _iconSize,
                     icon: Icon(Icons.replay_10, color: _controlColor),
                     onPressed: () {
-                      final newPos = _controller.value.position -
-                          const Duration(seconds: 10);
-                      _controller.seekTo(
-                          newPos > Duration.zero ? newPos : Duration.zero);
+                      final newPos = _controller.value.position - const Duration(seconds: 10);
+                      _controller.seekTo(newPos > Duration.zero ? newPos : Duration.zero);
                       _startHideTimer();
                     },
                   ),
@@ -1129,12 +1504,9 @@ List<Subtitle> _parseVtt(String vtt) {
                     }
                   },
                   onKeyEvent: (node, event) {
-                    if (event is KeyDownEvent &&
-                        event.logicalKey == LogicalKeyboardKey.select) {
-                      final newPos = _controller.value.position -
-                          const Duration(seconds: 10);
-                      _controller.seekTo(
-                          newPos > Duration.zero ? newPos : Duration.zero);
+                    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                      final newPos = _controller.value.position - const Duration(seconds: 10);
+                      _controller.seekTo(newPos > Duration.zero ? newPos : Duration.zero);
                       _startHideTimer();
                       return KeyEventResult.handled;
                     }
@@ -1145,9 +1517,7 @@ List<Subtitle> _parseVtt(String vtt) {
                   child: IconButton(
                     iconSize: _iconSize + 24,
                     icon: Icon(
-                        _controller.value.isPlaying
-                            ? Icons.pause_circle_filled
-                            : Icons.play_circle_filled,
+                        _controller.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
                         color: _controlColor),
                     onPressed: () {
                       setState(() {
@@ -1166,8 +1536,7 @@ List<Subtitle> _parseVtt(String vtt) {
                     }
                   },
                   onKeyEvent: (node, event) {
-                    if (event is KeyDownEvent &&
-                        event.logicalKey == LogicalKeyboardKey.select) {
+                    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                       setState(() {
                         if (_controller.value.isPlaying) {
                           _controller.pause();
@@ -1186,8 +1555,7 @@ List<Subtitle> _parseVtt(String vtt) {
                     iconSize: _iconSize,
                     icon: Icon(Icons.forward_10, color: _controlColor),
                     onPressed: () {
-                      final newPos = _controller.value.position +
-                          const Duration(seconds: 10);
+                      final newPos = _controller.value.position + const Duration(seconds: 10);
                       if (newPos < _controller.value.duration) {
                         _controller.seekTo(newPos);
                       }
@@ -1200,10 +1568,8 @@ List<Subtitle> _parseVtt(String vtt) {
                     }
                   },
                   onKeyEvent: (node, event) {
-                    if (event is KeyDownEvent &&
-                        event.logicalKey == LogicalKeyboardKey.select) {
-                      final newPos = _controller.value.position +
-                          const Duration(seconds: 10);
+                    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                      final newPos = _controller.value.position + const Duration(seconds: 10);
                       if (newPos < _controller.value.duration) {
                         _controller.seekTo(newPos);
                       }
@@ -1218,12 +1584,32 @@ List<Subtitle> _parseVtt(String vtt) {
           ),
           if (_seekTargetDuration != null)
             Center(
-                child: Text(_formatDuration(_seekTargetDuration!),
-                    style: const TextStyle(color: Colors.white, fontSize: 24))),
+                child: Text(_formatDuration(_seekTargetDuration!), style: const TextStyle(color: Colors.white, fontSize: 24))),
           if (_seekFeedback != null)
-            Center(
-                child: Text(_seekFeedback!,
-                    style: const TextStyle(color: Colors.white, fontSize: 24))),
+            Center(child: Text(_seekFeedback!, style: const TextStyle(color: Colors.white, fontSize: 24))),
+          if (_showSkipButton && widget.enableSkipIntro && _skipStart != null)
+            Positioned(
+              top: 20,
+              right: 20,
+              child: Focus(
+                child: TextButton(
+                  onPressed: _skipIntro,
+                  child: const Text('Skip Intro', style: TextStyle(color: Colors.white)),
+                ),
+                onFocusChange: (hasFocus) {
+                  if (hasFocus) {
+                    _startHideTimer();
+                  }
+                },
+                onKeyEvent: (node, event) {
+                  if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                    _skipIntro();
+                    return KeyEventResult.handled;
+                  }
+                  return KeyEventResult.ignored;
+                },
+              ),
+            ),
           if (_showNextEpisodeBar)
             Positioned(
               bottom: 100,
@@ -1231,38 +1617,59 @@ List<Subtitle> _parseVtt(String vtt) {
               right: 20,
               child: Container(
                 padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                    color: Colors.black87,
-                    borderRadius: BorderRadius.circular(8)),
+                decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(8)),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      _nextEpisodeData != null
-                          ? 'Next: Episode ${_extractEpisodeNumber(_nextEpisodeData!['videoPath']!)}'
-                          : 'Loading next episode...',
-                      style: const TextStyle(color: Colors.white, fontSize: 16),
-                    ),
-                    Focus(
-                      child: ElevatedButton(
-                        onPressed:
-                            _nextEpisodeData != null ? _playNextEpisode : null,
-                        child: const Text('Play Now'),
+                    Expanded(
+                      child: Text(
+                        _nextEpisodeData != null
+                            ? 'Next: ${_nextEpisodeData!['title']}'
+                            : 'Loading next episode...',
+                        style: const TextStyle(color: Colors.white, fontSize: 16),
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      onFocusChange: (hasFocus) {
-                        if (hasFocus) {
-                          _startHideTimer();
-                        }
-                      },
-                      onKeyEvent: (node, event) {
-                        if (event is KeyDownEvent &&
-                            event.logicalKey == LogicalKeyboardKey.select &&
-                            _nextEpisodeData != null) {
-                          _playNextEpisode();
-                          return KeyEventResult.handled;
-                        }
-                        return KeyEventResult.ignored;
-                      },
+                    ),
+                    Row(
+                      children: [
+                        Focus(
+                          child: ElevatedButton(
+                            onPressed: _nextEpisodeData != null ? _showNextEpisodePreview : null,
+                            child: const Text('Now'),
+                          ),
+                          onFocusChange: (hasFocus) {
+                            if (hasFocus) {
+                              _startHideTimer();
+                            }
+                          },
+                          onKeyEvent: (node, event) {
+                            if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select && _nextEpisodeData != null) {
+                              _showNextEpisodePreview();
+                              return KeyEventResult.handled;
+                            }
+                            return KeyEventResult.ignored;
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        Focus(
+                          child: ElevatedButton(
+                            onPressed: _nextEpisodeData != null ? _playNextEpisode : null,
+                            child: const Text('Play Now'),
+                          ),
+                          onFocusChange: (hasFocus) {
+                            if (hasFocus) {
+                              _startHideTimer();
+                            }
+                          },
+                          onKeyEvent: (node, event) {
+                            if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select && _nextEpisodeData != null) {
+                              _playNextEpisode();
+                              return KeyEventResult.handled;
+                            }
+                            return KeyEventResult.ignored;
+                          },
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -1275,15 +1682,11 @@ List<Subtitle> _parseVtt(String vtt) {
               right: 20,
               child: Container(
                 padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                    color: Colors.black87,
-                    borderRadius: BorderRadius.circular(8)),
+                decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(8)),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text('Up Next: ${_recommendationData!['title']}',
-                        style:
-                            const TextStyle(color: Colors.white, fontSize: 16)),
+                    Text('Up Next: ${_recommendationData!['title']}', style: const TextStyle(color: Colors.white, fontSize: 16)),
                     Focus(
                       child: ElevatedButton(
                         onPressed: _playRecommendedMovie,
@@ -1295,8 +1698,7 @@ List<Subtitle> _parseVtt(String vtt) {
                         }
                       },
                       onKeyEvent: (node, event) {
-                        if (event is KeyDownEvent &&
-                            event.logicalKey == LogicalKeyboardKey.select) {
+                        if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                           _playRecommendedMovie();
                           return KeyEventResult.handled;
                         }
@@ -1326,31 +1728,23 @@ List<Subtitle> _parseVtt(String vtt) {
                       _controller,
                       allowScrubbing: true,
                       colors: const VideoProgressColors(
-                          playedColor: Colors.deepPurpleAccent,
-                          backgroundColor: Colors.grey,
-                          bufferedColor: Colors.white30),
+                          playedColor: Colors.deepPurpleAccent, backgroundColor: Colors.grey, bufferedColor: Colors.white30),
                       padding: const EdgeInsets.symmetric(vertical: 8),
                     ),
                     const SizedBox(height: 8),
                     Row(
                       children: [
-                        Text(_formatDuration(_controller.value.position),
-                            style:
-                                TextStyle(color: _controlColor, fontSize: 14)),
+                        Text(_formatDuration(_controller.value.position), style: TextStyle(color: _controlColor, fontSize: 14)),
                         const Spacer(),
                         Focus(
                           child: IconButton(
-                            icon: Icon(
-                                _isMuted ? Icons.volume_off : Icons.volume_up,
-                                color: _controlColor,
-                                size: _iconSize),
+                            icon: Icon(_isMuted ? Icons.volume_off : Icons.volume_up, color: _controlColor, size: _iconSize),
                             onPressed: () {
                               showDialog(
                                 context: context,
                                 builder: (context) => AlertDialog(
                                   backgroundColor: Colors.black87,
-                                  title: const Text('Volume',
-                                      style: TextStyle(color: Colors.white)),
+                                  title: const Text('Volume', style: TextStyle(color: Colors.white)),
                                   content: Slider(
                                     value: _volume,
                                     onChanged: (value) {
@@ -1368,20 +1762,15 @@ List<Subtitle> _parseVtt(String vtt) {
                                   actions: [
                                     Focus(
                                       child: TextButton(
-                                          onPressed: () =>
-                                              Navigator.pop(context),
-                                          child: const Text('Close',
-                                              style: TextStyle(
-                                                  color: Colors.white))),
+                                          onPressed: () => Navigator.pop(context),
+                                          child: const Text('Close', style: TextStyle(color: Colors.white))),
                                       onFocusChange: (hasFocus) {
                                         if (hasFocus) {
                                           _startHideTimer();
                                         }
                                       },
                                       onKeyEvent: (node, event) {
-                                        if (event is KeyDownEvent &&
-                                            event.logicalKey ==
-                                                LogicalKeyboardKey.select) {
+                                        if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                                           Navigator.pop(context);
                                           return KeyEventResult.handled;
                                         }
@@ -1399,14 +1788,12 @@ List<Subtitle> _parseVtt(String vtt) {
                             }
                           },
                           onKeyEvent: (node, event) {
-                            if (event is KeyDownEvent &&
-                                event.logicalKey == LogicalKeyboardKey.select) {
+                            if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                               showDialog(
                                 context: context,
                                 builder: (context) => AlertDialog(
                                   backgroundColor: Colors.black87,
-                                  title: const Text('Volume',
-                                      style: TextStyle(color: Colors.white)),
+                                  title: const Text('Volume', style: TextStyle(color: Colors.white)),
                                   content: Slider(
                                     value: _volume,
                                     onChanged: (value) {
@@ -1424,20 +1811,15 @@ List<Subtitle> _parseVtt(String vtt) {
                                   actions: [
                                     Focus(
                                       child: TextButton(
-                                          onPressed: () =>
-                                              Navigator.pop(context),
-                                          child: const Text('Close',
-                                              style: TextStyle(
-                                                  color: Colors.white))),
+                                          onPressed: () => Navigator.pop(context),
+                                          child: const Text('Close', style: TextStyle(color: Colors.white))),
                                       onFocusChange: (hasFocus) {
                                         if (hasFocus) {
                                           _startHideTimer();
                                         }
                                       },
                                       onKeyEvent: (node, event) {
-                                        if (event is KeyDownEvent &&
-                                            event.logicalKey ==
-                                                LogicalKeyboardKey.select) {
+                                        if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                                           Navigator.pop(context);
                                           return KeyEventResult.handled;
                                         }
@@ -1454,8 +1836,7 @@ List<Subtitle> _parseVtt(String vtt) {
                         ),
                         Focus(
                           child: IconButton(
-                            icon: Icon(Icons.lock,
-                                color: _controlColor, size: _iconSize),
+                            icon: Icon(Icons.lock, color: _controlColor, size: _iconSize),
                             onPressed: () {
                               setState(() {
                                 _isLocked = true;
@@ -1469,8 +1850,7 @@ List<Subtitle> _parseVtt(String vtt) {
                             }
                           },
                           onKeyEvent: (node, event) {
-                            if (event is KeyDownEvent &&
-                                event.logicalKey == LogicalKeyboardKey.select) {
+                            if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                               setState(() {
                                 _isLocked = true;
                               });
@@ -1482,13 +1862,11 @@ List<Subtitle> _parseVtt(String vtt) {
                         ),
                         Focus(
                           child: IconButton(
-                            icon: Icon(Icons.fullscreen,
-                                color: _controlColor, size: _iconSize),
+                            icon: Icon(Icons.fullscreen, color: _controlColor, size: _iconSize),
                             onPressed: () {
                               if (mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                        content: Text("Fullscreen toggled")));
+                                    const SnackBar(content: Text("Fullscreen toggled")));
                               }
                               _startHideTimer();
                             },
@@ -1499,12 +1877,10 @@ List<Subtitle> _parseVtt(String vtt) {
                             }
                           },
                           onKeyEvent: (node, event) {
-                            if (event is KeyDownEvent &&
-                                event.logicalKey == LogicalKeyboardKey.select) {
+                            if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                               if (mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                        content: Text("Fullscreen toggled")));
+                                    const SnackBar(content: Text("Fullscreen toggled")));
                               }
                               _startHideTimer();
                               return KeyEventResult.handled;
@@ -1513,9 +1889,7 @@ List<Subtitle> _parseVtt(String vtt) {
                           },
                         ),
                         const SizedBox(width: 8),
-                        Text(_formatDuration(_controller.value.duration),
-                            style:
-                                TextStyle(color: _controlColor, fontSize: 14)),
+                        Text(_formatDuration(_controller.value.duration), style: TextStyle(color: _controlColor, fontSize: 14)),
                       ],
                     ),
                   ],
@@ -1537,9 +1911,7 @@ List<Subtitle> _parseVtt(String vtt) {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(_errorMessage!,
-                      style: const TextStyle(color: Colors.red, fontSize: 16),
-                      textAlign: TextAlign.center),
+                  Text(_errorMessage!, style: const TextStyle(color: Colors.red, fontSize: 16), textAlign: TextAlign.center),
                   const SizedBox(height: 16),
                   Focus(
                     child: ElevatedButton(
@@ -1552,8 +1924,7 @@ List<Subtitle> _parseVtt(String vtt) {
                       }
                     },
                     onKeyEvent: (node, event) {
-                      if (event is KeyDownEvent &&
-                          event.logicalKey == LogicalKeyboardKey.select) {
+                      if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
                         _retryLoad();
                         return KeyEventResult.handled;
                       }
@@ -1565,26 +1936,60 @@ List<Subtitle> _parseVtt(String vtt) {
             )
           : _isInitialized
               ? FocusScope(
-                  child: GestureDetector(
-                    onTap: _isLocked ? null : _toggleControls,
-                    onDoubleTap: _isLocked
-                        ? null
-                        : () {
+                  child: Stack(
+                    children: [
+                      SubVideoPlayer(
+                        videoUrl: _currentVideoPath,
+                        controller: _controller,
+                        enableSkipIntro: widget.enableSkipIntro,
+                        chapters: widget.chapters,
+                        enablePiP: widget.enablePiP,
+                        enableOffline: widget.enableOffline,
+                        audioTracks: widget.audioTracks,
+                        subtitleTracks: widget.subtitleTracks,
+                      ),
+                      if (_isLocked)
+                        Center(
+                          child: Focus(
+                            child: IconButton(
+                              icon: Icon(Icons.lock, color: _controlColor, size: _iconSize + 10),
+                              onPressed: () {
+                                setState(() {
+                                  _isLocked = false;
+                                });
+                              },
+                            ),
+                            onFocusChange: (hasFocus) {
+                              if (hasFocus) {
+                                _startHideTimer();
+                              }
+                            },
+                            onKeyEvent: (node, event) {
+                              if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                                setState(() {
+                                  _isLocked = false;
+                                });
+                                return KeyEventResult.handled;
+                              }
+                              return KeyEventResult.ignored;
+                            },
+                          ),
+                        )
+                      else
+                        GestureDetector(
+                          onTap: _toggleControls,
+                          onDoubleTap: () {
                             if (_lastTapPosition == null) return;
                             final screenWidth = MediaQuery.of(context).size.width;
                             final tapX = _lastTapPosition!.dx;
                             if (tapX < screenWidth / 3) {
-                              final newPos = _controller.value.position -
-                                  const Duration(seconds: 10);
-                              _controller.seekTo(newPos > Duration.zero
-                                  ? newPos
-                                  : Duration.zero);
+                              final newPos = _controller.value.position - const Duration(seconds: 10);
+                              _controller.seekTo(newPos > Duration.zero ? newPos : Duration.zero);
                               setState(() {
                                 _seekFeedback = "-10s";
                               });
                             } else if (tapX > screenWidth * 2 / 3) {
-                              final newPos = _controller.value.position +
-                                  const Duration(seconds: 10);
+                              final newPos = _controller.value.position + const Duration(seconds: 10);
                               if (newPos < _controller.value.duration) {
                                 _controller.seekTo(newPos);
                               }
@@ -1601,91 +2006,35 @@ List<Subtitle> _parseVtt(String vtt) {
                               }
                             });
                           },
-                    onTapDown: _isLocked
-                        ? null
-                        : (details) => _lastTapPosition = details.globalPosition,
-                    onHorizontalDragStart:
-                        _isLocked ? null : _onHorizontalDragStart,
-                    onHorizontalDragUpdate:
-                        _isLocked ? null : _onHorizontalDragUpdate,
-                    onHorizontalDragEnd: _isLocked ? null : _onHorizontalDragEnd,
-                    onVerticalDragStart: _isLocked ? null : _onVerticalDragStart,
-                    onVerticalDragUpdate:
-                        _isLocked ? null : _onVerticalDragUpdate,
-                    onVerticalDragEnd: _isLocked ? null : _onVerticalDragEnd,
-                    child: Stack(
-                      children: [
-                        SizedBox.expand(
-                          child: FittedBox(
-                            fit: BoxFit.contain,
-                            child: SizedBox(
-                                width: _controller.value.size.width,
-                                height: _controller.value.size.height,
-                                child: VideoPlayer(_controller)),
+                          onTapDown: (details) => _lastTapPosition = details.globalPosition,
+                          onHorizontalDragStart: _onHorizontalDragStart,
+                          onHorizontalDragUpdate: _onHorizontalDragUpdate,
+                          onHorizontalDragEnd: _onHorizontalDragEnd,
+                          child: _buildControls(),
+                        ),
+                      if (_isAdjustingBrightness && !kIsWeb)
+                        Positioned(
+                          left: 16,
+                          top: MediaQuery.of(context).size.height / 2 - 50,
+                          child: Column(
+                            children: [
+                              const Icon(Icons.brightness_6, color: Colors.white, size: 32),
+                              Text('${(_brightness * 100).round()}%', style: const TextStyle(color: Colors.white)),
+                            ],
                           ),
                         ),
-                        if (_isBuffering)
-                          const Center(child: CircularProgressIndicator()),
-                        if (_isLocked)
-                          Center(
-                            child: Focus(
-                              child: IconButton(
-                                icon: Icon(Icons.lock,
-                                    color: _controlColor, size: _iconSize + 10),
-                                onPressed: () {
-                                  setState(() {
-                                    _isLocked = false;
-                                  });
-                                },
-                              ),
-                              onFocusChange: (hasFocus) {
-                                if (hasFocus) {
-                                  _startHideTimer();
-                                }
-                              },
-                              onKeyEvent: (node, event) {
-                                if (event is KeyDownEvent &&
-                                    event.logicalKey ==
-                                        LogicalKeyboardKey.select) {
-                                  setState(() {
-                                    _isLocked = false;
-                                  });
-                                  return KeyEventResult.handled;
-                                }
-                                return KeyEventResult.ignored;
-                              },
-                            ),
-                          )
-                        else
-                          _buildControls(),
-                        if (_isAdjustingBrightness && !kIsWeb)
-                          Positioned(
-                            left: 16,
-                            top: MediaQuery.of(context).size.height / 2 - 50,
-                            child: Column(
-                              children: [
-                                const Icon(Icons.brightness_6,
-                                    color: Colors.white, size: 32),
-                                Text('${(_brightness * 100).round()}%',
-                                    style: const TextStyle(color: Colors.white)),
-                              ],
-                            ),
+                      if (_isAdjustingVolume)
+                        Positioned(
+                          right: 16,
+                          top: MediaQuery.of(context).size.height / 2 - 50,
+                          child: Column(
+                            children: [
+                              const Icon(Icons.volume_up, color: Colors.white, size: 32),
+                              Text('${(_volume * 100).round()}%', style: const TextStyle(color: Colors.white)),
+                            ],
                           ),
-                        if (_isAdjustingVolume)
-                          Positioned(
-                            right: 16,
-                            top: MediaQuery.of(context).size.height / 2 - 50,
-                            child: Column(
-                              children: [
-                                const Icon(Icons.volume_up,
-                                    color: Colors.white, size: 32),
-                                Text('${(_volume * 100).round()}%',
-                                    style: const TextStyle(color: Colors.white)),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
+                        ),
+                    ],
                   ),
                 )
               : const Center(child: CircularProgressIndicator()),

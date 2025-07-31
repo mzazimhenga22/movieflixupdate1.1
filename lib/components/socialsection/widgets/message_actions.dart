@@ -1,9 +1,6 @@
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'message_actions_overlay.dart';
-
-
 
 void showMessageActions({
   required BuildContext context,
@@ -15,45 +12,39 @@ void showMessageActions({
   required VoidCallback onBlock,
   required VoidCallback onForward,
   required VoidCallback onEdit,
+  required GlobalKey messageKey,
   required ValueChanged<String> onReactEmoji,
 }) {
-  showDialog(
+  showMessageActionsOverlay(
     context: context,
-    barrierDismissible: true,
-    barrierColor: Colors.transparent,
-    builder: (context) => MessageActionsOverlay(
-      messageWidget: Text(
-        message['text'],
-        style: TextStyle(
-          color: Colors.white,
+    messageKey: messageKey,
+    messageWidget: Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.9),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Text(
+        message['text'] ?? '',
+        style: const TextStyle(
+          color: Colors.black87,
           fontSize: 16,
         ),
       ),
-      onReactEmoji: onReactEmoji,
-      onReply: () {
-        Navigator.pop(context);
-        onReply();
-      },
-      onPin: () {
-        Navigator.pop(context);
-        onPin();
-      },
-      onDelete: () {
-        Navigator.pop(context);
-        onDelete();
-      },
-      onBlock: () {
-        Navigator.pop(context);
-        onBlock();
-      },
-      onForward: () {
-        Navigator.pop(context);
-        onForward();
-      },
-      onEdit: () {
-        Navigator.pop(context);
-        onEdit();
-      },
     ),
+    onReactEmoji: onReactEmoji,
+    onReply: onReply,
+    onPin: onPin,
+    onDelete: onDelete,
+    onBlock: onBlock,
+    onForward: onForward,
+    onEdit: onEdit,
   );
 }

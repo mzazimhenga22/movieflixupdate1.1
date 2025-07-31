@@ -6,6 +6,7 @@ import 'create_group_screen.dart';
 import 'Group_chat_screen.dart';
 import 'chat_screen.dart';
 import 'dart:convert';
+import 'package:provider/provider.dart';
 
 String getChatId(String userId1, String userId2) {
   return userId1.compareTo(userId2) < 0
@@ -13,16 +14,16 @@ String getChatId(String userId1, String userId2) {
       : '${userId2}_$userId1';
 }
 
-class MessagesController {
+class MessagesController extends ChangeNotifier {
   final Map<String, dynamic> currentUser;
   final BuildContext context;
   String? selectedChatId;
   Map<String, dynamic>? selectedOtherUser;
-  bool _isGroup = false; // Track if selected chat is a group
+  bool isGroup = false;
   String groupName = '';
-  List<String> _blockedUsers = []; // Cache blocked users
-  List<String> _mutedUsers = []; // Cache muted users
-  List<String> _pinnedChats = []; // Cache pinned chats
+  List<String> _blockedUsers = [];
+  List<String> _mutedUsers = [];
+  List<String> _pinnedChats = [];
 
   MessagesController(this.currentUser, this.context) {
     _loadCachedData();
@@ -33,6 +34,7 @@ class MessagesController {
     _blockedUsers = jsonDecode(prefs.getString('blockedUsers_${currentUser['id']}') ?? '[]').cast<String>();
     _mutedUsers = jsonDecode(prefs.getString('mutedUsers_${currentUser['id']}') ?? '[]').cast<String>();
     _pinnedChats = jsonDecode(prefs.getString('pinnedChats_${currentUser['id']}') ?? '[]').cast<String>();
+    notifyListeners();
   }
 
   Future<void> _saveCachedData() async {
@@ -40,12 +42,14 @@ class MessagesController {
     await prefs.setString('blockedUsers_${currentUser['id']}', jsonEncode(_blockedUsers));
     await prefs.setString('mutedUsers_${currentUser['id']}', jsonEncode(_mutedUsers));
     await prefs.setString('pinnedChats_${currentUser['id']}', jsonEncode(_pinnedChats));
+    notifyListeners();
   }
 
   void clearSelection() {
     selectedChatId = null;
     selectedOtherUser = null;
-    _isGroup = false;
+    isGroup = false;
+    notifyListeners();
   }
 
   bool isUserBlocked(String userId) {
@@ -110,10 +114,10 @@ class MessagesController {
   }
 
   Future<void> blockUser() async {
-    if (selectedOtherUser == null || _isGroup) return;
+    if (selectedOtherUser == null || isGroup) return;
 
     final userId = selectedOtherUser!['id'];
-    _blockedUsers.add(userId); // Optimistic update
+    _blockedUsers.add(userId);
     await _saveCachedData();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('${selectedOtherUser!['username']} blocked')),
@@ -126,8 +130,10 @@ class MessagesController {
           .update({
         'blockedUsers': FieldValue.arrayUnion([userId])
       });
+      final chatId = getChatId(currentUser['id'], userId);
+      await _deleteChatDocument(chatId);
     } catch (e) {
-      _blockedUsers.remove(userId); // Revert on failure
+      _blockedUsers.remove(userId);
       await _saveCachedData();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to block user: $e')),
@@ -137,10 +143,10 @@ class MessagesController {
   }
 
   Future<void> unblockUser() async {
-    if (selectedOtherUser == null || _isGroup) return;
+    if (selectedOtherUser == null || isGroup) return;
 
     final userId = selectedOtherUser!['id'];
-    _blockedUsers.remove(userId); // Optimistic update
+    _blockedUsers.remove(userId);
     await _saveCachedData();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('${selectedOtherUser!['username']} unblocked')),
@@ -154,7 +160,7 @@ class MessagesController {
         'blockedUsers': FieldValue.arrayRemove([userId])
       });
     } catch (e) {
-      _blockedUsers.add(userId); // Revert on failure
+      _blockedUsers.add(userId);
       await _saveCachedData();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to unblock user: $e')),
@@ -164,10 +170,10 @@ class MessagesController {
   }
 
   Future<void> muteUser() async {
-    if (selectedOtherUser == null || _isGroup) return;
+    if (selectedOtherUser == null || isGroup) return;
 
     final userId = selectedOtherUser!['id'];
-    _mutedUsers.add(userId); // Optimistic update
+    _mutedUsers.add(userId);
     await _saveCachedData();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('${selectedOtherUser!['username']} muted')),
@@ -181,7 +187,7 @@ class MessagesController {
         'mutedUsers': FieldValue.arrayUnion([userId])
       });
     } catch (e) {
-      _mutedUsers.remove(userId); // Revert on failure
+      _mutedUsers.remove(userId);
       await _saveCachedData();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to mute user: $e')),
@@ -191,10 +197,10 @@ class MessagesController {
   }
 
   Future<void> unmuteUser() async {
-    if (selectedOtherUser == null || _isGroup) return;
+    if (selectedOtherUser == null || isGroup) return;
 
     final userId = selectedOtherUser!['id'];
-    _mutedUsers.remove(userId); // Optimistic update
+    _mutedUsers.remove(userId);
     await _saveCachedData();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('${selectedOtherUser!['username']} unmuted')),
@@ -208,7 +214,7 @@ class MessagesController {
         'mutedUsers': FieldValue.arrayRemove([userId])
       });
     } catch (e) {
-      _mutedUsers.add(userId); // Revert on failure
+      _mutedUsers.add(userId);
       await _saveCachedData();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to unmute user: $e')),
@@ -218,9 +224,9 @@ class MessagesController {
   }
 
   Future<void> muteGroup() async {
-    if (selectedChatId == null || !_isGroup) return;
+    if (selectedChatId == null || !isGroup) return;
 
-    _mutedUsers.add(selectedChatId!); // Optimistic update
+    _mutedUsers.add(selectedChatId!);
     await _saveCachedData();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Group muted')),
@@ -234,7 +240,7 @@ class MessagesController {
         'mutedUsers': FieldValue.arrayUnion([selectedChatId])
       });
     } catch (e) {
-      _mutedUsers.remove(selectedChatId!); // Revert on failure
+      _mutedUsers.remove(selectedChatId!);
       await _saveCachedData();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to mute group: $e')),
@@ -244,9 +250,9 @@ class MessagesController {
   }
 
   Future<void> unmuteGroup() async {
-    if (selectedChatId == null || !_isGroup) return;
+    if (selectedChatId == null || !isGroup) return;
 
-    _mutedUsers.remove(selectedChatId!); // Optimistic update
+    _mutedUsers.remove(selectedChatId!);
     await _saveCachedData();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Group unmuted')),
@@ -260,7 +266,7 @@ class MessagesController {
         'mutedUsers': FieldValue.arrayRemove([selectedChatId])
       });
     } catch (e) {
-      _mutedUsers.add(selectedChatId!); // Revert on failure
+      _mutedUsers.add(selectedChatId!);
       await _saveCachedData();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to unmute group: $e')),
@@ -272,7 +278,7 @@ class MessagesController {
   Future<void> pinConversation() async {
     if (selectedChatId == null) return;
 
-    _pinnedChats.add(selectedChatId!); // Optimistic update
+    _pinnedChats.add(selectedChatId!);
     await _saveCachedData();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Conversation pinned')),
@@ -286,7 +292,7 @@ class MessagesController {
         'pinnedChats': FieldValue.arrayUnion([selectedChatId])
       });
     } catch (e) {
-      _pinnedChats.remove(selectedChatId!); // Revert on failure
+      _pinnedChats.remove(selectedChatId!);
       await _saveCachedData();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to pin conversation: $e')),
@@ -298,7 +304,7 @@ class MessagesController {
   Future<void> unpinConversation() async {
     if (selectedChatId == null) return;
 
-    _pinnedChats.remove(selectedChatId!); // Optimistic update
+    _pinnedChats.remove(selectedChatId!);
     await _saveCachedData();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Conversation unpinned')),
@@ -312,13 +318,28 @@ class MessagesController {
         'pinnedChats': FieldValue.arrayRemove([selectedChatId])
       });
     } catch (e) {
-      _pinnedChats.add(selectedChatId!); // Revert on failure
+      _pinnedChats.add(selectedChatId!);
       await _saveCachedData();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to unpin conversation: $e')),
       );
     }
     clearSelection();
+  }
+
+  Future<void> _deleteChatDocument(String chatId) async {
+    final messagesSnapshot = await FirebaseFirestore.instance
+        .collection('chats')
+        .doc(chatId)
+        .collection('messages')
+        .get();
+    for (var doc in messagesSnapshot.docs) {
+      await doc.reference.delete();
+    }
+    await FirebaseFirestore.instance
+        .collection('chats')
+        .doc(chatId)
+        .delete();
   }
 
   Future<void> deleteConversation() async {
@@ -329,7 +350,7 @@ class MessagesController {
     );
 
     try {
-      if (_isGroup) {
+      if (isGroup) {
         await FirebaseFirestore.instance
             .collection('groups')
             .doc(selectedChatId)
@@ -338,12 +359,7 @@ class MessagesController {
           'deletedBy': FieldValue.arrayUnion([currentUser['id']])
         });
       } else {
-        await FirebaseFirestore.instance
-            .collection('chats')
-            .doc(selectedChatId)
-            .update({
-          'deletedBy': FieldValue.arrayUnion([currentUser['id']])
-        });
+        await _deleteChatDocument(selectedChatId!);
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -356,8 +372,8 @@ class MessagesController {
   Future<void> showChatCreationOptions() async {
     final snapshot = await FirebaseFirestore.instance.collection('users').get();
     final allUsers = snapshot.docs
+        .where((doc) => doc.exists && doc.id != currentUser['id'] && !_blockedUsers.contains(doc.id))
         .map((doc) => doc.data() as Map<String, dynamic>)
-        .where((user) => user['id'] != currentUser['id'])
         .toList();
 
     showModalBottomSheet(
@@ -433,12 +449,15 @@ class MessagesController {
                           Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (_) => ChatScreen(
-                                chatId: chatId,
-                                currentUser: currentUser,
-                                otherUser: user,
-                                authenticatedUser: currentUser,
-                                storyInteractions: const [],
+                              builder: (_) => ChangeNotifierProvider.value(
+                                value: this,
+                                child: ChatScreen(
+                                  chatId: chatId,
+                                  currentUser: currentUser,
+                                  otherUser: user,
+                                  authenticatedUser: currentUser,
+                                  storyInteractions: const [],
+                                ),
                               ),
                             ),
                           );
@@ -467,33 +486,38 @@ class MessagesController {
     groupName = name.trim();
 
     try {
-      final snapshot =
-          await FirebaseFirestore.instance.collection('users').get();
+      final snapshot = await FirebaseFirestore.instance.collection('users').get();
       final users = snapshot.docs
+          .where((doc) => doc.exists && doc.id != currentUser['id'] && !_blockedUsers.contains(doc.id))
           .map((doc) => doc.data())
-          .where((user) => user['id'] != currentUser['id'])
           .toList();
 
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => CreateGroupScreen(
-            initialGroupName: groupName,
-            availableUsers: users,
-            currentUser: currentUser,
-            onGroupCreated: (chatId) {
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => GroupChatScreen(
-                    chatId: chatId,
-                    currentUser: currentUser,
-                    authenticatedUser: currentUser,
-                    accentColor: currentUser['accentColor'] ?? Colors.blueAccent,
+          builder: (_) => ChangeNotifierProvider.value(
+            value: this,
+            child: CreateGroupScreen(
+              initialGroupName: groupName,
+              availableUsers: users,
+              currentUser: currentUser,
+              onGroupCreated: (chatId) {
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ChangeNotifierProvider.value(
+                      value: this,
+                      child: GroupChatScreen(
+                        chatId: chatId,
+                        currentUser: currentUser,
+                        authenticatedUser: currentUser,
+                        accentColor: currentUser['accentColor'] ?? Colors.blueAccent,
+                      ),
+                    ),
                   ),
-                ),
-              );
-            },
+                );
+              },
+            ),
           ),
         ),
       );

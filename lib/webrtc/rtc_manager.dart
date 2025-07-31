@@ -169,6 +169,12 @@ class RtcManager {
       }
     };
 
+    pc.onTrack = (event) {
+      if (event.track.kind == 'video' || event.track.kind == 'audio') {
+        _localStreams[callId] = event.streams[0];
+      }
+    };
+
     final offer = RTCSessionDescription(data['sdp'], data['sdpType']);
     await pc.setRemoteDescription(offer);
 
@@ -184,6 +190,25 @@ class RtcManager {
         .collection('calls')
         .doc(callId)
         .collection('callerCandidates')
+        .snapshots()
+        .listen((snapshot) {
+      for (var doc in snapshot.docChanges) {
+        final data = doc.doc.data();
+        if (data != null) {
+          final candidate = RTCIceCandidate(
+            data['candidate'],
+            data['sdpMid'],
+            data['sdpMLineIndex'],
+          );
+          pc.addCandidate(candidate);
+        }
+      }
+    });
+
+    FirebaseFirestore.instance
+        .collection('calls')
+        .doc(callId)
+        .collection('calleeCandidates')
         .snapshots()
         .listen((snapshot) {
       for (var doc in snapshot.docChanges) {
@@ -223,5 +248,14 @@ class RtcManager {
 
   static Future<void> hangUp(String callId) async {
     await _endCall(callId);
+  }
+
+  static void toggleMute(String callId, bool mute) {
+    final stream = _localStreams[callId];
+    if (stream != null) {
+      stream.getAudioTracks().forEach((track) {
+        track.enabled = !mute;
+      });
+    }
   }
 }

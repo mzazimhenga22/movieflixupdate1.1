@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'message_bubble.dart';
-import 'message_actions.dart'; // Updated import name to match
+import 'reply_preview.dart';
 import 'pinned_message_bar.dart';
 import 'mark_read_unread.dart';
 
@@ -9,13 +9,17 @@ class GroupChatList extends StatefulWidget {
   final String groupId;
   final Map<String, dynamic> currentUser;
   final List<Map<String, dynamic>> groupMembers;
-  final void Function(QueryDocumentSnapshot<Object?> message)? onReplyToMessage;
+  final void Function(QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey bubbleKey) onMessageLongPressed;
+  final QueryDocumentSnapshot<Object?>? replyingTo;
+  final VoidCallback? onCancelReply;
 
   const GroupChatList({
     required this.groupId,
     required this.currentUser,
     required this.groupMembers,
-    this.onReplyToMessage,
+    required this.onMessageLongPressed,
+    this.replyingTo,
+    this.onCancelReply,
     super.key,
   });
 
@@ -25,6 +29,7 @@ class GroupChatList extends StatefulWidget {
 
 class _GroupChatListState extends State<GroupChatList> {
   DocumentSnapshot? pinnedMessage;
+  final ScrollController _scrollController = ScrollController();
 
   @override
   void initState() {
@@ -39,9 +44,7 @@ class _GroupChatListState extends State<GroupChatList> {
         .doc(widget.groupId)
         .get();
 
-    if (doc.exists &&
-        doc.data() != null &&
-        doc.data()!.containsKey('pinnedMessageId')) {
+    if (doc.exists && doc.data() != null && doc.data()!.containsKey('pinnedMessageId')) {
       final pinnedId = doc['pinnedMessageId'];
       if (pinnedId != null) {
         final pinned = await FirebaseFirestore.instance
@@ -63,16 +66,6 @@ class _GroupChatListState extends State<GroupChatList> {
       userId: widget.currentUser['id'],
       isGroup: true,
     );
-  }
-
-  Future<void> _pinMessage(QueryDocumentSnapshot<Object?> msg) async {
-    await FirebaseFirestore.instance
-        .collection('groups')
-        .doc(widget.groupId)
-        .set({
-      'pinnedMessageId': msg.id,
-    }, SetOptions(merge: true));
-    setState(() => pinnedMessage = msg);
   }
 
   Map<String, dynamic>? _getSenderInfo(String senderId) {
@@ -97,6 +90,11 @@ class _GroupChatListState extends State<GroupChatList> {
             pinnedText: pinnedMessage!['text'],
             onDismiss: () => setState(() => pinnedMessage = null),
           ),
+        if (widget.replyingTo != null)
+          ReplyPreview(
+            replyText: widget.replyingTo!['text'],
+            onCancel: widget.onCancelReply ?? () {},
+          ),
         Expanded(
           child: StreamBuilder<QuerySnapshot>(
             stream: messagesRef.snapshots(),
@@ -105,75 +103,31 @@ class _GroupChatListState extends State<GroupChatList> {
               final messages = snapshot.data!.docs;
 
               return ListView.builder(
+                controller: _scrollController,
                 reverse: true,
                 itemCount: messages.length,
                 itemBuilder: (context, index) {
                   final message = messages[index] as QueryDocumentSnapshot<Object?>;
                   final isMe = message['senderId'] == widget.currentUser['id'];
+                  final bubbleKey = GlobalKey();
                   final sender = _getSenderInfo(message['senderId']);
 
                   return GestureDetector(
-                    onLongPress: () => showMessageActions(
-                      context: context,
-                      message: message,
-                      isMe: isMe,
-                      onReply: () {
-                        if (widget.onReplyToMessage != null) {
-                          widget.onReplyToMessage!(message);
-                        }
-                      },
-                      onPin: () => _pinMessage(message),
-                      onDelete: () async {
-                        await FirebaseFirestore.instance
-                            .collection('groups')
-                            .doc(widget.groupId)
-                            .collection('messages')
-                            .doc(message.id)
-                            .delete();
-                      },
-                      onBlock: () async {
-                        await FirebaseFirestore.instance
-                            .collection('users')
-                            .doc(widget.currentUser['id'])
-                            .update({
-                          'blockedUsers': FieldValue.arrayUnion([message['senderId']])
-                        });
-                      },
-                      onForward: () {
-                        Navigator.pushNamed(context, '/forward', arguments: {
-                          'message': message,
-                          'currentUser': widget.currentUser,
-                        });
-                      },
-                      onEdit: () {
-                        if (isMe) {
-                          Navigator.pushNamed(context, '/editMessage', arguments: {
-                            'message': message,
-                            'chatId': widget.groupId,
-                          });
-                        } else {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Cannot edit messages sent by others')),
-                          );
-                        }
-                      },
-                      onReactEmoji: (emoji) async {
-                        await FirebaseFirestore.instance
-                            .collection('groups')
-                            .doc(widget.groupId)
-                            .collection('messages')
-                            .doc(message.id)
-                            .update({
-                          'reactions': FieldValue.arrayUnion([emoji])
-                        });
-                      },
-                    ),
+                    onLongPress: () async {
+                      await Scrollable.ensureVisible(
+                        bubbleKey.currentContext!,
+                        duration: const Duration(milliseconds: 300),
+                        curve: Curves.easeInOut,
+                      );
+                      widget.onMessageLongPressed(message, isMe, bubbleKey);
+                    },
                     child: MessageBubble(
                       message: message,
                       currentUser: widget.currentUser,
                       otherUser: sender ?? {},
                       showSenderName: !isMe,
                       isGroup: true,
+                      bubbleKey: bubbleKey,
                     ),
                   );
                 },
@@ -183,5 +137,11 @@ class _GroupChatListState extends State<GroupChatList> {
         ),
       ],
     );
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 }

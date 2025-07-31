@@ -4,11 +4,16 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Required for PiP on Android 8.0+ -->
+    <uses-feature android:name="android.software.picture_in_picture" android:required="false" />
+
     <application
         android:label="movieflix"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:requestLegacyExternalStorage="true">
+
+        <!-- PiP enabled + resizable activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -17,7 +22,10 @@
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true">
+
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
@@ -26,10 +34,12 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
     </application>
+
     <queries>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>

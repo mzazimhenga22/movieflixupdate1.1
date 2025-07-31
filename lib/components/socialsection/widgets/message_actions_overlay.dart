@@ -1,158 +1,140 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 
-class MessageActionsOverlay extends StatelessWidget {
-  final Widget messageWidget;
-  final ValueChanged<String> onReactEmoji;
-  final VoidCallback onReply;
-  final VoidCallback onPin;
-  final VoidCallback onDelete;
-  final VoidCallback onBlock;
-  final VoidCallback onForward;
-  final VoidCallback onEdit;
+const List<String> emojis = [
+  "❤️", "😂", "👍", "😮", "😢",
+  "🔥", "😡", "🙏", "🎉", "😍",
+];
 
-  const MessageActionsOverlay({
-    super.key,
-    required this.messageWidget,
-    required this.onReactEmoji,
-    required this.onReply,
-    required this.onPin,
-    required this.onDelete,
-    required this.onBlock,
-    required this.onForward,
-    required this.onEdit,
-  });
+Future<void> showMessageActionsOverlay({
+  required BuildContext context,
+  required GlobalKey messageKey,
+  required Widget messageWidget,
+  required ValueChanged<String> onReactEmoji,
+  required VoidCallback onReply,
+  required VoidCallback onPin,
+  required VoidCallback onDelete,
+  required VoidCallback onBlock,
+  required VoidCallback onForward,
+  required VoidCallback onEdit,
+}) async {
+  final overlay = Overlay.of(context);
+  final RenderBox? renderBox = messageKey.currentContext?.findRenderObject() as RenderBox?;
+  if (renderBox == null) return;
 
-  static const List<String> emojis = [
-    "❤️", "😂", "👍", "😮", "😢", "🔥", "😡", "🙏", "🎉", "😍",
-  ];
+  final Offset offset = renderBox.localToGlobal(Offset.zero);
+  final Size size = renderBox.size;
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      body: Stack(
-        children: [
-          // Background blur and dim
-          BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
-            child: Container(color: Colors.black.withOpacity(0.6)),
-          ),
+  final screenHeight = MediaQuery.of(context).size.height;
+  const overlayPadding = 8.0;
+  const estimatedOverlayHeight = 200.0;
 
-          // Tap outside to dismiss
-          GestureDetector(
-            onTap: () => Navigator.pop(context),
-            child: Container(color: Colors.transparent),
-          ),
+  final bool showAbove = offset.dy + size.height + estimatedOverlayHeight > screenHeight;
 
-          // Centered message preview
-          Align(
-            alignment: Alignment.center,
-            child: Container(
-              margin: const EdgeInsets.symmetric(horizontal: 24),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.85),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: messageWidget,
-            ),
-          ),
+  OverlayEntry? entry;
 
-          // Emoji reaction row
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 150),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: emojis.map((emoji) {
-                    return GestureDetector(
-                      onTap: () {
-                        Navigator.pop(context);
-                        onReactEmoji(emoji);
-                      },
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
-                        child: Text(
-                          emoji,
-                          style: const TextStyle(fontSize: 28),
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                ),
-              ),
-            ),
-          ),
-
-          // Bottom action menu
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 36),
-              child: Container(
-                width: 280,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.95),
-                  borderRadius: BorderRadius.circular(24),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _menuItem(context, Icons.reply, "Reply", onReply),
-                    _menuItem(context, Icons.edit, "Edit", onEdit),
-                    _menuItem(context, Icons.forward, "Forward", onForward),
-                    _menuItem(context, Icons.push_pin, "Pin", onPin),
-                    _menuItem(context, Icons.delete, "Delete", onDelete, isDestructive: true),
-                    _menuItem(context, Icons.block, "Block", onBlock, isDestructive: true),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _menuItem(
-    BuildContext context,
-    IconData icon,
-    String label,
-    VoidCallback onTap, {
-    bool isDestructive = false,
-  }) {
-    return InkWell(
-      onTap: () {
-        Navigator.pop(context); // Close overlay
-        onTap();
-      },
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              color: isDestructive ? Colors.redAccent : Colors.white,
-              size: 22,
-            ),
-            const SizedBox(width: 12),
-            Text(
-              label,
-              style: TextStyle(
-                color: isDestructive ? Colors.redAccent : Colors.white,
-                fontSize: 15,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
+  entry = OverlayEntry(
+    builder: (_) => Stack(
+      children: [
+        GestureDetector(
+          onTap: () => entry?.remove(),
+          behavior: HitTestBehavior.opaque,
+          child: Container(color: Colors.black.withOpacity(0.3)),
         ),
+        Positioned(
+          left: 10,
+          right: 10,
+          top: showAbove
+              ? offset.dy - estimatedOverlayHeight - overlayPadding
+              : offset.dy + size.height + overlayPadding,
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                color: Colors.black.withOpacity(0.2),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.blueAccent.withOpacity(0.9),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: messageWidget,
+                        ),
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          height: 40,
+                          child: ListView(
+                            scrollDirection: Axis.horizontal,
+                            children: emojis.map((emoji) {
+                              return GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () {
+                                  entry?.remove();
+                                  onReactEmoji(emoji);
+                                },
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                                  child: Text(emoji, style: const TextStyle(fontSize: 20)),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                        const Divider(height: 16, thickness: 0.4, color: Colors.white24),
+                        _overlayTile(Icons.reply, "Reply", onReply, entry),
+                        _overlayTile(Icons.push_pin, "Pin", onPin, entry),
+                        _overlayTile(Icons.forward, "Forward", onForward, entry),
+                        _overlayTile(Icons.link, "Copy Link", onEdit, entry, isDestructive: false),
+                        _overlayTile(Icons.delete_outline, "Delete", onDelete, entry, isDestructive: true),
+                        _overlayTile(Icons.block, "Block", onBlock, entry, isDestructive: true),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  overlay.insert(entry);
+}
+
+Widget _overlayTile(
+  IconData icon,
+  String label,
+  VoidCallback action,
+  OverlayEntry? entry, {
+  bool isDestructive = false,
+}) {
+  return ListTile(
+    dense: true,
+    leading: Icon(icon, size: 20, color: isDestructive ? Colors.redAccent : Colors.white),
+    title: Text(
+      label,
+      style: TextStyle(
+        color: isDestructive ? Colors.redAccent : Colors.white,
+        fontSize: 14,
+        fontWeight: FontWeight.w400,
       ),
-    );
-  }
+    ),
+    onTap: () {
+      entry?.remove();
+      action();
+    },
+  );
 }

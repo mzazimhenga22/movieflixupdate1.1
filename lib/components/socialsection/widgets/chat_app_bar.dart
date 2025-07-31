@@ -90,11 +90,23 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
       actions: [
         IconButton(
           icon: Icon(Icons.call, color: accentColor),
-          onPressed: onVoiceCall,
+          onPressed: () {
+            onVoiceCall();
+            Navigator.pushNamed(context, '/voiceCall', arguments: {
+              'caller': currentUser,
+              'receiver': otherUser,
+            });
+          },
         ),
         IconButton(
           icon: Icon(Icons.videocam, color: accentColor),
-          onPressed: onVideoCall,
+          onPressed: () {
+            onVideoCall();
+            Navigator.pushNamed(context, '/videoCall', arguments: {
+              'caller': currentUser,
+              'receiver': otherUser,
+            });
+          },
         ),
       ],
     );

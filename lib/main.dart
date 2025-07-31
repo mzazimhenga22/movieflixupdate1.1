@@ -9,6 +9,8 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:movie_app/l10n/app_localizations.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:movie_app/components/socialsection/ProfileScreen.dart';
+import 'package:movie_app/components/socialsection/messages_controller.dart';
+import 'package:movie_app/components/socialsection/messages_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,8 +39,10 @@ Future<void> main() async {
   }
 
   runApp(
-    ChangeNotifierProvider(
-      create: (context) => SettingsProvider(),
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (context) => SettingsProvider()),
+      ],
       child: const MyApp(),
     ),
   );
@@ -78,15 +82,27 @@ class MyApp extends StatelessWidget {
       ],
       supportedLocales: AppLocalizations.supportedLocales,
       home: const SplashScreen(),
-
-      // ✅ Register route with arguments
-      onGenerateRoute: (RouteSettings settings) {
-        if (settings.name == '/profile') {
-          final user = settings.arguments as Map<String, dynamic>;
+      onGenerateRoute: (RouteSettings routeSettings) {
+        if (routeSettings.name == '/profile') {
+          final user = routeSettings.arguments as Map<String, dynamic>;
           return MaterialPageRoute(
             builder: (context) => ProfileScreen(user: user),
           );
-        }
+        }  else if (routeSettings.name == '/messages') {
+  final args = routeSettings.arguments as Map<String, dynamic>;
+  final user = args['user'] as Map<String, dynamic>;
+  final accentColor = args['accentColor'] as Color? ?? Provider.of<SettingsProvider>(context).accentColor;
+  return MaterialPageRoute(
+    builder: (context) => ChangeNotifierProvider(
+      create: (newContext) => MessagesController(user, newContext),
+      child: MessagesScreen(
+        currentUser: user,
+        accentColor: accentColor,
+      ),
+    ),
+  );
+}
+
         return null;
       },
     );

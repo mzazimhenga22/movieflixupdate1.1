@@ -8,7 +8,8 @@ import 'widgets/chat_app_bar.dart';
 import 'widgets/typing_area.dart';
 import 'widgets/advanced_chat_list.dart';
 import 'package:movie_app/utils/read_status_utils.dart';
-import 'widgets/message_actions.dart'; // Updated import
+import 'widgets/message_actions.dart';
+import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
 
 class ChatScreen extends StatefulWidget {
   final String chatId;
@@ -34,7 +35,7 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   String? backgroundUrl;
-  DocumentSnapshot? selectedMessage;
+  QueryDocumentSnapshot<Object?>? replyingTo;
   bool isActionOverlayVisible = false;
 
   @override
@@ -42,6 +43,7 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     _loadChatBackground();
     markChatAsRead(widget.chatId, widget.currentUser['id']);
+    _listenForIncomingCalls();
   }
 
   Future<void> _loadChatBackground() async {
@@ -86,6 +88,11 @@ class _ChatScreenState extends State<ChatScreen> {
       'receiverId': widget.otherUser['id'],
       'timestamp': FieldValue.serverTimestamp(),
       'type': 'text',
+      if (replyingTo != null) ...{
+        'replyToId': replyingTo!.id,
+        'replyToText': replyingTo!['text'],
+        'replyToSenderId': replyingTo!['senderId'],
+      },
     };
 
     await FirebaseFirestore.instance
@@ -99,6 +106,8 @@ class _ChatScreenState extends State<ChatScreen> {
       'timestamp': FieldValue.serverTimestamp(),
       'userIds': [widget.currentUser['id'], widget.otherUser['id']],
     }, SetOptions(merge: true));
+
+    setState(() => replyingTo = null);
   }
 
   void sendFile(File file) async {
@@ -165,60 +174,144 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-void _showMessageActions(QueryDocumentSnapshot<Object?> message, bool isMe) {
-  showMessageActions(
-    context: context,
-    message: message,
-    isMe: isMe,
-    onReply: () {
-      // Implement reply logic
-    },
-    onPin: () async {
-      await FirebaseFirestore.instance
-          .collection('chats')
-          .doc(widget.chatId)
-          .set({'pinnedMessageId': message.id}, SetOptions(merge: true));
-    },
-    onDelete: () async {
-      await FirebaseFirestore.instance
-          .collection('chats')
-          .doc(widget.chatId)
-          .collection('messages')
-          .doc(message.id)
-          .delete();
-    },
-    onBlock: () async {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(widget.currentUser['id'])
-          .update({
-        'blockedUsers': FieldValue.arrayUnion([widget.otherUser['id']])
-      });
-    },
-    onForward: () {
-      Navigator.pushNamed(context, '/forward', arguments: {
-        'message': message,
-        'currentUser': widget.currentUser,
-      });
-    },
-    onEdit: () {
-      Navigator.pushNamed(context, '/editMessage', arguments: {
-        'message': message,
-        'chatId': widget.chatId,
-      });
-    },
-    onReactEmoji: (emoji) async {
-      await FirebaseFirestore.instance
-          .collection('chats')
-          .doc(widget.chatId)
-          .collection('messages')
-          .doc(message.id)
-          .update({
-        'reactions': FieldValue.arrayUnion([emoji])
-      });
-    },
-  );
-}
+  void _onReplyToMessage(QueryDocumentSnapshot<Object?> message) {
+    setState(() => replyingTo = message);
+  }
+
+  void _onCancelReply() {
+    setState(() => replyingTo = null);
+  }
+
+  void _showMessageActions(QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey messageKey) {
+    setState(() {
+      isActionOverlayVisible = true;
+    });
+    showMessageActions(
+      context: context,
+      message: message,
+      isMe: isMe,
+      messageKey: messageKey,
+      onReply: () {
+        _onReplyToMessage(message);
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onPin: () async {
+        await FirebaseFirestore.instance
+            .collection('chats')
+            .doc(widget.chatId)
+            .set({
+          'pinnedMessageId': message.id,
+          'pinnedMessageText': message['text'],
+          'pinnedMessageSenderId': message['senderId'],
+        }, SetOptions(merge: true));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Container(
+              padding: const EdgeInsets.all(8.0),
+              decoration: BoxDecoration(
+                color: widget.accentColor,
+                borderRadius: BorderRadius.circular(8.0),
+              ),
+              child: Text(
+                message['text'],
+                style: const TextStyle(color: Colors.black),
+              ),
+            ),
+          ),
+        );
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onDelete: () async {
+        final data = message.data() as Map<String, dynamic>;
+        final deletedFor = List<String>.from(data['deletedFor'] ?? []);
+        deletedFor.add(widget.currentUser['id']);
+        await FirebaseFirestore.instance
+            .collection('chats')
+            .doc(widget.chatId)
+            .collection('messages')
+            .doc(message.id)
+            .update({'deletedFor': deletedFor});
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onBlock: () async {
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(widget.currentUser['id'])
+            .update({
+          'blockedUsers': FieldValue.arrayUnion([widget.otherUser['id']])
+        });
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onForward: () {
+        Navigator.pushNamed(context, '/forward', arguments: {
+          'message': message,
+          'currentUser': widget.currentUser,
+        });
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onEdit: () {
+        if (isMe) {
+          Navigator.pushNamed(context, '/editMessage', arguments: {
+            'message': message,
+            'chatId': widget.chatId,
+          });
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Cannot edit others\' messages')),
+          );
+        }
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+      onReactEmoji: (emoji) async {
+        await FirebaseFirestore.instance
+            .collection('chats')
+            .doc(widget.chatId)
+            .collection('messages')
+            .doc(message.id)
+            .update({
+          'reactions': FieldValue.arrayUnion([emoji])
+        });
+        setState(() {
+          isActionOverlayVisible = false;
+        });
+      },
+    );
+  }
+
+  void _listenForIncomingCalls() {
+    FirebaseFirestore.instance
+        .collection('calls')
+        .where('receiverId', isEqualTo: widget.currentUser['id'])
+        .where('status', isEqualTo: 'ongoing')
+        .snapshots()
+        .listen((snapshot) {
+      for (var doc in snapshot.docChanges) {
+        if (doc.type == DocumentChangeType.added) {
+          final data = doc.doc.data();
+          if (data != null && data['callerId'] == widget.otherUser['id']) {
+            final callId = doc.doc.id;
+            Navigator.pushNamed(context, '/${data['type']}Call', arguments: {
+              'caller': widget.otherUser,
+              'receiver': widget.currentUser,
+              'callId': callId,
+            });
+          }
+        }
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -310,13 +403,34 @@ void _showMessageActions(QueryDocumentSnapshot<Object?> message, bool isMe) {
                               currentUser: widget.currentUser,
                               otherUser: widget.otherUser,
                               onMessageLongPressed: _showMessageActions,
+                              replyingTo: replyingTo,
+                              onCancelReply: _onCancelReply,
                             ),
                           ),
-                          TypingArea(
-                            onSendMessage: sendMessage,
-                            onSendFile: sendFile,
-                            onSendAudio: sendAudio,
-                            accentColor: widget.accentColor,
+                          KeyboardVisibilityBuilder(
+                            builder: (context, isKeyboardVisible) {
+                              return AnimatedPadding(
+                                duration: const Duration(milliseconds: 200),
+                                curve: Curves.easeOut,
+                                padding: EdgeInsets.only(
+                                  bottom: MediaQuery.of(context).viewInsets.bottom,
+                                ),
+                                child: Container(
+                                  color: Colors.black.withOpacity(0.5),
+                                  child: TypingArea(
+                                    onSendMessage: sendMessage,
+                                    onSendFile: sendFile,
+                                    onSendAudio: sendAudio,
+                                    accentColor: widget.accentColor,
+                                    replyingTo: replyingTo,
+                                    isGroup: false,
+                                    currentUser: {'id': 'abc123', 'username': 'Alice'},
+                                    otherUser: {'id': 'xyz456', 'username': 'Bob'},
+                                    onCancelReply: _onCancelReply,
+                                  ),
+                                ),
+                              );
+                            },
                           ),
                         ],
                       ),
