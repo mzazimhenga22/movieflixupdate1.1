@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:isolate';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_downloader/flutter_downloader.dart';
 import 'package:provider/provider.dart';
@@ -7,21 +10,54 @@ import 'package:movie_app/categories_screen.dart';
 import 'package:movie_app/interactive_features_screen.dart';
 import 'package:movie_app/components/common_widgets.dart';
 
+/// Shared port to receive messages from the background isolate.
+final ReceivePort _port = ReceivePort();
+
 class DownloadsScreen extends StatefulWidget {
   const DownloadsScreen({super.key});
 
   @override
-  _DownloadsScreenState createState() => _DownloadsScreenState();
+  DownloadsScreenState createState() => DownloadsScreenState();
 }
 
-class _DownloadsScreenState extends State<DownloadsScreen> {
+class DownloadsScreenState extends State<DownloadsScreen> {
   late Future<List<DownloadTask>?> _tasksFuture;
+  late StreamSubscription _sub;
   int selectedIndex = 2;
 
   @override
   void initState() {
     super.initState();
+
+    // Bind the ReceivePort to FlutterDownloader
+    FlutterDownloader.registerCallback(downloadCallback);
+
+    // Listen to download completion updates
+    _sub = _port.listen((dynamic message) {
+      final status = message['status'] as DownloadTaskStatus;
+      if (status == DownloadTaskStatus.complete) {
+        _refresh();
+      }
+    });
+
     _loadTasks();
+  }
+
+  // Callback for download updates
+@pragma('vm:entry-point')
+static void downloadCallback(String id, int status, int progress) {
+  final SendPort? send = _port.sendPort;
+  send?.send({
+    'status': DownloadTaskStatus.values[status],
+    'progress': progress,
+    'id': id,
+  });
+}
+
+  @override
+  void dispose() {
+    _sub.cancel();
+    super.dispose();
   }
 
   /// Loads all tasks from FlutterDownloader.
@@ -93,7 +129,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
             return Center(child: Text("Error: ${snapshot.error}"));
           }
           final tasks = snapshot.data ?? [];
-          // Filter tasks that have completed downloads.
+
           final downloadedTasks = tasks
               .where((task) => task.status == DownloadTaskStatus.complete)
               .toList();
@@ -110,6 +146,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
               ),
             );
           }
+
           return ListView.builder(
             itemCount: downloadedTasks.length,
             itemBuilder: (context, index) {

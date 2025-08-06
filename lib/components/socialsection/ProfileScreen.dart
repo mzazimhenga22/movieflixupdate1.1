@@ -5,13 +5,20 @@ import 'package:movie_app/webrtc/rtc_manager.dart';
 
 class ProfileScreen extends StatelessWidget {
   final Map<String, dynamic> user;
-  final VoidCallback? onBackgroundSet;
 
-  const ProfileScreen({super.key, required this.user, this.onBackgroundSet});
+  const ProfileScreen({super.key, required this.user});
 
   @override
   Widget build(BuildContext context) {
-    final currentUser = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>;
+    final Function(String)? onBackgroundSet = user['onBackgroundSet'];
+
+    if (!user.containsKey('id')) {
+      return const Scaffold(
+        body: Center(
+          child: Text("User data not provided.", style: TextStyle(fontSize: 16)),
+        ),
+      );
+    }
 
     return Scaffold(
       body: Column(
@@ -64,7 +71,7 @@ class ProfileScreen extends StatelessWidget {
             child: Column(
               children: [
                 ElevatedButton.icon(
-                  onPressed: () => _blockOrUnblock(context, currentUser['id']),
+                  onPressed: () => _blockOrUnblock(context, user['id']),
                   icon: const Icon(Icons.block),
                   label: const Text("Block / Unblock"),
                   style: ElevatedButton.styleFrom(
@@ -75,7 +82,7 @@ class ProfileScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 ElevatedButton.icon(
-                  onPressed: () => _startVoiceCall(context, currentUser),
+                  onPressed: () => _startVoiceCall(context, user),
                   icon: const Icon(Icons.phone),
                   label: const Text("Voice Call"),
                   style: ElevatedButton.styleFrom(
@@ -85,7 +92,7 @@ class ProfileScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 ElevatedButton.icon(
-                  onPressed: () => _startVideoCall(context, currentUser),
+                  onPressed: () => _startVideoCall(context, user),
                   icon: const Icon(Icons.videocam),
                   label: const Text("Video Call"),
                   style: ElevatedButton.styleFrom(
@@ -108,7 +115,7 @@ class ProfileScreen extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: ElevatedButton.icon(
-              onPressed: () => _showChatSettings(context),
+              onPressed: () => _showChatSettings(context, user, onBackgroundSet),
               icon: const Icon(Icons.settings),
               label: const Text("Chat Settings"),
               style: ElevatedButton.styleFrom(
@@ -126,26 +133,22 @@ class ProfileScreen extends StatelessWidget {
     final userRef = FirebaseFirestore.instance.collection('users').doc(currentUserId);
     final doc = await userRef.get();
     final blockedUsers = List<String>.from(doc.data()?['blockedUsers'] ?? []);
-
-    final isBlocked = blockedUsers.contains(user['id']);
+    final isBlocked = blockedUsers.contains(currentUserId);
     final action = isBlocked ? FieldValue.arrayRemove : FieldValue.arrayUnion;
 
-    await userRef.update({'blockedUsers': action([user['id']])});
+    await userRef.update({'blockedUsers': action([currentUserId])});
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(isBlocked ? 'User unblocked' : 'User blocked')),
     );
   }
 
-  Future<void> _startVoiceCall(BuildContext context, Map<String, dynamic> currentUser) async {
+  Future<void> _startVoiceCall(BuildContext context, Map<String, dynamic> user) async {
     try {
-      final callId = await RtcManager.startVoiceCall(
-        caller: currentUser,
-        receiver: user,
-      );
+      final callId = await RtcManager.startVoiceCall(caller: user, receiver: user);
       Navigator.pushNamed(context, '/voiceCall', arguments: {
         'callId': callId,
-        'caller': currentUser,
+        'caller': user,
         'receiver': user,
       });
     } catch (_) {
@@ -155,15 +158,12 @@ class ProfileScreen extends StatelessWidget {
     }
   }
 
-  Future<void> _startVideoCall(BuildContext context, Map<String, dynamic> currentUser) async {
+  Future<void> _startVideoCall(BuildContext context, Map<String, dynamic> user) async {
     try {
-      final callId = await RtcManager.startVideoCall(
-        caller: currentUser,
-        receiver: user,
-      );
+      final callId = await RtcManager.startVideoCall(caller: user, receiver: user);
       Navigator.pushNamed(context, '/videoCall', arguments: {
         'callId': callId,
-        'caller': currentUser,
+        'caller': user,
         'receiver': user,
       });
     } catch (_) {
@@ -173,8 +173,8 @@ class ProfileScreen extends StatelessWidget {
     }
   }
 
-  void _showChatSettings(BuildContext context) {
-    final chatId = "${user['id']}"; // Replace with chatId if available
+  void _showChatSettings(BuildContext context, Map<String, dynamic> user, Function(String)? onBackgroundSet) {
+    final chatId = "${user['id']}";
     final TextEditingController urlController = TextEditingController();
 
     showModalBottomSheet(
@@ -199,6 +199,7 @@ class ProfileScreen extends StatelessWidget {
                     if (url.isNotEmpty) {
                       final prefs = await SharedPreferences.getInstance();
                       await prefs.setString('chat_background_$chatId', url);
+                      onBackgroundSet?.call(url);
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(content: Text("Background updated!")),
                       );
@@ -211,24 +212,25 @@ class ProfileScreen extends StatelessWidget {
             const SizedBox(height: 24),
             const Text("Movie Themes", style: TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
-            Wrap(spacing: 8, runSpacing: 8, children: _buildThemePreviews(context, movieThemes, chatId)),
+            Wrap(spacing: 8, runSpacing: 8, children: _buildThemePreviews(context, movieThemes, chatId, onBackgroundSet)),
             const SizedBox(height: 24),
             const Text("Standard Themes", style: TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
-            Wrap(spacing: 8, runSpacing: 8, children: _buildThemePreviews(context, standardThemes, chatId)),
+            Wrap(spacing: 8, runSpacing: 8, children: _buildThemePreviews(context, standardThemes, chatId, onBackgroundSet)),
           ],
         ),
       ),
     );
   }
 
-  List<Widget> _buildThemePreviews(
-      BuildContext context, List<Map<String, dynamic>> themes, String chatId) {
+  List<Widget> _buildThemePreviews(BuildContext context, List<Map<String, dynamic>> themes,
+      String chatId, Function(String)? onBackgroundSet) {
     return themes.map((theme) {
       return GestureDetector(
         onTap: () async {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('chat_background_$chatId', theme['url']);
+          onBackgroundSet?.call(theme['url']);
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text("Theme '${theme['name']}' applied")),
           );

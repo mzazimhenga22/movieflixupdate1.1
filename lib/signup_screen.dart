@@ -123,6 +123,7 @@ class SignUpScreenState extends State<SignUpScreen> {
           'email': email,
           'status': 'Online',
           'auth_provider': 'firebase',
+          'pinnedChats': <String>[],
           'created_at': FieldValue.serverTimestamp(),
           'updated_at': FieldValue.serverTimestamp(),
         };
@@ -138,6 +139,7 @@ class SignUpScreenState extends State<SignUpScreen> {
           'email': email,
           'password': password,
           'auth_provider': 'firebase',
+          'pinnedChats': <String>[],
           'created_at': DateTime.now().toIso8601String(),
           'updated_at': DateTime.now().toIso8601String(),
         });
@@ -205,6 +207,7 @@ class SignUpScreenState extends State<SignUpScreen> {
           'username': username,
           'email': user.email ?? '',
           'status': 'Online',
+          'pinnedChats': <String>[],
           'auth_provider': 'google',
           'created_at': FieldValue.serverTimestamp(),
           'updated_at': FieldValue.serverTimestamp(),

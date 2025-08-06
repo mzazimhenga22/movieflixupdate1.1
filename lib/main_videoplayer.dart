@@ -12,7 +12,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:system_info/system_info.dart';
-import 'sub_video_player.dart';
 import 'package:fl_pip/fl_pip.dart' show FlPiP;
 
 class Subtitle {
@@ -23,103 +22,23 @@ class Subtitle {
   Subtitle({required this.start, required this.end, required this.text});
 }
 
-class EpisodeSelectorDialog extends StatefulWidget {
-  final List<Map<String, dynamic>> seasons;
-  final int currentSeasonNumber;
-  final int currentEpisodeNumber;
-  final void Function(int seasonNumber, int episodeNumber) onEpisodeSelected;
-
-  const EpisodeSelectorDialog({
-    super.key,
-    required this.seasons,
-    required this.currentSeasonNumber,
-    required this.currentEpisodeNumber,
-    required this.onEpisodeSelected,
-  });
-
-  @override
-  EpisodeSelectorDialogState createState() => EpisodeSelectorDialogState();
+class Chapter {
+  final String title;
+  final Duration start;
+  final Duration end;
+  Chapter({required this.title, required this.start, required this.end});
 }
 
-class EpisodeSelectorDialogState extends State<EpisodeSelectorDialog> {
-  late int _selectedSeasonNumber;
+class AudioTrack {
+  final String label;
+  final String url;
+  AudioTrack({required this.label, required this.url});
+}
 
-  @override
-  void initState() {
-    super.initState();
-    _selectedSeasonNumber = widget.currentSeasonNumber;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final selectedSeason = widget.seasons.firstWhere(
-      (season) => season['season_number'] == _selectedSeasonNumber,
-      orElse: () => widget.seasons.isNotEmpty ? widget.seasons.first : {'season_number': 1, 'episodes': []},
-    );
-    final episodes = selectedSeason['episodes'] as List<dynamic>? ?? [];
-
-    return AlertDialog(
-      backgroundColor: Colors.black87,
-      title: const Text('Select Episode', style: TextStyle(color: Colors.white)),
-      content: SizedBox(
-        width: double.maxFinite,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            DropdownButton<int>(
-              value: _selectedSeasonNumber,
-              dropdownColor: Colors.black87,
-              style: const TextStyle(color: Colors.white),
-              items: widget.seasons.map((season) {
-                return DropdownMenuItem<int>(
-                  value: season['season_number'] as int,
-                  child: Text('Season ${season['season_number']}'),
-                );
-              }).toList(),
-              onChanged: (value) {
-                if (value != null) {
-                  setState(() {
-                    _selectedSeasonNumber = value;
-                  });
-                }
-              },
-            ),
-            const SizedBox(height: 16),
-            if (episodes.isEmpty)
-              const Text('No episodes available', style: TextStyle(color: Colors.white70))
-            else
-              Flexible(
-                child: ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: episodes.length,
-                  itemBuilder: (context, index) {
-                    final episode = episodes[index];
-                    final episodeNumber = episode['episode_number'] as int;
-                    final isCurrent = _selectedSeasonNumber == widget.currentSeasonNumber &&
-                        episodeNumber == widget.currentEpisodeNumber;
-                    return ListTile(
-                      title: Text(
-                        'Episode $episodeNumber: ${episode['name'] ?? 'Episode $episodeNumber'}',
-                        style: TextStyle(
-                          color: isCurrent ? Colors.grey : Colors.white,
-                        ),
-                      ),
-                      enabled: !isCurrent,
-                      onTap: () {
-                        if (!isCurrent) {
-                          Navigator.pop(context);
-                          widget.onEpisodeSelected(_selectedSeasonNumber, episodeNumber);
-                        }
-                      },
-                    );
-                  },
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
+class SubtitleTrack {
+  final String label;
+  final String url;
+  SubtitleTrack({required this.label, required this.url});
 }
 
 class MainVideoPlayer extends StatefulWidget {
@@ -176,8 +95,8 @@ class MainVideoPlayerState extends State<MainVideoPlayer> with WidgetsBindingObs
   bool _isInitialized = false;
   String? _errorMessage;
   bool _isBuffering = false;
-    bool _showSkipButton = false; // ✅ add
-  Duration? _skipStart;         // ✅ add
+  bool _showSkipButton = false;
+  Duration? _skipStart;
   Duration? _skipEnd;
   bool _showControls = false;
   Timer? _hideTimer;
@@ -219,36 +138,24 @@ class MainVideoPlayerState extends State<MainVideoPlayer> with WidgetsBindingObs
   Duration? _resumePosition;
   String? _selectedAudioTrack;
   String? _selectedSubtitleTrack;
+  bool _isDownloaded = false;
 
-@override
-void initState() {
-  super.initState();
-  WidgetsBinding.instance.addObserver(this);
-  _title = widget.title;
-  _enforceLandscape();
-  _saveWatchHistory();
-  // Initialize _controller with a default value
-  _controller = widget.isLocal
-      ? VideoPlayerController.file(File(widget.videoPath))
-      : VideoPlayerController.networkUrl(
-          Uri.parse(widget.videoPath),
-          formatHint: widget.isHls ? VideoFormat.hls : VideoFormat.other,
-          httpHeaders: {
-            'Accept': '*/*',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          },
-          videoPlayerOptions: VideoPlayerOptions(
-            allowBackgroundPlayback: false,
-            mixWithOthers: false,
-          ),
-        );
-  _initializeVideoPath().then((_) => _initializeVideo());
-  _initializeBrightness();
-  _loadSubtitles();
-  if (widget.enableSkipIntro && widget.chapters != null) {
-    _prepareSkip();
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _title = widget.title;
+    _enforceLandscape();
+    _saveWatchHistory();
+    _initializeVideoPath().then((_) => _initializeVideo());
+    _initializeBrightness();
+    _loadSubtitles();
+    if (widget.enableSkipIntro && widget.chapters != null) {
+      _prepareSkip();
+    }
+    _loadResumePosition();
+    _loadDownloadState();
   }
-}
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -256,6 +163,7 @@ void initState() {
     if (state == AppLifecycleState.paused) {
       _controller.pause();
       _saveWatchHistory();
+      _savePosition();
     } else if (state == AppLifecycleState.resumed) {
       _enforceLandscape();
       if (_controller.value.isInitialized && !_controller.value.isPlaying) {
@@ -264,41 +172,41 @@ void initState() {
     }
   }
 
-Future<void> _saveWatchHistory() async {
-  if (!_isInitialized || !_controller.value.isInitialized) return;
-  final prefs = await SharedPreferences.getInstance();
-  List<String> jsonList = prefs.getStringList('watchHistory') ?? [];
-  final currentPosition = _controller.value.position.inSeconds;
-  final duration = _controller.value.duration.inSeconds;
+  Future<void> _saveWatchHistory() async {
+    if (!_isInitialized || !_controller.value.isInitialized) return;
+    final prefs = await SharedPreferences.getInstance();
+    List<String> jsonList = prefs.getStringList('watchHistory') ?? [];
+    final currentPosition = _controller.value.position.inSeconds;
+    final duration = _controller.value.duration.inSeconds;
 
-  final historyEntry = {
-    'id': widget.title.hashCode.toString(), // Replace with tmdbId or unique identifier
-    'tmdbId': widget.title.hashCode.toString(), // Add tmdbId if available
-    'title': widget.title,
-    'releaseYear': widget.releaseYear,
-    'media_type': widget.isFullSeason ? 'tv' : 'movie',
-    'position': currentPosition,
-    'duration': duration,
-    'resolution': _selectedQuality,
-    'subtitles': _showSubtitles,
-    'episodeFiles': widget.isFullSeason ? widget.episodeFiles : [],
-    'similarMovies': widget.similarMovies,
-    if (widget.isFullSeason) 'season': _currentSeasonNumber ?? 1,
-    if (widget.isFullSeason) 'episode': _currentEpisodeNumber ?? 1,
-  };
+    final historyEntry = {
+      'id': widget.title.hashCode.toString(),
+      'tmdbId': widget.title.hashCode.toString(),
+      'title': widget.title,
+      'releaseYear': widget.releaseYear,
+      'media_type': widget.isFullSeason ? 'tv' : 'movie',
+      'position': currentPosition,
+      'duration': duration,
+      'resolution': _selectedQuality,
+      'subtitles': _showSubtitles,
+      'episodeFiles': widget.isFullSeason ? widget.episodeFiles : [],
+      'similarMovies': widget.similarMovies,
+      if (widget.isFullSeason) 'season': _currentSeasonNumber ?? 1,
+      if (widget.isFullSeason) 'episode': _currentEpisodeNumber ?? 1,
+    };
 
-  jsonList.removeWhere((jsonStr) {
-    final map = json.decode(jsonStr);
-    return map['tmdbId'] == historyEntry['tmdbId'] &&
-        map['media_type'] == historyEntry['media_type'] &&
-        (!widget.isFullSeason ||
-            (map['season'] == _currentSeasonNumber &&
-             map['episode'] == _currentEpisodeNumber));
-  });
+    jsonList.removeWhere((jsonStr) {
+      final map = json.decode(jsonStr);
+      return map['tmdbId'] == historyEntry['tmdbId'] &&
+          map['media_type'] == historyEntry['media_type'] &&
+          (!widget.isFullSeason ||
+              (map['season'] == _currentSeasonNumber &&
+               map['episode'] == _currentEpisodeNumber));
+    });
 
-  jsonList.insert(0, json.encode(historyEntry));
-  await prefs.setStringList('watchHistory', jsonList);
-}
+    jsonList.insert(0, json.encode(historyEntry));
+    await prefs.setStringList('watchHistory', jsonList);
+  }
 
   Future<void> _enforceLandscape() async {
     try {
@@ -346,115 +254,115 @@ Future<void> _saveWatchHistory() async {
     }
   }
 
-Future<void> _initializeVideo() async {
-  if (_currentVideoPath.isEmpty) {
-    if (mounted) {
-      setState(() {
-        _errorMessage = "No valid video URL or path provided.";
-      });
+  Future<void> _initializeVideo() async {
+    if (_currentVideoPath.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = "No valid video URL or path provided.";
+        });
+      }
+      return;
     }
-    return;
-  }
 
-  try {
-    if (widget.isLocal) {
-      final file = File(_currentVideoPath);
-      if (!await file.exists()) {
-        if (mounted) {
-          setState(() {
-            _errorMessage = "Local file not found: $_currentVideoPath";
-          });
+    try {
+      if (widget.isLocal) {
+        final file = File(_currentVideoPath);
+        if (!await file.exists()) {
+          if (mounted) {
+            setState(() {
+              _errorMessage = "Local file not found: $_currentVideoPath";
+            });
+          }
+          return;
         }
-        return;
-      }
-      _controller = VideoPlayerController.file(file);
-      _streamingInfo = {'creditsStartTime': null};
-    } else {
-      String? actualUrl = _currentVideoPath;
-      Map<String, dynamic>? streamingInfo;
-
-      try {
-        streamingInfo = await StreamingService.getStreamingLink(
-          tmdbId: widget.title.hashCode.toString(),
-          title: widget.title,
-          releaseYear: widget.releaseYear,
-          season: _currentSeasonNumber,
-          episode: _currentEpisodeNumber,
-          resolution: _selectedQuality,
-          enableSubtitles: _showSubtitles,
-        );
-        actualUrl = streamingInfo['url'] as String? ?? widget.videoPath;
-        debugPrint("Streaming URL fetched: $actualUrl");
-      } catch (e) {
-        debugPrint("Failed to fetch streaming URL: $e");
-        actualUrl = widget.videoPath;
-      }
-
-      if (actualUrl == null || actualUrl.isEmpty) {
-        if (mounted) {
-          setState(() {
-            _errorMessage = "Invalid or empty streaming URL";
-          });
-        }
-        return;
-      }
-
-      _streamingInfo = streamingInfo ?? {'creditsStartTime': null};
-      _controller = VideoPlayerController.networkUrl(
-        Uri.parse(actualUrl),
-        formatHint: widget.isHls ? VideoFormat.hls : VideoFormat.other,
-        httpHeaders: {
-          'Accept': '*/*',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
-        videoPlayerOptions: VideoPlayerOptions(
-          allowBackgroundPlayback: false,
-          mixWithOthers: false,
-        ),
-      );
-      setState(() => _currentVideoPath = actualUrl!); // Non-null assertion
-    }
-
-    _controller.addListener(_videoListener);
-    await _controller.initialize();
-    if (mounted) {
-      setState(() {
-        _isInitialized = true;
-        _volume = _controller.value.volume;
-      });
-      if (_resumePosition != null) {
-        await _controller.seekTo(_resumePosition!);
-      }
-      await _controller.play();
-      await _controller.setPlaybackSpeed(_playbackSpeed);
-      // _adjustQualityBasedOnHardware();
-      if (widget.audioTracks != null && widget.audioTracks!.isNotEmpty) {
-        _selectedAudioTrack = widget.audioTracks!.first.label;
-      }
-      if (widget.subtitleTracks != null && widget.subtitleTracks!.isNotEmpty) {
-        _selectedSubtitleTrack = widget.subtitleTracks!.first.label;
-      }
-    }
-  } catch (error) {
-    debugPrint("Video initialization error: $error");
-    if (mounted) {
-      if (_selectedQuality == "Auto") {
-        setState(() => _selectedQuality = "360p");
-        await _fetchNewQualityStream("360p");
+        _controller = VideoPlayerController.file(file);
+        _streamingInfo = {'creditsStartTime': null};
       } else {
-        final nextQuality = _getNextLowerQuality(_selectedQuality);
-        if (nextQuality != null) {
-          setState(() => _selectedQuality = nextQuality);
-          await _fetchNewQualityStream(nextQuality);
+        String? actualUrl = _currentVideoPath;
+        Map<String, dynamic>? streamingInfo;
+
+        try {
+          streamingInfo = await StreamingService.getStreamingLink(
+            tmdbId: widget.title.hashCode.toString(),
+            title: widget.title,
+            releaseYear: widget.releaseYear,
+            season: _currentSeasonNumber,
+            episode: _currentEpisodeNumber,
+            resolution: _selectedQuality,
+            enableSubtitles: _showSubtitles,
+          );
+          actualUrl = streamingInfo['url'] as String? ?? widget.videoPath;
+          debugPrint("Streaming URL fetched: $actualUrl");
+        } catch (e) {
+          debugPrint("Failed to fetch streaming URL: $e");
+          actualUrl = widget.videoPath;
+        }
+
+        if (actualUrl == null || actualUrl.isEmpty) {
+          if (mounted) {
+            setState(() {
+              _errorMessage = "Invalid or empty streaming URL";
+            });
+          }
+          return;
+        }
+
+        _streamingInfo = streamingInfo ?? {'creditsStartTime': null};
+        _controller = VideoPlayerController.networkUrl(
+          Uri.parse(actualUrl),
+          formatHint: widget.isHls ? VideoFormat.hls : VideoFormat.other,
+          httpHeaders: {
+            'Accept': '*/*',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          },
+          videoPlayerOptions: VideoPlayerOptions(
+            allowBackgroundPlayback: false,
+            mixWithOthers: false,
+          ),
+        );
+        setState(() => _currentVideoPath = actualUrl!);
+      }
+
+      _controller.addListener(_videoListener);
+      await _controller.initialize();
+      if (mounted) {
+        setState(() {
+          _isInitialized = true;
+          _volume = _controller.value.volume;
+        });
+        if (_resumePosition != null) {
+          await _controller.seekTo(_resumePosition!);
+        }
+        await _controller.play();
+        await _controller.setPlaybackSpeed(_playbackSpeed);
+        _adjustQualityBasedOnHardware();
+        if (widget.audioTracks != null && widget.audioTracks!.isNotEmpty) {
+          _selectedAudioTrack = widget.audioTracks!.first.label;
+        }
+        if (widget.subtitleTracks != null && widget.subtitleTracks!.isNotEmpty) {
+          _selectedSubtitleTrack = widget.subtitleTracks!.first.label;
+        }
+      }
+    } catch (error) {
+      debugPrint("Video initialization error: $error");
+      if (mounted) {
+        if (_selectedQuality == "Auto") {
+          setState(() => _selectedQuality = "360p");
+          await _fetchNewQualityStream("360p");
         } else {
-          setState(() {
-            _errorMessage = "Failed to load video: $error";
-          });
+          final nextQuality = _getNextLowerQuality(_selectedQuality);
+          if (nextQuality != null) {
+            setState(() => _selectedQuality = nextQuality);
+            await _fetchNewQualityStream(nextQuality);
+          } else {
+            setState(() {
+              _errorMessage = "Failed to load video: $error";
+            });
+          }
         }
       }
     }
   }
-}
 
   Future<void> _adjustQualityBasedOnHardware() async {
     try {
@@ -502,7 +410,10 @@ Future<void> _initializeVideo() async {
         _isBuffering = _controller.value.isBuffering;
         _updateSubtitle();
         _checkForEndOfContent();
-        _checkSkipIntro();
+        if (widget.enableSkipIntro && _skipStart != null && _skipEnd != null) {
+          final position = _controller.value.position;
+          _showSkipButton = position >= _skipStart! && position < _skipEnd!;
+        }
       });
     }
   }
@@ -621,27 +532,58 @@ Future<void> _initializeVideo() async {
   }
 
   void _prepareSkip() {
+    if (widget.chapters == null) return;
     final intro = widget.chapters!.firstWhere(
       (c) => c.title.toLowerCase() == 'intro',
       orElse: () => Chapter(title: 'Intro', start: Duration.zero, end: Duration.zero),
     );
     _skipStart = intro.start;
     _skipEnd = intro.end;
-    _controller.addListener(_checkSkipIntro);
-  }
-
-  void _checkSkipIntro() {
-    if (!widget.enableSkipIntro || !_controller.value.isInitialized || _skipStart == null || _skipEnd == null) return;
-    final position = _controller.value.position;
-    setState(() {
-      _showSkipButton = position >= _skipStart! && position < _skipEnd!;
-    });
   }
 
   void _skipIntro() {
     if (_skipEnd != null) {
       _controller.seekTo(_skipEnd!);
       setState(() => _showSkipButton = false);
+    }
+  }
+
+  Future<void> _savePosition() async {
+    if (!_controller.value.isInitialized) return;
+    final prefs = await SharedPreferences.getInstance();
+    final position = _controller.value.position;
+    await prefs.setInt('${widget.videoPath}_resume', position.inSeconds);
+  }
+
+  Future<void> _loadResumePosition() async {
+    final prefs = await SharedPreferences.getInstance();
+    final seconds = prefs.getInt('${widget.videoPath}_resume');
+    if (seconds != null) {
+      setState(() {
+        _resumePosition = Duration(seconds: seconds);
+      });
+    }
+  }
+
+  Future<void> _loadDownloadState() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _isDownloaded = prefs.getBool('${widget.videoPath}_downloaded') ?? false;
+    });
+  }
+
+  Future<void> _toggleDownload() async {
+    final prefs = await SharedPreferences.getInstance();
+    final newState = !_isDownloaded;
+    // TODO: Implement actual download logic
+    await prefs.setBool('${widget.videoPath}_downloaded', newState);
+    setState(() {
+      _isDownloaded = newState;
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(newState ? 'Download started' : 'Download removed')),
+      );
     }
   }
 
@@ -687,7 +629,6 @@ Future<void> _initializeVideo() async {
     _hideTimer?.cancel();
     _recommendationTimer?.cancel();
     _controller.removeListener(_videoListener);
-    _controller.removeListener(_checkSkipIntro);
     _controller.pause().then((_) => _controller.dispose());
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
@@ -879,6 +820,7 @@ Future<void> _initializeVideo() async {
     setState(() {
       _selectedAudioTrack = track.label;
     });
+    // TODO: Implement platform-specific audio track switching
   }
 
   void _selectSubtitleTrack(String? label) {
@@ -890,6 +832,7 @@ Future<void> _initializeVideo() async {
     setState(() {
       _selectedSubtitleTrack = track.label;
     });
+    // TODO: Implement subtitle track switching
   }
 
   Future<void> _enterPiP() async {
@@ -1273,24 +1216,24 @@ Future<void> _initializeVideo() async {
     }
   }
 
-void _showEpisodeMenu() {
-  if (!widget.isFullSeason) return;
-  if (widget.seasons == null || widget.seasons!.isEmpty) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('No seasons available for this TV show.')),
-    );
-    return;
+  void _showEpisodeMenu() {
+    if (!widget.isFullSeason) return;
+    if (widget.seasons == null || widget.seasons!.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No seasons available for this TV show.')),
+      );
+      return;
+    }
+    showDialog(
+      context: context,
+      builder: (context) => EpisodeSelectorDialog(
+        seasons: widget.seasons!,
+        currentSeasonNumber: _currentSeasonNumber ?? 1,
+        currentEpisodeNumber: _currentEpisodeNumber ?? 1,
+        onEpisodeSelected: _switchToEpisode,
+      ),
+    ).then((_) => _startHideTimer());
   }
-  showDialog(
-    context: context,
-    builder: (context) => EpisodeSelectorDialog(
-      seasons: widget.seasons!,
-      currentSeasonNumber: _currentSeasonNumber ?? 1,
-      currentEpisodeNumber: _currentEpisodeNumber ?? 1,
-      onEpisodeSelected: _switchToEpisode,
-    ),
-  ).then((_) => _startHideTimer());
-}
 
   void _playNextEpisode() {
     if (_nextEpisodeData == null || _nextEpisodeData!['videoPath'] == null || _nextEpisodeData!['episodeNumber'] == null) {
@@ -1517,6 +1460,29 @@ void _showEpisodeMenu() {
                               return KeyEventResult.ignored;
                             },
                           ),
+                        if (widget.enableOffline)
+                          Focus(
+                            child: IconButton(
+                              icon: Icon(
+                                _isDownloaded ? Icons.download_done : Icons.download,
+                                color: _controlColor,
+                                size: _iconSize,
+                              ),
+                              onPressed: _toggleDownload,
+                            ),
+                            onFocusChange: (hasFocus) {
+                              if (hasFocus) {
+                                _startHideTimer();
+                              }
+                            },
+                            onKeyEvent: (node, event) {
+                              if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.select) {
+                                _toggleDownload();
+                                return KeyEventResult.handled;
+                              }
+                              return KeyEventResult.ignored;
+                            },
+                          ),
                       ],
                     ),
                   ],
@@ -1599,6 +1565,7 @@ void _showEpisodeMenu() {
                         } else {
                           _controller.play();
                         }
+                      
                       });
                       _startHideTimer();
                       return KeyEventResult.handled;
@@ -1734,7 +1701,7 @@ void _showEpisodeMenu() {
           if (_showRecommendationsBar && _recommendationData != null)
             Positioned(
               bottom: 100,
-              left: 20,
+              left:  20,
               right: 20,
               child: Container(
                 padding: const EdgeInsets.all(16),
@@ -1994,15 +1961,16 @@ void _showEpisodeMenu() {
               ? FocusScope(
                   child: Stack(
                     children: [
-                      SubVideoPlayer(
-                        videoUrl: _currentVideoPath,
-                        controller: _controller,
-                        enableSkipIntro: widget.enableSkipIntro,
-                        chapters: widget.chapters,
-                        enablePiP: widget.enablePiP,
-                        enableOffline: widget.enableOffline,
-                        audioTracks: widget.audioTracks,
-                        subtitleTracks: widget.subtitleTracks,
+                      Container(color: Colors.black),
+                      SizedBox.expand(
+                        child: FittedBox(
+                          fit: BoxFit.contain,
+                          child: SizedBox(
+                            width: _controller.value.size.width,
+                            height: _controller.value.size.height,
+                            child: VideoPlayer(_controller),
+                          ),
+                        ),
                       ),
                       if (_isLocked)
                         Center(
@@ -2066,6 +2034,9 @@ void _showEpisodeMenu() {
                           onHorizontalDragStart: _onHorizontalDragStart,
                           onHorizontalDragUpdate: _onHorizontalDragUpdate,
                           onHorizontalDragEnd: _onHorizontalDragEnd,
+                          onVerticalDragStart: _onVerticalDragStart,
+                          onVerticalDragUpdate: _onVerticalDragUpdate,
+                          onVerticalDragEnd: _onVerticalDragEnd,
                           child: _buildControls(),
                         ),
                       if (_isAdjustingBrightness && !kIsWeb)
@@ -2094,6 +2065,105 @@ void _showEpisodeMenu() {
                   ),
                 )
               : const Center(child: CircularProgressIndicator()),
+    );
+  }
+}
+
+class EpisodeSelectorDialog extends StatefulWidget {
+  final List<Map<String, dynamic>> seasons;
+  final int currentSeasonNumber;
+  final int currentEpisodeNumber;
+  final void Function(int seasonNumber, int episodeNumber) onEpisodeSelected;
+
+  const EpisodeSelectorDialog({
+    super.key,
+    required this.seasons,
+    required this.currentSeasonNumber,
+    required this.currentEpisodeNumber,
+    required this.onEpisodeSelected,
+  });
+
+  @override
+  EpisodeSelectorDialogState createState() => EpisodeSelectorDialogState();
+}
+
+class EpisodeSelectorDialogState extends State<EpisodeSelectorDialog> {
+  late int _selectedSeasonNumber;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedSeasonNumber = widget.currentSeasonNumber;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selectedSeason = widget.seasons.firstWhere(
+      (season) => season['season_number'] == _selectedSeasonNumber,
+      orElse: () => widget.seasons.isNotEmpty ? widget.seasons.first : {'season_number': 1, 'episodes': []},
+    );
+    final episodes = selectedSeason['episodes'] as List<dynamic>? ?? [];
+
+    return AlertDialog(
+      backgroundColor: Colors.black87,
+      title: const Text('Select Episode', style: TextStyle(color: Colors.white)),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            DropdownButton<int>(
+              value: _selectedSeasonNumber,
+              dropdownColor: Colors.black87,
+              style: const TextStyle(color: Colors.white),
+              items: widget.seasons.map((season) {
+                return DropdownMenuItem<int>(
+                  value: season['season_number'] as int,
+                  child: Text('Season ${season['season_number']}'),
+                );
+              }).toList(),
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() {
+                    _selectedSeasonNumber = value;
+                  });
+                }
+              },
+            ),
+            const SizedBox(height: 16),
+            if (episodes.isEmpty)
+              const Text('No episodes available', style: TextStyle(color: Colors.white70))
+            else
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: episodes.length,
+                  itemBuilder: (context, index) {
+                    final episode = episodes[index];
+                    final episodeNumber = episode['episode_number'] as int;
+                    final isCurrent = _selectedSeasonNumber == widget.currentSeasonNumber &&
+                        episodeNumber == widget.currentEpisodeNumber;
+                    return ListTile(
+                      title: Text(
+                        'Episode $episodeNumber: ${episode['name'] ?? 'Episode $episodeNumber'}',
+                        style: TextStyle(
+                          color: isCurrent ? Colors.grey : Colors.white,
+                        ),
+                      ),
+                      enabled: !isCurrent,
+                      onTap: () {
+                        if (!isCurrent) {
+                          Navigator.pop(context);
+                          widget.onEpisodeSelected(_selectedSeasonNumber, episodeNumber);
+                        }
+                      },
+                    );
+                  },
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

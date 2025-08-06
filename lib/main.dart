@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
@@ -13,34 +15,44 @@ import 'package:movie_app/components/socialsection/ProfileScreen.dart';
 import 'package:movie_app/components/socialsection/messages_controller.dart';
 import 'package:movie_app/components/socialsection/messages_screen.dart';
 import 'package:movie_app/components/socialsection/presence_wrapper.dart';
+import 'package:flutter_downloader/flutter_downloader.dart';
 
-
+/// A port to receive messages from the background isolate
+final ReceivePort _port = ReceivePort();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   try {
-    // Initialize Firebase
+    // ✅ Initialize Flutter Downloader
+    await FlutterDownloader.initialize(
+      debug: true,
+      ignoreSsl: true, // only for dev
+    );
+    debugPrint('✅ FlutterDownloader initialized');
+
+    // ✅ Register download callback
+    FlutterDownloader.registerCallback(downloadCallback);
+
+    // ✅ Initialize Firebase
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
     debugPrint('✅ Firebase initialized');
 
     FirebaseFirestore.instance.settings = const Settings(
-  persistenceEnabled: true,
-  cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
-);
+      persistenceEnabled: true,
+      cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+    );
 
-
-    // Initialize Supabase
+    // ✅ Initialize Supabase
     await Supabase.initialize(
       url: 'https://qumrbpxhyxkgreoqsnis.supabase.co',
-      anonKey:
-          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF1bXJicHhoeXhrZ3Jlb3FzbmlzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDg2NzkyNDksImV4cCI6MjA2NDI1NTI0OX0.r-Scwh1gYAfMwYjh1_wjAVb66XSjvcUgPeV_CH7VkS4',
+      anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF1bXJicHhoeXhrZ3Jlb3FzbmlzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDg2NzkyNDksImV4cCI6MjA2NDI1NTI0OX0.r-Scwh1gYAfMwYjh1_wjAVb66XSjvcUgPeV_CH7VkS4',
     );
     debugPrint('✅ Supabase initialized');
 
-    // Initialize AuthDatabase
+    // ✅ Initialize AuthDatabase
     await AuthDatabase.instance.initialize();
     debugPrint('✅ AuthDatabase initialized');
   } catch (e) {
@@ -58,6 +70,19 @@ void main() async {
   );
 }
 
+/// This is invoked by the native downloader isolate when status/progress changes.
+@pragma('vm:entry-point')
+void downloadCallback(String id, int status, int progress) {
+  final SendPort? send = _port.sendPort;
+  send?.send({
+    'id': id,
+    'status': status,
+    'progress': progress,
+  });
+}
+
+
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -65,7 +90,6 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final settings = Provider.of<SettingsProvider>(context);
 
-    // Get current user ID for presence tracking
     final userId = Supabase.instance.client.auth.currentUser?.id;
 
     Widget home = const SplashScreen();
@@ -105,9 +129,9 @@ class MyApp extends StatelessWidget {
       home: home,
       onGenerateRoute: (RouteSettings routeSettings) {
         if (routeSettings.name == '/profile') {
-          final user = routeSettings.arguments as Map<String, dynamic>;
+          final args = routeSettings.arguments as Map<String, dynamic>;
           return MaterialPageRoute(
-            builder: (context) => ProfileScreen(user: user),
+            builder: (context) => ProfileScreen(user: args),
           );
         } else if (routeSettings.name == '/messages') {
           final args = routeSettings.arguments as Map<String, dynamic>;

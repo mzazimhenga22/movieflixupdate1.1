@@ -66,28 +66,28 @@ class SubVideoPlayerState extends State<SubVideoPlayer> with WidgetsBindingObser
     }
   }
 
-Future<void> _setupController() async {
-  try {
-    // Remove redundant initialization
-    if (widget.enableSkipIntro && widget.chapters != null) {
-      _prepareSkip();
-      widget.controller.addListener(_checkSkipIntro);
-    }
-    widget.controller.addListener(_savePosition);
-    setState(() => _isInitialized = true);
-    if (_resumePosition != null) {
-      await widget.controller.seekTo(_resumePosition!);
-    }
-    await widget.controller.play();
-  } catch (e) {
-    if (mounted) {
-      setState(() => _isInitialized = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to initialize video: $e')),
-      );
+  Future<void> _setupController() async {
+    try {
+      await widget.controller.initialize(); // Initialize controller
+      if (widget.enableSkipIntro && widget.chapters != null) {
+        _prepareSkip();
+        widget.controller.addListener(_checkSkipIntro);
+      }
+      widget.controller.addListener(_savePosition);
+      setState(() => _isInitialized = true);
+      if (_resumePosition != null) {
+        await widget.controller.seekTo(_resumePosition!);
+      }
+      await widget.controller.play();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isInitialized = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to initialize video: $e')),
+        );
+      }
     }
   }
-}
 
   void _prepareSkip() {
     final intro = widget.chapters!.firstWhere(
@@ -147,7 +147,6 @@ Future<void> _setupController() async {
   Future<void> _toggleDownload() async {
     final prefs = await SharedPreferences.getInstance();
     final newState = !_isDownloaded;
-    // TODO: Implement actual download logic
     await prefs.setBool('${widget.videoUrl}_downloaded', newState);
     setState(() {
       _isDownloaded = newState;
@@ -165,7 +164,6 @@ Future<void> _setupController() async {
       (t) => t.label == label,
       orElse: () => widget.audioTracks!.first,
     );
-    // TODO: Implement platform-specific audio track switching
   }
 
   void _selectSubtitleTrack(String? label) {
@@ -174,7 +172,6 @@ Future<void> _setupController() async {
       (t) => t.label == label,
       orElse: () => widget.subtitleTracks!.first,
     );
-    // TODO: Implement subtitle track switching
   }
 
   void _showAudioTrackMenu() async {
@@ -441,25 +438,24 @@ Future<void> _setupController() async {
       return const Center(child: CircularProgressIndicator());
     }
 
-return GestureDetector(
-  onTap: _toggleControls,
-  child: Stack(
-    children: [
-      Container(color: Colors.black), // Keep the black background
-      SizedBox.expand(
-        child: FittedBox(
-          fit: BoxFit.contain,
-          child: SizedBox(
-            width: widget.controller.value.size.width,
-            height: widget.controller.value.size.height,
-            child: VideoPlayer(widget.controller),
+    return GestureDetector(
+      onTap: _toggleControls,
+      child: Stack(
+        children: [
+          SizedBox.expand(
+            child: FittedBox(
+              fit: BoxFit.contain,
+              child: SizedBox(
+                width: widget.controller.value.size.width,
+                height: widget.controller.value.size.height,
+                child: VideoPlayer(widget.controller),
+              ),
+            ),
           ),
-        ),
+          if (_showControls || _showSkipButton) _buildControls(),
+        ],
       ),
-      _buildControls(),
-    ],
-  ),
-);
+    );
   }
 }
 

@@ -3,16 +3,15 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:movie_app/main_videoplayer.dart';
 import 'package:movie_app/streaming_service.dart';
-import 'package:movie_app/sub_video_player.dart';
 
 class WatchHistoryScreen extends StatefulWidget {
   const WatchHistoryScreen({super.key});
 
   @override
-  _WatchHistoryScreenState createState() => _WatchHistoryScreenState();
+  WatchHistoryScreenState createState() => WatchHistoryScreenState();
 }
 
-class _WatchHistoryScreenState extends State<WatchHistoryScreen> {
+class WatchHistoryScreenState extends State<WatchHistoryScreen> {
   Future<List<Map<String, dynamic>>> _fetchWatchHistory() async {
     final prefs = await SharedPreferences.getInstance();
     List<String> jsonList = prefs.getStringList('watchHistory') ?? [];
@@ -42,62 +41,62 @@ class _WatchHistoryScreenState extends State<WatchHistoryScreen> {
         : '${twoDigits(minutes)}:${twoDigits(seconds)}';
   }
 
-Future<void> _resumePlayback(Map<String, dynamic> movie) async {
-  final tmdbId = movie['tmdbId'].toString(); // Use tmdbId instead of movie['id']
-  final title = movie['title'] ?? movie['name'] ?? 'Untitled';
-  final releaseYear = movie['releaseYear'] ?? 1970;
-  final isTvShow = movie['media_type']?.toString().toLowerCase() == 'tv';
-  final season = movie['season'] ?? 1;
-  final episode = movie['episode'] ?? 1;
-  final resolution = movie['resolution'] ?? '720p';
-  final subtitles = movie['subtitles'] ?? false;
+  Future<void> _resumePlayback(Map<String, dynamic> movie) async {
+    final tmdbId = movie['tmdbId'].toString();
+    final title = movie['title'] ?? movie['name'] ?? 'Untitled';
+    final releaseYear = movie['releaseYear'] ?? 1970;
+    final isTvShow = movie['media_type']?.toString().toLowerCase() == 'tv';
+    final season = movie['season'] ?? 1;
+    final episode = movie['episode'] ?? 1;
+    final resolution = movie['resolution'] ?? '720p';
+    final subtitles = movie['subtitles'] ?? false;
 
-  try {
-    final streamingInfo = await StreamingService.getStreamingLink(
-      tmdbId: tmdbId,
-      title: title,
-      releaseYear: releaseYear,
-      season: isTvShow ? season : null,
-      episode: isTvShow ? episode : null,
-      resolution: resolution,
-      enableSubtitles: subtitles,
-    );
-
-    if (!mounted) return;
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => MainVideoPlayer(
-          videoPath: streamingInfo['url'] ?? '',
-          title: streamingInfo['title'] ?? title,
-          releaseYear: releaseYear,
-          isHls: streamingInfo['type'] == 'm3u8',
-          subtitleUrl: streamingInfo['subtitleUrl'],
-          isFullSeason: isTvShow,
-          episodeFiles: isTvShow ? movie['episodeFiles']?.cast<String>() ?? [] : [],
-          similarMovies: movie['similarMovies']?.cast<Map<String, dynamic>>() ?? [],
-          isLocal: movie['isLocal'] ?? false,
-          seasons: movie['seasons']?.cast<Map<String, dynamic>>(),
-          initialSeasonNumber: isTvShow ? season : null,
-          initialEpisodeNumber: isTvShow ? episode : null,
-          enableSkipIntro: movie['enableSkipIntro'] ?? false,
-          chapters: movie['chapters']?.cast<Chapter>(),
-          enablePiP: movie['enablePiP'] ?? false,
-          enableOffline: movie['enableOffline'] ?? false,
-          audioTracks: movie['audioTracks']?.cast<AudioTrack>(),
-          subtitleTracks: movie['subtitleTracks']?.cast<SubtitleTrack>(),
-        ),
-      ),
-    );
-  } catch (e) {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to resume: $e')),
+    try {
+      final streamingInfo = await StreamingService.getStreamingLink(
+        tmdbId: tmdbId,
+        title: title,
+        releaseYear: releaseYear,
+        season: isTvShow ? season : null,
+        episode: isTvShow ? episode : null,
+        resolution: resolution,
+        enableSubtitles: subtitles,
       );
+
+      if (!mounted) return;
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => MainVideoPlayer(
+            videoPath: streamingInfo['url'] ?? '',
+            title: streamingInfo['title'] ?? title,
+            releaseYear: releaseYear,
+            isHls: streamingInfo['type'] == 'm3u8',
+            subtitleUrl: streamingInfo['subtitleUrl'],
+            isFullSeason: isTvShow,
+            episodeFiles: isTvShow ? movie['episodeFiles']?.cast<String>() ?? [] : [],
+            similarMovies: movie['similarMovies']?.cast<Map<String, dynamic>>() ?? [],
+            isLocal: movie['isLocal'] ?? false,
+            seasons: movie['seasons']?.cast<Map<String, dynamic>>(),
+            initialSeasonNumber: isTvShow ? season : null,
+            initialEpisodeNumber: isTvShow ? episode : null,
+            enableSkipIntro: movie['enableSkipIntro'] ?? false,
+            chapters: movie['chapters']?.cast<Chapter>(),
+            enablePiP: movie['enablePiP'] ?? false,
+            enableOffline: movie['enableOffline'] ?? false,
+            audioTracks: movie['audioTracks']?.cast<AudioTrack>(),
+            subtitleTracks: movie['subtitleTracks']?.cast<SubtitleTrack>(),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to resume: $e')),
+        );
+      }
     }
   }
-}
 
   @override
   Widget build(BuildContext context) {

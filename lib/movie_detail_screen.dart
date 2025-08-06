@@ -128,43 +128,56 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
     );
   }
 
-  Future<bool> _requestStoragePermission() async {
-    final status = await Permission.storage.status;
-    if (status.isGranted) {
+Future<bool> _requestStoragePermission() async {
+  if (Platform.isAndroid) {
+    // On Android 11+ (API 30+) we must ask for "all files access"
+    final ManageStatus = await Permission.manageExternalStorage.status;
+    if (ManageStatus.isGranted) {
       return true;
-    } else if (status.isDenied || status.isRestricted) {
-      final result = await Permission.storage.request();
-      return result.isGranted;
-    } else if (status.isPermanentlyDenied) {
+    }
+
+    final result = await Permission.manageExternalStorage.request();
+    if (result.isGranted) {
+      return true;
+    }
+
+    if (result.isPermanentlyDenied) {
+      // Take the user to Settings
       await showDialog(
         context: context,
-        builder: (context) => AlertDialog(
+        builder: (_) => AlertDialog(
           backgroundColor: Colors.black87,
           title: const Text("Permission Required", style: TextStyle(color: Colors.white)),
           content: const Text(
-              "Please enable storage permission from app settings to download movies.",
-              style: TextStyle(color: Colors.white70)),
+            "Please grant “All files access” in Settings\nso we can download your movies.",
+            style: TextStyle(color: Colors.white70),
+          ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text("Cancel",
-                  style: TextStyle(color: Provider.of<SettingsProvider>(context, listen: false).accentColor)),
-            ),
-            TextButton(
-              onPressed: () async {
+              onPressed: () {
+                openAppSettings();
                 Navigator.pop(context);
-                await openAppSettings();
               },
-              child: Text("Open Settings",
-                  style: TextStyle(color: Provider.of<SettingsProvider>(context, listen: false).accentColor)),
+              child: Text(
+                "Open Settings",
+                style: TextStyle(color: Provider.of<SettingsProvider>(context, listen: false).accentColor),
+              ),
             ),
           ],
         ),
       );
-      return false;
     }
     return false;
+  } else {
+    // iOS or Android < 11: fall back to the old storage permission
+    final status = await Permission.storage.status;
+    if (status.isGranted) return true;
+
+    final result = await Permission.storage.request();
+    return result.isGranted;
   }
+}
+
 
   Future<void> _downloadMovie(Map<String, dynamic> details, {required String resolution, required bool subtitles}) async {
     final tmdbId = details['id']?.toString() ?? '';

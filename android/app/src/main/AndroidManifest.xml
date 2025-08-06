@@ -2,22 +2,28 @@
     xmlns:tools="http://schemas.android.com/tools"
     package="com.example.movieflix">
 
-    <!-- Permissions -->
+    <!-- Core Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" /> <!-- Deprecated after API 29 -->
-    
+
+    <!-- Android 13+ Scoped Media (if you later read images/videos/audio individually) -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGE" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <!-- Android 11+ “All files access” -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <!-- Features -->
     <uses-feature android:name="android.software.picture_in_picture" android:required="false" />
 
-    <!-- App Definition -->
     <application
         android:name="${applicationName}"
         android:label="movieflix"
         android:icon="@mipmap/ic_launcher"
-        android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true"
         tools:replace="android:icon,android:label">
 
@@ -26,7 +32,6 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:taskAffinity=""
             android:theme="@style/LaunchTheme"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize"
@@ -50,11 +55,12 @@
             android:value="2" />
     </application>
 
-    <!-- Queries for text-sharing capabilities -->
+    <!-- For sharing via PROCESS_TEXT -->
     <queries>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT" />
             <data android:mimeType="text/plain" />
         </intent>
     </queries>
+
 </manifest>

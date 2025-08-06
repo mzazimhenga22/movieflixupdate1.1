@@ -487,8 +487,11 @@ class MessagesController extends ChangeNotifier {
     final snapshot = await FirebaseFirestore.instance.collection('users').get();
     final allUsers = snapshot.docs
         .where((doc) => doc.exists && doc.id != currentUser['id'] && !_blockedUsers.contains(doc.id))
-        .map((doc) => doc.data() as Map<String, dynamic>)
-        .toList();
+        .map((doc) {
+          final data = doc.data() as Map<String, dynamic>;
+          data['id'] = doc.id;
+          return data;
+        }).toList();
 
     if (!context.mounted) return;
 
@@ -523,6 +526,9 @@ class MessagesController extends ChangeNotifier {
               child: ListView(
                 shrinkWrap: true,
                 children: allUsers.map((user) {
+                  final userId = user['id'];
+                  if (userId == null) return const SizedBox();
+
                   return ListTile(
                     leading: CircleAvatar(
                       backgroundImage: user['photoUrl'] != null
@@ -546,7 +552,7 @@ class MessagesController extends ChangeNotifier {
                       ),
                     ),
                     onTap: () async {
-                      final isBlocked = isUserBlocked(user['id']);
+                      final isBlocked = isUserBlocked(userId);
                       if (isBlocked) {
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
@@ -560,7 +566,7 @@ class MessagesController extends ChangeNotifier {
                         return;
                       }
 
-                      final chatId = getChatId(currentUser['id'], user['id']);
+                      final chatId = getChatId(currentUser['id'], userId);
                       await FirebaseFirestore.instance
                           .collection('chats')
                           .doc(chatId)
