@@ -97,49 +97,63 @@ class MessagesController extends ChangeNotifier {
   }
 
   Future<int> getUnreadCount(String userId) async {
-    final chatsSnapshot = await FirebaseFirestore.instance
-        .collection('chats')
-        .where('userIds', arrayContains: userId)
-        .get();
+    try {
+      final chatsSnapshot = await FirebaseFirestore.instance
+          .collection('chats')
+          .where('userIds', arrayContains: userId)
+          .get();
 
-    final groupsSnapshot = await FirebaseFirestore.instance
-        .collection('groups')
-        .where('userIds', arrayContains: userId)
-        .get();
+      final groupsSnapshot = await FirebaseFirestore.instance
+          .collection('groups')
+          .where('userIds', arrayContains: userId)
+          .get();
 
-    final unreadChats = chatsSnapshot.docs.where((doc) {
-      final data = doc.data() as Map<String, dynamic>;
-      return (data['unreadBy'] as List<dynamic>?)?.contains(userId) ?? false;
-    }).length;
-
-    final unreadGroups = groupsSnapshot.docs.where((doc) {
-      final data = doc.data() as Map<String, dynamic>;
-      return (data['unreadBy'] as List<dynamic>?)?.contains(userId) ?? false;
-    }).length;
-
-    return unreadChats + unreadGroups;
+      int unreadCount = 0;
+      for (var doc in [...chatsSnapshot.docs, ...groupsSnapshot.docs]) {
+        final isGroup = doc.data()['isGroup'] ?? false;
+        final messagesSnapshot = await FirebaseFirestore.instance
+            .collection(isGroup ? 'groups' : 'chats')
+            .doc(doc.id)
+            .collection('messages')
+            .orderBy('timestamp', descending: true)
+            .limit(1)
+            .get();
+        if (messagesSnapshot.docs.isNotEmpty &&
+            !(messagesSnapshot.docs.first.data()['readBy']?.contains(userId) ?? true)) {
+          unreadCount++;
+        }
+      }
+      return unreadCount;
+    } catch (e) {
+      debugPrint('Error getting unread count: $e');
+      return 0;
+    }
   }
 
   Future<void> markAsRead(String chatId, String userId, bool isGroup) async {
-    final messagesSnapshot = await FirebaseFirestore.instance
-        .collection(isGroup ? 'groups' : 'chats')
-        .doc(chatId)
-        .collection('messages')
-        .where('readBy', isNotEqualTo: userId)
-        .get();
+    try {
+      final messagesSnapshot = await FirebaseFirestore.instance
+          .collection(isGroup ? 'groups' : 'chats')
+          .doc(chatId)
+          .collection('messages')
+          .where('readBy', arrayContains: userId, isEqualTo: false)
+          .get();
 
-    for (var doc in messagesSnapshot.docs) {
-      await doc.reference.update({
-        'readBy': FieldValue.arrayUnion([userId]),
+      for (var doc in messagesSnapshot.docs) {
+        await doc.reference.update({
+          'readBy': FieldValue.arrayUnion([userId]),
+        });
+      }
+
+      await FirebaseFirestore.instance
+          .collection(isGroup ? 'groups' : 'chats')
+          .doc(chatId)
+          .update({
+        'unreadBy': FieldValue.arrayRemove([userId]),
       });
+    } catch (e) {
+      debugPrint('Error marking as read: $e');
     }
-
-    await FirebaseFirestore.instance
-        .collection(isGroup ? 'groups' : 'chats')
-        .doc(chatId)
-        .update({
-      'unreadBy': FieldValue.arrayRemove([userId]),
-    });
   }
 
   Future<void> blockUser() async {
@@ -389,20 +403,26 @@ class MessagesController extends ChangeNotifier {
   }
 
   Future<void> _deleteChatDocument(String chatId) async {
-    final messagesSnapshot = await FirebaseFirestore.instance
-        .collection('chats')
-        .doc(chatId)
-        .collection('messages')
-        .get();
-    for (var doc in messagesSnapshot.docs) {
-      await doc.reference.delete();
+    try {
+      final messagesSnapshot = await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(chatId)
+          .collection('messages')
+          .get();
+      for (var doc in messagesSnapshot.docs) {
+        final data = doc.data();
+        final deletedFor = List<String>.from(data['deletedFor'] ?? [])..add(currentUser['id']);
+        await doc.reference.update({'deletedFor': deletedFor});
+      }
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(chatId)
+          .update({
+        'deletedBy': FieldValue.arrayUnion([currentUser['id']]),
+      });
+    } catch (e) {
+      debugPrint('Error deleting chat: $e');
     }
-    await FirebaseFirestore.instance
-        .collection('chats')
-        .doc(chatId)
-        .update({
-      'deletedBy': FieldValue.arrayUnion([currentUser['id']]),
-    });
   }
 
   Future<void> deleteConversation() async {
@@ -433,8 +453,10 @@ class MessagesController extends ChangeNotifier {
             .collection('messages')
             .get();
         for (var doc in messagesSnapshot.docs) {
+          final data = doc.data();
+          final deletedFor = List<String>.from(data['deletedFor'] ?? [])..add(currentUser['id']);
           await doc.reference.update({
-            'deletedFor': FieldValue.arrayUnion([currentUser['id']]),
+            'deletedFor': deletedFor,
           });
         }
 

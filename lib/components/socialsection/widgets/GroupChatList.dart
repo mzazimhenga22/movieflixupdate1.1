@@ -58,24 +58,22 @@ class _GroupChatListState extends State<GroupChatList> {
     });
   }
 
-  Future<void> _updatePinnedMessage(DocumentSnapshot doc) async {
-    if (doc.exists && doc.data() != null) {
-      final data = doc.data() as Map<String, dynamic>;
-      if (data.containsKey('pinnedMessageId')) {
-        final pinnedId = data['pinnedMessageId'];
-        if (pinnedId != null) {
-          final pinned = await FirebaseFirestore.instance
-              .collection('groups')
-              .doc(widget.groupId)
-              .collection('messages')
-              .doc(pinnedId)
-              .get();
+Future<void> _updatePinnedMessage(DocumentSnapshot doc) async {
+  if (doc.exists && doc.data() != null) {
+    final data = doc.data() as Map<String, dynamic>;
+    if (data.containsKey('pinnedMessageId')) {
+      final pinnedId = data['pinnedMessageId'];
+      if (pinnedId != null) {
+        final pinned = await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(widget.groupId)
+            .collection('messages')
+            .doc(pinnedId)
+            .get();
 
-          if (pinned.exists) {
-            setState(() => pinnedMessage = pinned);
-          } else {
-            await _clearPinnedMessage();
-          }
+        if (pinned.exists) {
+          if (!mounted) return;
+          setState(() => pinnedMessage = pinned);
         } else {
           await _clearPinnedMessage();
         }
@@ -85,7 +83,11 @@ class _GroupChatListState extends State<GroupChatList> {
     } else {
       await _clearPinnedMessage();
     }
+  } else {
+    await _clearPinnedMessage();
   }
+}
+
 
   Future<void> _clearPinnedMessage() async {
     await FirebaseFirestore.instance

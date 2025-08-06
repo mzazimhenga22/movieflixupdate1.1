@@ -7,6 +7,37 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+// Simple in-memory cache for user data
+class UserCache {
+  static final Map<String, Map<String, dynamic>> _cache = {};
+
+  static Future<Map<String, dynamic>?> getUser(String userId) async {
+    if (_cache.containsKey(userId)) {
+      return _cache[userId];
+    }
+    try {
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .get()
+          .timeout(const Duration(seconds: 5));
+      if (userDoc.exists) {
+        final userData = userDoc.data()! as Map<String, dynamic>;
+        userData['id'] = userDoc.id;
+        _cache[userId] = userData;
+        return userData;
+      }
+    } catch (e) {
+      debugPrint('Error fetching user $userId: $e');
+    }
+    return null;
+  }
+
+  static void clear() {
+    _cache.clear();
+  }
+}
+
 class TypingArea extends StatefulWidget {
   final void Function(String text)? onSendMessage;
   final void Function(File file)? onSendFile;
@@ -17,7 +48,6 @@ class TypingArea extends StatefulWidget {
   final VoidCallback? onCancelReply;
   final Map<String, dynamic> currentUser;
   final Map<String, dynamic>? otherUser;
-
 
   const TypingArea({
     super.key,
@@ -30,7 +60,6 @@ class TypingArea extends StatefulWidget {
     this.onCancelReply,
     required this.currentUser,
     this.otherUser,
-  
   });
 
   @override
@@ -43,13 +72,11 @@ class _TypingAreaState extends State<TypingArea> {
   bool isRecording = false;
   String? recordedPath;
   final FlutterSoundRecorder _recorder = FlutterSoundRecorder();
-  String? senderName;
 
   @override
   void initState() {
     super.initState();
     _initRecorder();
-    _fetchSenderName();
   }
 
   Future<void> _initRecorder() async {
@@ -68,45 +95,24 @@ class _TypingAreaState extends State<TypingArea> {
     }
   }
 
-Future<void> _fetchSenderName() async {
-  if (widget.replyingTo == null) return;
-  final data = widget.replyingTo!.data() as Map<String, dynamic>;
-  final senderId = data['senderId'] as String?;
+  Future<String> _getSenderName() async {
+    if (widget.replyingTo == null) return '';
+    final data = widget.replyingTo!.data() as Map<String, dynamic>;
+    final senderId = data['senderId'] as String?;
 
-  if (senderId == null) {
-    setState(() => senderName = 'Unknown');
-    return;
-  }
+    if (senderId == null) return 'Unknown';
 
-  if (widget.isGroup) {
-    // Group chat: Fetch sender's username from Firestore
-    try {
-      final userDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(senderId)
-          .get();
-      setState(() {
-        senderName = userDoc.exists
-            ? (userDoc.data()?['username'] ?? 'Unknown')
-            : 'Unknown';
-      });
-    } catch (e) {
-      setState(() => senderName = 'Unknown');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to fetch sender name: $e')),
-      );
-    }
-  } else {
-    // Direct chat: Use currentUser or otherUser map
-    if (senderId == widget.currentUser['id']) {
-      setState(() => senderName = widget.currentUser['username'] ?? 'You');
-    } else if (widget.otherUser != null) {
-      setState(() => senderName = widget.otherUser!['username'] ?? 'Unknown');
+    if (widget.isGroup) {
+      final user = await UserCache.getUser(senderId);
+      return user?['username'] ?? 'Unknown';
     } else {
-      setState(() => senderName = 'Unknown');
+      if (senderId == widget.currentUser['id']) {
+        return widget.currentUser['username'] ?? 'You';
+      } else {
+        return widget.otherUser?['username'] ?? 'Unknown';
+      }
     }
   }
-}
 
   @override
   void dispose() {
@@ -121,9 +127,6 @@ Future<void> _fetchSenderName() async {
       showEmojiPicker = !showEmojiPicker;
     });
   }
-
-
-
 
   Future<void> _pickFile() async {
     try {
@@ -209,87 +212,94 @@ Future<void> _fetchSenderName() async {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        // 🔁 Reply Preview UI with Frosted Glass Effect
-if (widget.replyingTo != null) ...[
-  Container(
-    margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-    decoration: BoxDecoration(
-      borderRadius: BorderRadius.circular(12),
-      color: Colors.black.withOpacity(0.2),
-    ),
-    child: ClipRRect(
-      borderRadius: BorderRadius.circular(12),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            border: Border(
-              left: BorderSide(width: 4, color: widget.accentColor),
+        // Reply Preview UI with Frosted Glass Effect
+        if (widget.replyingTo != null)
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: Colors.black.withOpacity(0.2),
             ),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      senderName ?? 'Someone',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: widget.accentColor,
-                      ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    border: Border(
+                      left: BorderSide(width: 4, color: widget.accentColor),
                     ),
-                    const SizedBox(height: 4),
-                    if (widget.replyingTo!['text'] != null)
-                      Text(
-                        widget.replyingTo!['text'],
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: Colors.white),
-                      )
-                    else if (widget.replyingTo!['type'] == 'image')
-                      const Text(
-                        '[Image]',
-                        style: TextStyle(
-                          fontStyle: FontStyle.italic,
-                          color: Colors.white,
-                        ),
-                      )
-                    else if (widget.replyingTo!['type'] == 'audio')
-                      const Text(
-                        '[Voice Message]',
-                        style: TextStyle(
-                          fontStyle: FontStyle.italic,
-                          color: Colors.white,
-                        ),
-                      )
-                    else
-                      const Text(
-                        '[Unsupported message]',
-                        style: TextStyle(
-                          fontStyle: FontStyle.italic,
-                          color: Colors.white,
-                        ),
-                      ),
-                  ],
+                  ),
+                  child: FutureBuilder<String>(
+                    future: _getSenderName(),
+                    builder: (context, snapshot) {
+                      final senderName = snapshot.connectionState == ConnectionState.done
+                          ? snapshot.data ?? 'Unknown'
+                          : 'Loading...';
+                      return Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  senderName,
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    color: widget.accentColor,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                if (widget.replyingTo!['text'] != null)
+                                  Text(
+                                    widget.replyingTo!['text'],
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(color: Colors.white),
+                                  )
+                                else if (widget.replyingTo!['type'] == 'image')
+                                  const Text(
+                                    '[Image]',
+                                    style: TextStyle(
+                                      fontStyle: FontStyle.italic,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                else if (widget.replyingTo!['type'] == 'audio')
+                                  const Text(
+                                    '[Voice Message]',
+                                    style: TextStyle(
+                                      fontStyle: FontStyle.italic,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                else
+                                  const Text(
+                                    '[Unsupported message]',
+                                    style: TextStyle(
+                                      fontStyle: FontStyle.italic,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close, color: Colors.white70),
+                            onPressed: widget.onCancelReply,
+                          ),
+                        ],
+                      );
+                    },
+                  ),
                 ),
               ),
-              IconButton(
-                icon: const Icon(Icons.close, color: Colors.white70),
-                onPressed: widget.onCancelReply,
-              ),
-            ],
+            ),
           ),
-        ),
-      ),
-    ),
-  ),
-],
 
-        // 🔊 Voice recording preview
+        // Voice recording preview
         if (recordedPath != null)
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -320,7 +330,7 @@ if (widget.replyingTo != null) ...[
             ),
           ),
 
-        // ✍️ Typing input with Frosted Glass Effect
+        // Typing input with Frosted Glass Effect
         Container(
           margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -385,7 +395,7 @@ if (widget.replyingTo != null) ...[
           ),
         ),
 
-         // 😄 Emoji Picker
+        // Emoji Picker
         if (showEmojiPicker)
           SizedBox(
             height: 250,

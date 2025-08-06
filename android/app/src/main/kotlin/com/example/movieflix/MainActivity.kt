@@ -4,15 +4,20 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.view.ViewTreeObserver
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.example.movieflix/keyboard"
+    private lateinit var methodChannel: MethodChannel
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
 
-        // Listen for layout changes to detect keyboard visibility and height
+        // Initialize MethodChannel with non-null binaryMessenger
+        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+
+        // Set up keyboard height listener
         window.decorView.rootView.viewTreeObserver
             .addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
                 private var previousKeyboardHeight = 0
@@ -23,12 +28,8 @@ class MainActivity : FlutterActivity() {
                     val screenHeight = window.decorView.rootView.height
                     val keyboardHeight = screenHeight - rect.bottom
 
-                    // Notify Dart only if height changed
                     if (keyboardHeight != previousKeyboardHeight) {
-                        MethodChannel(
-                            flutterEngine?.dartExecutor?.binaryMessenger,
-                            CHANNEL
-                        ).invokeMethod("keyboardHeight", keyboardHeight)
+                        methodChannel.invokeMethod("keyboardHeight", keyboardHeight)
                         previousKeyboardHeight = keyboardHeight
                     }
                 }

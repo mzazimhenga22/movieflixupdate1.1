@@ -4,10 +4,41 @@ import 'package:just_audio/just_audio.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'dart:ui';
 
+// Simple in-memory cache for user data
+class UserCache {
+  static final Map<String, Map<String, dynamic>> _cache = {};
+
+  static Future<Map<String, dynamic>?> getUser(String userId) async {
+    if (_cache.containsKey(userId)) {
+      return _cache[userId];
+    }
+    try {
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .get()
+          .timeout(const Duration(seconds: 5));
+      if (userDoc.exists) {
+        final userData = userDoc.data()! as Map<String, dynamic>;
+        userData['id'] = userDoc.id;
+        _cache[userId] = userData;
+        return userData;
+      }
+    } catch (e) {
+      debugPrint('Error fetching user $userId: $e');
+    }
+    return null;
+  }
+
+  static void clear() {
+    _cache.clear();
+  }
+}
+
 class MessageBubble extends StatelessWidget {
   final QueryDocumentSnapshot message;
   final Map<String, dynamic> currentUser;
-  final Map<String, dynamic> otherUser;
+  final Map<String, dynamic> otherUser; // Used only for 1:1 chats
   final bool isGroup;
   final bool showSenderName;
   final GlobalKey? bubbleKey;
@@ -46,6 +77,7 @@ class MessageBubble extends StatelessWidget {
       buildContent: _buildContent,
       accentColor: accentColor,
       reactions: reactions,
+      senderId: message['senderId'] as String,
     );
   }
 
@@ -98,6 +130,7 @@ class _MessageContent extends StatelessWidget {
   final Widget Function() buildContent;
   final Color accentColor;
   final List<dynamic> reactions;
+  final String senderId;
 
   const _MessageContent({
     super.key,
@@ -109,6 +142,7 @@ class _MessageContent extends StatelessWidget {
     required this.buildContent,
     required this.accentColor,
     required this.reactions,
+    required this.senderId,
   });
 
   @override
@@ -120,20 +154,28 @@ class _MessageContent extends StatelessWidget {
       child: Row(
         mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
         children: [
+          // Avatar for non-me messages
           if (!isMe) ...[
-            CircleAvatar(
-              radius: 16,
-              backgroundImage: otherUser['avatarUrl'] != null
-                  ? NetworkImage(otherUser['avatarUrl'])
-                  : null,
-              child: otherUser['avatarUrl'] == null
-                  ? Text(
-                      otherUser['name']?.isNotEmpty == true
-                          ? otherUser['name'][0].toUpperCase()
-                          : 'U',
-                      style: const TextStyle(color: Colors.white),
-                    )
-                  : null,
+            FutureBuilder<Map<String, dynamic>?>(
+              future: isGroup ? UserCache.getUser(senderId) : Future.value(otherUser),
+              builder: (context, snapshot) {
+                String initial = 'U';
+                ImageProvider? avatar;
+                if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
+                  final user = snapshot.data!;
+                  avatar = user['avatarUrl'] != null ? NetworkImage(user['avatarUrl']) : null;
+                  initial = (user['username'] as String?)?.isNotEmpty == true
+                      ? user['username'][0].toUpperCase()
+                      : 'U';
+                }
+                return CircleAvatar(
+                  radius: 16,
+                  backgroundImage: avatar,
+                  child: avatar == null
+                      ? Text(initial, style: const TextStyle(color: Colors.white))
+                      : null,
+                );
+              },
             ),
             const SizedBox(width: 8),
           ],
@@ -141,113 +183,13 @@ class _MessageContent extends StatelessWidget {
             child: Column(
               crossAxisAlignment: crossAlign,
               children: [
-                if (isGroup && !isMe)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
-                    child: Text(
-                      otherUser['name'] ?? 'User',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                        color: accentColor,
-                      ),
-                    ),
-                  ),
-                if (data['forwardedFrom'] != null)
-                  FutureBuilder<DocumentSnapshot>(
-                    future: FirebaseFirestore.instance
-                        .collection('users')
-                        .doc(data['forwardedFrom'])
-                        .get(),
-                    builder: (context, snapshot) {
-                      String forwarderName = 'Unknown';
-                      if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
-                        final userData = snapshot.data!.data() as Map<String, dynamic>?;
-                        forwarderName = userData?['username'] ?? 'Unknown';
-                      }
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Text(
-                          'Forwarded from $forwarderName',
-                          style: const TextStyle(
-                            fontStyle: FontStyle.italic,
-                            color: Colors.white70,
-                            fontSize: 12,
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                if (data['replyToText'] != null)
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    margin: const EdgeInsets.only(bottom: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.3),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            border: Border(
-                              left: BorderSide(
-                                color: accentColor,
-                                width: 3,
-                              ),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              FutureBuilder<DocumentSnapshot>(
-                                future: FirebaseFirestore.instance
-                                    .collection('users')
-                                    .doc(data['replyToSenderId'])
-                                    .get(),
-                                builder: (context, snapshot) {
-                                  String senderName = 'Unknown';
-                                  if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
-                                    final userData = snapshot.data!.data() as Map<String, dynamic>?;
-                                    senderName = userData?['username'] ?? 'Unknown';
-                                  } else if (data['replyToSenderId'] == currentUser['id']) {
-                                    senderName = currentUser['username'] ?? 'You';
-                                  } else if (data['replyToSenderId'] == otherUser['id']) {
-                                    senderName = otherUser['username'] ?? 'Unknown';
-                                  }
-                                  return Text(
-                                    senderName,
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      color: accentColor,
-                                    ),
-                                  );
-                                },
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                data['replyToText'],
-                                style: const TextStyle(
-                                  fontStyle: FontStyle.italic,
-                                  color: Colors.white,
-                                  fontSize: 13,
-                                ),
-                                softWrap: true,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                // Message bubble with tail at top
                 CustomPaint(
                   painter: BubbleTailPainter(
                     isMe: isMe,
                     accentColor: accentColor,
                     avatarRadius: 16,
+                    isTopTail: true, // Tail at top
                   ),
                   child: IntrinsicWidth(
                     child: Container(
@@ -265,18 +207,18 @@ class _MessageContent extends StatelessWidget {
                               : [accentColor.withOpacity(0.4), accentColor.withOpacity(0.2)],
                         ),
                         borderRadius: BorderRadius.only(
-                          topLeft: const Radius.circular(16),
-                          topRight: const Radius.circular(16),
-                          bottomLeft: isMe ? const Radius.circular(16) : Radius.zero,
-                          bottomRight: isMe ? Radius.zero : const Radius.circular(16),
+                          topLeft: isMe ? const Radius.circular(16) : Radius.zero,
+                          topRight: isMe ? Radius.zero : const Radius.circular(16),
+                          bottomLeft: const Radius.circular(16),
+                          bottomRight: const Radius.circular(16),
                         ),
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.only(
-                          topLeft: const Radius.circular(16),
-                          topRight: const Radius.circular(16),
-                          bottomLeft: isMe ? const Radius.circular(16) : Radius.zero,
-                          bottomRight: isMe ? Radius.zero : const Radius.circular(16),
+                          topLeft: isMe ? const Radius.circular(16) : Radius.zero,
+                          topRight: isMe ? Radius.zero : const Radius.circular(16),
+                          bottomLeft: const Radius.circular(16),
+                          bottomRight: const Radius.circular(16),
                         ),
                         child: BackdropFilter(
                           filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
@@ -285,17 +227,126 @@ class _MessageContent extends StatelessWidget {
                             decoration: BoxDecoration(
                               border: Border.all(color: accentColor.withOpacity(0.3)),
                               borderRadius: BorderRadius.only(
-                                topLeft: const Radius.circular(16),
-                                topRight: const Radius.circular(16),
-                                bottomLeft: isMe ? const Radius.circular(16) : Radius.zero,
-                                bottomRight: isMe ? Radius.zero : const Radius.circular(16),
+                                topLeft: isMe ? const Radius.circular(16) : Radius.zero,
+                                topRight: isMe ? Radius.zero : const Radius.circular(16),
+                                bottomLeft: const Radius.circular(16),
+                                bottomRight: const Radius.circular(16),
                               ),
                             ),
                             child: Column(
                               crossAxisAlignment: crossAlign,
                               children: [
+                                // Sender name inside bubble for group chats (non-me)
+                                if (isGroup && !isMe)
+                                  FutureBuilder<Map<String, dynamic>?>(
+                                    future: UserCache.getUser(senderId),
+                                    builder: (context, snapshot) {
+                                      String name = 'Loading...';
+                                      if (snapshot.connectionState == ConnectionState.done &&
+                                          snapshot.hasData) {
+                                        name = snapshot.data!['username'] ?? 'Unknown';
+                                      }
+                                      return Padding(
+                                        padding: const EdgeInsets.only(bottom: 8),
+                                        child: Text(
+                                          name,
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.bold,
+                                            color: accentColor,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                // Forwarded message
+                                if (data['forwardedFrom'] != null)
+                                  FutureBuilder<Map<String, dynamic>?>(
+                                    future: UserCache.getUser(data['forwardedFrom'] as String),
+                                    builder: (context, snapshot) {
+                                      String forwarderName = 'Unknown';
+                                      if (snapshot.connectionState == ConnectionState.done &&
+                                          snapshot.hasData) {
+                                        forwarderName = snapshot.data!['username'] ?? 'Unknown';
+                                      }
+                                      return Padding(
+                                        padding: const EdgeInsets.only(bottom: 8),
+                                        child: Text(
+                                          'Forwarded from $forwarderName',
+                                          style: const TextStyle(
+                                            fontStyle: FontStyle.italic,
+                                            color: Colors.white70,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                // Reply-to message
+                                if (data['replyToText'] != null)
+                                  Container(
+                                    padding: const EdgeInsets.all(10),
+                                    margin: const EdgeInsets.only(bottom: 8),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withOpacity(0.3),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(10),
+                                      child: BackdropFilter(
+                                        filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            border: Border(
+                                              left: BorderSide(
+                                                color: accentColor,
+                                                width: 3,
+                                              ),
+                                            ),
+                                          ),
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              FutureBuilder<Map<String, dynamic>?>(
+                                                future: UserCache.getUser(data['replyToSenderId'] as String),
+                                                builder: (context, snapshot) {
+                                                  String senderName = 'Unknown';
+                                                  if (snapshot.connectionState == ConnectionState.done &&
+                                                      snapshot.hasData) {
+                                                    senderName = snapshot.data!['username'] ?? 'Unknown';
+                                                  } else if (data['replyToSenderId'] == currentUser['id']) {
+                                                    senderName = currentUser['username'] ?? 'You';
+                                                  }
+                                                  return Text(
+                                                    senderName,
+                                                    style: TextStyle(
+                                                      fontWeight: FontWeight.bold,
+                                                      color: accentColor,
+                                                    ),
+                                                  );
+                                                },
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                data['replyToText'],
+                                                style: const TextStyle(
+                                                  fontStyle: FontStyle.italic,
+                                                  color: Colors.white,
+                                                  fontSize: 13,
+                                                ),
+                                                softWrap: true,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                // Message content
                                 buildContent(),
                                 const SizedBox(height: 6),
+                                // Reactions and timestamp
                                 Wrap(
                                   spacing: 4,
                                   runSpacing: 4,
@@ -340,6 +391,7 @@ class _MessageContent extends StatelessWidget {
               ],
             ),
           ),
+          // Avatar for me
           if (isMe) ...[
             const SizedBox(width: 8),
             CircleAvatar(
@@ -349,8 +401,8 @@ class _MessageContent extends StatelessWidget {
                   : null,
               child: currentUser['avatarUrl'] == null
                   ? Text(
-                      currentUser['name']?.isNotEmpty == true
-                          ? currentUser['name'][0].toUpperCase()
+                      currentUser['username']?.isNotEmpty == true
+                          ? currentUser['username'][0].toUpperCase()
                           : 'U',
                       style: const TextStyle(color: Colors.white),
                     )
@@ -367,11 +419,13 @@ class BubbleTailPainter extends CustomPainter {
   final bool isMe;
   final Color accentColor;
   final double avatarRadius;
+  final bool isTopTail;
 
   BubbleTailPainter({
     required this.isMe,
     required this.accentColor,
     required this.avatarRadius,
+    this.isTopTail = false,
   });
 
   @override
@@ -388,35 +442,69 @@ class BubbleTailPainter extends CustomPainter {
     final path = Path();
 
     if (isMe) {
-      path.moveTo(size.width, size.height - 4);
-      path.quadraticBezierTo(
-        size.width + 8,
-        size.height - 8,
-        size.width + avatarRadius * 1.5,
-        size.height - avatarRadius * 0.5,
-      );
-      path.lineTo(size.width + avatarRadius * 0.5, size.height - avatarRadius * 0.5);
-      path.quadraticBezierTo(
-        size.width + 4,
-        size.height - 4,
-        size.width,
-        size.height - 4,
-      );
+      if (isTopTail) {
+        path.moveTo(size.width, 4);
+        path.quadraticBezierTo(
+          size.width + 8,
+          8,
+          size.width + avatarRadius * 1.5,
+          avatarRadius * 0.5,
+        );
+        path.lineTo(size.width + avatarRadius * 0.5, avatarRadius * 0.5);
+        path.quadraticBezierTo(
+          size.width + 4,
+          4,
+          size.width,
+          4,
+        );
+      } else {
+        path.moveTo(size.width, size.height - 4);
+        path.quadraticBezierTo(
+          size.width + 8,
+          size.height - 8,
+          size.width + avatarRadius * 1.5,
+          size.height - avatarRadius * 0.5,
+        );
+        path.lineTo(size.width + avatarRadius * 0.5, size.height - avatarRadius * 0.5);
+        path.quadraticBezierTo(
+          size.width + 4,
+          size.height - 4,
+          size.width,
+          size.height - 4,
+        );
+      }
     } else {
-      path.moveTo(0, size.height - 4);
-      path.quadraticBezierTo(
-        -8,
-        size.height - 8,
-        -avatarRadius * 1.5,
-        size.height - avatarRadius * 0.5,
-      );
-      path.lineTo(-avatarRadius * 0.5, size.height - avatarRadius * 0.5);
-      path.quadraticBezierTo(
-        -4,
-        size.height - 4,
-        0,
-        size.height - 4,
-      );
+      if (isTopTail) {
+        path.moveTo(0, 4);
+        path.quadraticBezierTo(
+          -8,
+          8,
+          -avatarRadius * 1.5,
+          avatarRadius * 0.5,
+        );
+        path.lineTo(-avatarRadius * 0.5, avatarRadius * 0.5);
+        path.quadraticBezierTo(
+          -4,
+          4,
+          0,
+          4,
+        );
+      } else {
+        path.moveTo(0, size.height - 4);
+        path.quadraticBezierTo(
+          -8,
+          size.height - 8,
+          -avatarRadius * 1.5,
+          size.height - avatarRadius * 0.5,
+        );
+        path.lineTo(-avatarRadius * 0.5, size.height - avatarRadius * 0.5);
+        path.quadraticBezierTo(
+          -4,
+          size.height - 4,
+          0,
+          size.height - 4,
+        );
+      }
     }
 
     path.close();

@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'Group_chat_screen.dart';
 import 'chat_screen.dart';
-// ... imports remain the same
 
 class ForwardMessageScreen extends StatefulWidget {
   const ForwardMessageScreen({super.key});
@@ -15,6 +14,7 @@ class ForwardMessageScreen extends StatefulWidget {
 class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
   late Map<String, dynamic> currentUser;
   late QueryDocumentSnapshot message;
+  late bool isForwarded;
 
   @override
   void didChangeDependencies() {
@@ -23,6 +23,7 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
     if (args != null) {
       message = args['message'];
       currentUser = args['currentUser'];
+      isForwarded = args['isForwarded'] ?? false;
     }
   }
 
@@ -49,13 +50,12 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
     return {'users': users, 'groups': groups};
   }
 
-
   void _forwardMessageToGroup(Map<String, dynamic> group) async {
     try {
       final newMessage = {
         'text': message['text'],
         'senderId': currentUser['id'],
-        'senderName': currentUser['username'],
+        'senderName': currentUser['username'] ?? 'You',
         'timestamp': FieldValue.serverTimestamp(),
         'type': message['type'] ?? 'text',
         'forwardedFrom': message['senderId'],
@@ -68,15 +68,66 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
           .collection('messages')
           .add(newMessage);
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text('Message forwarded to group "${group['name']}"')),
+      if (!mounted) return;
+
+      forwardMessageToChat(
+        context,
+        newMessage,
+        true,
+        group['id'],
+        group['name'] ?? 'Unnamed Group',
       );
-      Navigator.pop(context);
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to forward message: $e')),
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to forward message: $e')),
+        );
+      }
+    }
+  }
+
+  void _forwardMessageToUser(Map<String, dynamic> user) async {
+    try {
+      final newMessage = {
+        'text': message['text'],
+        'senderId': currentUser['id'],
+        'senderName': currentUser['username'] ?? 'You',
+        'receiverId': user['id'],
+        'timestamp': FieldValue.serverTimestamp(),
+        'type': message['type'] ?? 'text',
+        'forwardedFrom': message['senderId'],
+      };
+
+      final chatId = _generateChatId(currentUser['id'], user['id']);
+
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(chatId)
+          .collection('messages')
+          .add(newMessage);
+
+      await FirebaseFirestore.instance.collection('chats').doc(chatId).set({
+        'lastMessage': message['text'],
+        'timestamp': FieldValue.serverTimestamp(),
+        'userIds': [currentUser['id'], user['id']],
+      }, SetOptions(merge: true));
+
+      if (!mounted) return;
+
+      forwardMessageToChat(
+        context,
+        newMessage,
+        false,
+        chatId,
+        user['username'] ?? 'User',
+        otherUser: Map<String, dynamic>.from(user),
       );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to forward message: $e')),
+        );
+      }
     }
   }
 
@@ -91,87 +142,49 @@ class _ForwardMessageScreenState extends State<ForwardMessageScreen> {
     return const Color.fromARGB(255, 255, 68, 77);
   }
 
-/// Helper that knows how to open either a 1-on-1 ChatScreen or a GroupChatScreen
-void forwardMessageToChat(
-  BuildContext context,
-  Map<String, dynamic> message,        // the Firestore payload you just sent
-  bool isGroup,                        // false → ChatScreen, true → GroupChatScreen
-  String chatId,                       // document ID of the chat or group
-  String chatName,                     // username (for 1-1) or group name
-  { Map<String, dynamic>? otherUser } // pass the user Map when 1-on-1
-) {
-  // 1) confirmation toast
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(content: Text("Forwarded to $chatName")),
-  );
+  void forwardMessageToChat(
+    BuildContext context,
+    Map<String, dynamic> message,
+    bool isGroup,
+    String chatId,
+    String chatName, {
+    Map<String, dynamic>? otherUser,
+  }) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text("Forwarded to $chatName")),
+    );
 
-  // 2) after a short delay, navigate
-  Future.delayed(const Duration(milliseconds: 800), () {
-    if (isGroup) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => GroupChatScreen(
-            chatId:            chatId,
-            currentUser:       currentUser,
-            authenticatedUser: currentUser,     // or your real auth user
-            forwardedMessage:  message,
-            // accentColor uses default if you omit
+    Future.delayed(const Duration(milliseconds: 800), () {
+      if (!mounted) return;
+      if (isGroup) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => GroupChatScreen(
+              chatId: chatId,
+              currentUser: currentUser,
+              authenticatedUser: currentUser,
+              forwardedMessage: message,
+            ),
           ),
-        ),
-      );
-    } else {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => ChatScreen(
-            chatId:             chatId,
-            currentUser:        currentUser,
-            otherUser:          otherUser!,      // must supply here
-            authenticatedUser:  currentUser,     // or your auth user
-            storyInteractions:  [],              // pass your real list here
-            forwardedMessage:   message,
-            // accentColor uses default if you omit
+        );
+      } else {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ChatScreen(
+              chatId: chatId,
+              currentUser: currentUser,
+              otherUser: otherUser!,
+              authenticatedUser: currentUser,
+              storyInteractions: [],
+              forwardedMessage: message,
+            ),
           ),
-        ),
-      );
-    }
-  });
-}
-
-
-
-void _forwardMessageToUser(Map<String, dynamic> user) async {
-final newMessage = {
-  'senderId': currentUser['id'],
-  'text': message['text'],
-  'timestamp': Timestamp.now(),
-  'type': message['type'],
-  'forwardedFrom': message['senderId'],  // optional: show it's forwarded
-};
-
-
-  final chatId = _generateChatId(currentUser['id'], user['id']);
-
-  await FirebaseFirestore.instance
-      .collection('chats')
-      .doc(chatId)
-      .collection('messages')
-      .add(newMessage);
-
-  if (!mounted) return;
-
-  forwardMessageToChat(
-    context,
-    newMessage,
-    false, // isGroup
-    chatId,
-    user['username'] ?? 'User',
-    otherUser: Map<String, dynamic>.from(user), // ✅ cast properly
-  );
-}
-
-
+        );
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -206,15 +219,35 @@ final newMessage = {
                 backgroundColor: Colors.transparent,
                 elevation: 0,
                 pinned: true,
-                expandedHeight: 120,
-                flexibleSpace: const FlexibleSpaceBar(
+                expandedHeight: 180, // Increased to accommodate message preview
+                flexibleSpace: FlexibleSpaceBar(
                   centerTitle: true,
-                  title: Text(
-                    'Forward Message',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
+                  title: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        'Forward Message',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.5),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: accentColor.withOpacity(0.3)),
+                        ),
+                        child: Text(
+                          message['text'] ?? '[Media]',
+                          style: const TextStyle(color: Colors.white, fontSize: 12),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -229,19 +262,15 @@ final newMessage = {
                         decoration: BoxDecoration(
                           color: Colors.black.withOpacity(0.25),
                           borderRadius: BorderRadius.circular(16),
-                          border:
-                              Border.all(color: Colors.white.withOpacity(0.1)),
+                          border: Border.all(color: Colors.white.withOpacity(0.1)),
                         ),
-                        child: FutureBuilder<
-                            Map<String, List<Map<String, dynamic>>>>(
+                        child: FutureBuilder<Map<String, List<Map<String, dynamic>>>>(
                           future: _fetchUsersAndGroups(),
                           builder: (context, snapshot) {
-                            if (snapshot.connectionState ==
-                                ConnectionState.waiting) {
+                            if (snapshot.connectionState == ConnectionState.waiting) {
                               return const Padding(
                                 padding: EdgeInsets.all(24.0),
-                                child:
-                                    Center(child: CircularProgressIndicator()),
+                                child: Center(child: CircularProgressIndicator()),
                               );
                             }
 

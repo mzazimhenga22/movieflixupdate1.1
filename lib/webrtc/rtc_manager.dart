@@ -8,7 +8,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:livekit_client/livekit_client.dart' as lk;
 
-// Extension for null-safe firstOrNull
 extension IterableExt<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }
@@ -19,7 +18,7 @@ class RtcManager {
   static final Map<String, Map<String, lk.RemoteParticipant>> _remoteParticipants = {};
   static final Map<String, Timer> _callTimers = {};
   static const String _sfuUrl = 'wss://movieflix-cyn3yzmd.livekit.cloud';
-  static const String _devToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjM0MjYwNzAsImlzcyI6IkFQSTZhVHFkYmFZOWd1ViIsIm5iZiI6MTc1NDQyNjA3MCwic3ViIjoibWF4IiwidmlkZW8iOnsiY2FuUHVibGlzaCI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwicm9vbSI6Imdyb3VwY2FsbCxjaGF0Y2FsbCIsInJvb21Kb2luIjp0cnVlfX0.KAFwOwgRpSMPoZ4xCAN7wSwGBHTq-GBjm_sdMyBMJxU'; // TODO: Replace with dynamic token generation per call
+  static const String _devToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjM0MjYwNzAsImlzcyI6IkFQSTZhVHFkYmFZOWd1ViIsIm5iZiI6MTc1NDQyNjA3MCwic3ViIjoibWF4IiwidmlkZW8iOnsiY2FuUHVibGlzaCI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwicm9vbSI6Imdyb3VwY2FsbCxjaGF0Y2FsbCIsInJvb21Kb2luIjp0cnVlfX0.KAFwOwgRpSMPoZ4xCAN7wSwGBHTq-GBjm_sdMyBMJxU';
   static const String _pushySecretKey = 'cbfb2627ea2ff4c7aae398ab3d8ebb350b7afc57fc2aa7323d1d9200ba585644';
 
   static Future<bool> _requestPermissions({required bool video}) async {
@@ -31,10 +30,9 @@ class RtcManager {
     return statuses.values.every((status) => status.isGranted);
   }
 
-  static Future<void> _sendPushNotification(String callId, Map<String, dynamic> receiver) async {
+  static Future<void> _sendPushNotification(String callId, Map<String, dynamic> receiver, String callType, String callerName) async {
     const pushyUrl = 'https://api.pushy.me/push';
     final token = receiver['token'];
-    final username = receiver['username'];
 
     final response = await http.post(
       Uri.parse(pushyUrl),
@@ -45,19 +43,33 @@ class RtcManager {
       body: jsonEncode({
         'to': token,
         'data': {
-          'title': 'Incoming Call',
-          'message': 'You have an incoming call from $username',
           'callId': callId,
+          'callType': callType,
+          'callerName': callerName,
+          'action': 'incoming_call',
         },
         'notification': {
-          'title': 'Incoming Call',
-          'body': 'You have an incoming call from $username',
+          'title': 'Incoming $callType Call',
+          'body': 'Call from $callerName',
+          'sound': 'ringtone.caf',
+          'priority': 'high',
+          'content_available': true,
+          'mutable_content': true,
+        },
+        'ios': {
+          'badge': 1,
+          'sound': 'ringtone.caf',
+          'category': 'call',
+        },
+        'android': {
+          'priority': 'high',
+          'sound': 'raw/ringtone',
         },
       }),
     );
 
     if (response.statusCode != 200) {
-      debugPrint('Failed to send Pushy notification to $username: ${response.body}');
+      debugPrint('Failed to send Pushy notification to ${receiver['username']}: ${response.body}');
     }
   }
 
@@ -104,7 +116,7 @@ class RtcManager {
       throw Exception("Failed to initiate call");
     }
 
-    _sendPushNotification(callId, receiver);
+    _sendPushNotification(callId, receiver, 'Voice', caller['username'] ?? 'Unknown');
 
     _callTimers[callId] = Timer(const Duration(seconds: 30), () async {
       if (_liveKitRooms.containsKey(callId)) {
@@ -176,7 +188,7 @@ class RtcManager {
       throw Exception("Failed to initiate call");
     }
 
-    _sendPushNotification(callId, receiver);
+    _sendPushNotification(callId, receiver, 'Video', caller['username'] ?? 'Unknown');
 
     _callTimers[callId] = Timer(const Duration(seconds: 30), () async {
       if (_liveKitRooms.containsKey(callId)) {
@@ -321,8 +333,6 @@ class RtcManager {
   }
 
   static Future<void> _adjustQuality(String callId, {required bool lower}) async {
-    // LiveKit doesn't support dynamic encoding updates post-publish.
-    // To change quality, unpublish + republish the track.
     final room = _liveKitRooms[callId];
     if (room == null) return;
 

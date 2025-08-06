@@ -434,20 +434,22 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                   itemCount: userIds.length,
                   itemBuilder: (context, index) {
                     final userId = userIds[index];
-                    return FutureBuilder<DocumentSnapshot>(
-                      future: FirebaseFirestore.instance
+
+                    // Listen to the user's document for real-time presence changes
+                    return StreamBuilder<DocumentSnapshot>(
+                      stream: FirebaseFirestore.instance
                           .collection('users')
                           .doc(userId)
-                          .get(),
+                          .snapshots(),
                       builder: (context, userSnapshot) {
                         if (!userSnapshot.hasData || !userSnapshot.data!.exists) {
                           return const ListTile(title: Text('Unknown user'));
                         }
 
-                        final userData =
-                            userSnapshot.data!.data() as Map<String, dynamic>;
+                        final userData = userSnapshot.data!.data()! as Map<String, dynamic>;
                         final username = userData['username'] ?? 'User';
-                        final photoUrl = userData['avatarUrl'];
+                        final photoUrl = userData['avatarUrl'] as String?;
+                        final bool isOnline = userData['isOnline'] as bool? ?? false;
 
                         return Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -459,15 +461,34 @@ class _GroupProfileScreenState extends State<GroupProfileScreen> {
                             child: ListTile(
                               leading: CircleAvatar(
                                 backgroundColor: Colors.grey[200],
-                                backgroundImage: photoUrl != null ? NetworkImage(photoUrl) : null,
+                                backgroundImage:
+                                    photoUrl != null ? NetworkImage(photoUrl) : null,
                                 child: photoUrl == null
                                     ? Text(
-                                        username.isNotEmpty ? username[0].toUpperCase() : 'U',
+                                        username.substring(0, 1).toUpperCase(),
                                         style: const TextStyle(color: Colors.grey),
                                       )
                                     : null,
                               ),
+
+                              // Member name
                               title: Text(username),
+
+                              // Online/offline subtitle
+                              subtitle: Text(
+                                isOnline ? 'Online' : 'Offline',
+                                style: TextStyle(
+                                  color: isOnline ? Colors.green : Colors.grey,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+
+                              // A little dot indicator on the right
+                              trailing: Icon(
+                                Icons.circle,
+                                size: 12,
+                                color: isOnline ? Colors.green : Colors.grey,
+                              ),
                             ),
                           ),
                         );

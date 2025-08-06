@@ -1,17 +1,20 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/widgets.dart';
 
-class PresenceService with WidgetsBindingObserver {
+class PresenceService extends ChangeNotifier with WidgetsBindingObserver {
   final String userId;
+  final List<String>? groupIds;
 
-  PresenceService(this.userId) {
+  PresenceService(this.userId, {this.groupIds}) {
     WidgetsBinding.instance.addObserver(this);
     _setOnline();
   }
 
+  @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _setOffline();
+    super.dispose(); // ✅ Now valid because ChangeNotifier has dispose()
   }
 
   @override
@@ -24,43 +27,38 @@ class PresenceService with WidgetsBindingObserver {
   }
 
   Future<void> _setOnline() async {
-    final docRef = FirebaseFirestore.instance
-        .collection('groups')
-        .doc(userId.split('_').first) // extract groupId if using composite
-        .collection('presence')
-        .doc(userId);
-
-    await docRef.set({
-      'isOnline': true,
-      'lastSeen': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
-
-    // Also update users collection for 1:1 presence
     await FirebaseFirestore.instance
         .collection('users')
         .doc(userId)
-        .set({'isOnline': true}, SetOptions(merge: true));
+        .set({'isOnline': true, 'lastSeen': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+
+    if (groupIds != null) {
+      for (String groupId in groupIds!) {
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(groupId)
+            .collection('presence')
+            .doc(userId)
+            .set({'isOnline': true, 'lastSeen': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+      }
+    }
   }
 
   Future<void> _setOffline() async {
-    final docRef = FirebaseFirestore.instance
-        .collection('groups')
-        .doc(userId.split('_').first)
-        .collection('presence')
-        .doc(userId);
-
-    await docRef.set({
-      'isOnline': false,
-      'lastSeen': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
-
     await FirebaseFirestore.instance
         .collection('users')
         .doc(userId)
-        .set({
-      'isOnline': false,
-      'lastSeen': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+        .set({'isOnline': false, 'lastSeen': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+
+    if (groupIds != null) {
+      for (String groupId in groupIds!) {
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(groupId)
+            .collection('presence')
+            .doc(userId)
+            .set({'isOnline': false, 'lastSeen': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+      }
+    }
   }
 }
-

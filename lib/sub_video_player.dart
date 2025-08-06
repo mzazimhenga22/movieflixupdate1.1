@@ -66,35 +66,28 @@ class SubVideoPlayerState extends State<SubVideoPlayer> with WidgetsBindingObser
     }
   }
 
-  Future<void> _setupController() async {
-    try {
-      if (!widget.controller.value.isInitialized) {
-        await widget.controller.initialize();
-      }
-
-      if (widget.enableSkipIntro && widget.chapters != null) {
-        _prepareSkip();
-        widget.controller.addListener(_checkSkipIntro);
-      }
-
-      widget.controller.addListener(_savePosition);
-
-      setState(() => _isInitialized = true);
-      if (_resumePosition != null) {
-        await widget.controller.seekTo(_resumePosition!);
-      }
-      await widget.controller.play();
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isInitialized = false;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to initialize video: $e')),
-        );
-      }
+Future<void> _setupController() async {
+  try {
+    // Remove redundant initialization
+    if (widget.enableSkipIntro && widget.chapters != null) {
+      _prepareSkip();
+      widget.controller.addListener(_checkSkipIntro);
+    }
+    widget.controller.addListener(_savePosition);
+    setState(() => _isInitialized = true);
+    if (_resumePosition != null) {
+      await widget.controller.seekTo(_resumePosition!);
+    }
+    await widget.controller.play();
+  } catch (e) {
+    if (mounted) {
+      setState(() => _isInitialized = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to initialize video: $e')),
+      );
     }
   }
+}
 
   void _prepareSkip() {
     final intro = widget.chapters!.firstWhere(
@@ -452,11 +445,16 @@ return GestureDetector(
   onTap: _toggleControls,
   child: Stack(
     children: [
-      // ★ fill with black behind the texture
-      Container(color: Colors.black),
-      AspectRatio(
-        aspectRatio: widget.controller.value.aspectRatio,
-        child: VideoPlayer(widget.controller),
+      Container(color: Colors.black), // Keep the black background
+      SizedBox.expand(
+        child: FittedBox(
+          fit: BoxFit.contain,
+          child: SizedBox(
+            width: widget.controller.value.size.width,
+            height: widget.controller.value.size.height,
+            child: VideoPlayer(widget.controller),
+          ),
+        ),
       ),
       _buildControls(),
     ],

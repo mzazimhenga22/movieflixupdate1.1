@@ -1,9 +1,9 @@
-
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:movie_app/webrtc/rtc_manager.dart';
 import '../VoiceCallScreen_1to1.dart';
 import '../VideoCallScreen_1to1.dart';
+import '../presence_wrapper.dart';
 
 class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
   final Map<String, dynamic> currentUser;
@@ -106,121 +106,125 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) {
     final otherUserId = otherUser['id'] as String;
-    return StreamBuilder<DocumentSnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('users')
-          .doc(otherUserId)
-          .snapshots(),
-      builder: (context, snapshot) {
-        final data = snapshot.data?.data() as Map<String, dynamic>? ?? {};
-        final online = data['isOnline'] == true;
-        final lastSeenTs = data['lastSeen'] as Timestamp?;
-        final lastSeenText = lastSeenTs != null
-            ? 'Last seen ${TimeOfDay.fromDateTime(lastSeenTs.toDate()).format(context)}'
-            : 'Offline';
+    return PresenceWrapper(
+      userId: currentUser['id'],
+      groupIds: [chatId],
+      child: StreamBuilder<DocumentSnapshot>(
+        stream: FirebaseFirestore.instance
+            .collection('users')
+            .doc(otherUserId)
+            .snapshots(),
+        builder: (context, snapshot) {
+          final data = snapshot.data?.data() as Map<String, dynamic>? ?? {};
+          final online = data['isOnline'] == true;
+          final lastSeenTs = data['lastSeen'] as Timestamp?;
+          final lastSeenText = lastSeenTs != null
+              ? 'Last seen ${TimeOfDay.fromDateTime(lastSeenTs.toDate()).format(context)}'
+              : 'Offline';
 
-        return AppBar(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          flexibleSpace: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  accentColor.withOpacity(0.3),
-                  Colors.black.withOpacity(0.5),
-                ],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: accentColor.withOpacity(0.2),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
+          return AppBar(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            flexibleSpace: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    accentColor.withOpacity(0.3),
+                    Colors.black.withOpacity(0.5),
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-              ],
-              border: Border(
-                bottom: BorderSide(
-                  color: accentColor.withOpacity(0.1),
-                  width: 1,
+                boxShadow: [
+                  BoxShadow(
+                    color: accentColor.withOpacity(0.2),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+                border: Border(
+                  bottom: BorderSide(
+                    color: accentColor.withOpacity(0.1),
+                    width: 1,
+                  ),
                 ),
               ),
             ),
-          ),
-          leading: IconButton(
-            icon: Icon(Icons.arrow_back, color: accentColor),
-            onPressed: onBack,
-          ),
-          title: InkWell(
-            onTap: onProfileTap,
-            child: Row(
-              children: [
-                Stack(
-                  children: [
-                    CircleAvatar(
-                      radius: 20,
-                      backgroundImage: NetworkImage(
-                        otherUser['photoUrl'] ?? 'https://via.placeholder.com/150',
-                      ),
-                    ),
-                    if (hasStory)
-                      Positioned(
-                        right: 0,
-                        bottom: 0,
-                        child: Container(
-                          width: 12,
-                          height: 12,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white, width: 2),
-                            color: accentColor,
-                          ),
+            leading: IconButton(
+              icon: Icon(Icons.arrow_back, color: accentColor),
+              onPressed: onBack,
+            ),
+            title: InkWell(
+              onTap: onProfileTap,
+              child: Row(
+                children: [
+                  Stack(
+                    children: [
+                      CircleAvatar(
+                        radius: 20,
+                        backgroundImage: NetworkImage(
+                          otherUser['photoUrl'] ?? 'https://via.placeholder.com/150',
                         ),
                       ),
-                  ],
-                ),
-                const SizedBox(width: 12),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      otherUser['username'] ?? 'User',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                        color: accentColor,
+                      if (hasStory)
+                        Positioned(
+                          right: 0,
+                          bottom: 0,
+                          child: Container(
+                            width: 12,
+                            height: 12,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 2),
+                              color: accentColor,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(width: 12),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        otherUser['username'] ?? 'User',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                          color: accentColor,
+                        ),
                       ),
-                    ),
-                    Text(
-                      online ? 'Online' : lastSeenText,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: online ? Colors.green : Colors.grey,
+                      Text(
+                        online ? 'Online' : lastSeenText,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: online ? Colors.green : Colors.grey,
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-          actions: [
-            IconButton(
-              icon: Icon(Icons.call, color: accentColor),
-              onPressed: () {
-                onVoiceCall();
-                _startCall(context, false);
-              },
-            ),
-            IconButton(
-              icon: Icon(Icons.videocam, color: accentColor),
-              onPressed: () {
-                onVideoCall();
-                _startCall(context, true);
-              },
-            ),
-          ],
-        );
-      },
+            actions: [
+              IconButton(
+                icon: Icon(Icons.call, color: accentColor),
+                onPressed: () {
+                  onVoiceCall();
+                  _startCall(context, false);
+                },
+              ),
+              IconButton(
+                icon: Icon(Icons.videocam, color: accentColor),
+                onPressed: () {
+                  onVideoCall();
+                  _startCall(context, true);
+                },
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 

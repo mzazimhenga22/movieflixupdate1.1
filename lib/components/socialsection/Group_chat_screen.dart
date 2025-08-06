@@ -17,6 +17,8 @@ import 'forward_message_screen.dart';
 import 'VideoCallScreen_Group.dart';
 import 'VoiceCallScreen_Group.dart';
 import 'package:movie_app/utils/native_keyboard_bridge.dart';
+import 'presence_wrapper.dart';
+
 
 class GroupChatScreen extends StatefulWidget {
   final String chatId;
@@ -95,25 +97,42 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
     }
   }
 
-  Future<void> _cacheGroupData(Map<String, dynamic> data, List<Map<String, dynamic>> members) async {
-    final serializableData = Map<String, dynamic>.from(data);
-    if (serializableData['timestamp'] is Timestamp) {
-      serializableData['timestamp'] = (serializableData['timestamp'] as Timestamp).toDate().toIso8601String();
+Future<void> _cacheGroupData(Map<String, dynamic> data, List<Map<String, dynamic>> members) async {
+  final serializableData = _convertTimestamps(Map<String, dynamic>.from(data));
+  final serializableMembers = members.map((member) {
+    return _convertTimestamps(Map<String, dynamic>.from(member));
+  }).toList();
+
+  await prefs.setString(
+    'group_data_${widget.chatId}',
+    jsonEncode({
+      ...serializableData,
+      'members': serializableMembers,
+    }),
+  );
+}
+
+/// Recursively converts all `Timestamp` values in a map to ISO8601 strings.
+Map<String, dynamic> _convertTimestamps(Map<String, dynamic> map) {
+  map.forEach((key, value) {
+    if (value is Timestamp) {
+      map[key] = value.toDate().toIso8601String();
+    } else if (value is Map<String, dynamic>) {
+      map[key] = _convertTimestamps(value);
+    } else if (value is List) {
+      map[key] = value.map((item) {
+        if (item is Timestamp) {
+          return item.toDate().toIso8601String();
+        } else if (item is Map<String, dynamic>) {
+          return _convertTimestamps(Map<String, dynamic>.from(item));
+        }
+        return item;
+      }).toList();
     }
-    await prefs.setString(
-      'group_data_${widget.chatId}',
-      jsonEncode({
-        ...serializableData,
-        'members': members.map((m) {
-          final member = Map<String, dynamic>.from(m);
-          if (member['lastActive'] is Timestamp) {
-            member['lastActive'] = (member['lastActive'] as Timestamp).toDate().toIso8601String();
-          }
-          return member;
-        }).toList(),
-      }),
-    );
-  }
+  });
+  return map;
+}
+
 
   Future<bool> _isUserBlocked(String userId) async {
     final userDoc = await FirebaseFirestore.instance
@@ -348,9 +367,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
       isMe: isMe,
       messageKey: messageKey,
       onReply: () {
-        _onReplyToMessage(message);
-        if (mounted) Navigator.pop(context);
-        isActionOverlayVisible = false;
+        setState(() {
+          replyingTo = message;
+          isActionOverlayVisible = false;
+        });
       },
       onPin: () async {
         await FirebaseFirestore.instance
@@ -377,9 +397,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
               ),
             ),
           );
-          Navigator.pop(context);
+          setState(() => isActionOverlayVisible = false);
         }
-        isActionOverlayVisible = false;
       },
       onDelete: () async {
         final data = message.data() as Map<String, dynamic>;
@@ -405,8 +424,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
               .update({'pinnedMessageId': null});
         }
 
-        if (mounted) Navigator.pop(context);
-        isActionOverlayVisible = false;
+        if (mounted) {
+          Navigator.of(context, rootNavigator: false).pop();
+          setState(() => isActionOverlayVisible = false);
+        }
       },
       onBlock: () async {
         await FirebaseFirestore.instance
@@ -415,40 +436,46 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
             .update({
           'blockedUsers': FieldValue.arrayUnion([message['senderId']])
         });
-        if (mounted) Navigator.pop(context);
-        isActionOverlayVisible = false;
+        if (mounted) {
+          Navigator.of(context, rootNavigator: false).pop();
+          setState(() => isActionOverlayVisible = false);
+        }
       },
       onForward: () async {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => const ForwardMessageScreen(),
+            settings: RouteSettings(arguments: {
+              'message': message,
+              'currentUser': widget.currentUser,
+              'isForwarded': true,
+            }),
+          ),
+        );
         if (mounted) {
-          await Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => const ForwardMessageScreen(),
-              settings: RouteSettings(arguments: {
-                'message': message,
-                'currentUser': widget.currentUser,
-              }),
-            ),
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Message forwarded')),
           );
-          if (mounted) Navigator.pop(context);
+          Navigator.of(context, rootNavigator: false).pop();
+          setState(() => isActionOverlayVisible = false);
         }
-        isActionOverlayVisible = false;
       },
       onEdit: () async {
         if (isMe) {
-          if (mounted) {
-            await Navigator.pushNamed(context, '/editMessage', arguments: {
-              'message': message,
-              'chatId': widget.chatId,
-            });
-          }
+          await Navigator.pushNamed(context, '/editMessage', arguments: {
+            'message': message,
+            'chatId': widget.chatId,
+          });
         } else if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Cannot edit others\' messages')),
           );
         }
-        if (mounted) Navigator.pop(context);
-        isActionOverlayVisible = false;
+        if (mounted) {
+          Navigator.of(context, rootNavigator: false).pop();
+          setState(() => isActionOverlayVisible = false);
+        }
       },
       onReactEmoji: (emoji) async {
         final data = message.data() as Map<String, dynamic>;
@@ -473,8 +500,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
             'reactions': FieldValue.arrayUnion([emoji])
           });
         }
-        if (mounted) Navigator.pop(context);
-        isActionOverlayVisible = false;
+        if (mounted) {
+          Navigator.of(context, rootNavigator: false).pop();
+          setState(() => isActionOverlayVisible = false);
+        }
       },
     );
   }
@@ -528,102 +557,101 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    final bottomInset = _kbBridge.keyboardHeight.value;
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
-    return Scaffold(
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(kToolbarHeight),
-        child: GroupChatAppBar(
-          groupId: widget.chatId,
-          groupName: groupData?['name'] ?? 'Loading...',
-          groupPhotoUrl: groupData?['avatarUrl'] ?? '',
-          onBack: () => Navigator.pop(context),
-          onGroupInfoTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => GroupProfileScreen(
-                groupId: widget.chatId,
-                currentUserId: widget.currentUser['id'],
+    return PresenceWrapper(
+      userId: widget.currentUser['id'],
+      groupIds: [widget.chatId],
+      child: Scaffold(
+        appBar: PreferredSize(
+          preferredSize: const Size.fromHeight(kToolbarHeight),
+          child: GroupChatAppBar(
+            groupId: widget.chatId,
+            groupName: groupData?['name'] ?? 'Loading...',
+            groupPhotoUrl: groupData?['avatarUrl'] ?? '',
+            onBack: () => Navigator.pop(context),
+            onGroupInfoTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => GroupProfileScreen(
+                  groupId: widget.chatId,
+                  currentUserId: widget.currentUser['id'],
+                ),
               ),
             ),
+            onVideoCall: () => startGroupCall(true),
+            onVoiceCall: () => startGroupCall(false),
+            accentColor: widget.accentColor,
           ),
-          onVideoCall: () => startGroupCall(true),
-          onVoiceCall: () => startGroupCall(false),
-          accentColor: widget.accentColor,
         ),
-      ),
-      body: Stack(
-        children: [
-          Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: [Colors.redAccent, Colors.blueAccent],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
+        body: Stack(
+          children: [
+            Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.redAccent, Colors.blueAccent],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
               ),
             ),
-          ),
-          Container(
-            decoration: BoxDecoration(
-              gradient: RadialGradient(
-                center: const Alignment(-0.1, -0.4),
-                radius: 1.2,
-                colors: [widget.accentColor.withValues(alpha: 0.4), Colors.black],
-                stops: const [0.0, 0.6],
+            Container(
+              decoration: BoxDecoration(
+                gradient: RadialGradient(
+                  center: const Alignment(-0.1, -0.4),
+                  radius: 1.2,
+                  colors: [widget.accentColor.withValues(alpha: 0.4), Colors.black],
+                  stops: const [0.0, 0.6],
+                ),
               ),
             ),
-          ),
-          Positioned.fill(
-            top: kToolbarHeight + MediaQuery.of(context).padding.top,
-            child: Container(
-              decoration: backgroundUrl != null
-                  ? BoxDecoration(
-                      image: DecorationImage(
-                        image: NetworkImage(backgroundUrl!, scale: 1.5),
-                        fit: BoxFit.cover,
-                        onError: (exception, stackTrace) => debugPrint('Background image error: $exception'),
+            Positioned.fill(
+              top: kToolbarHeight + MediaQuery.of(context).padding.top,
+              child: Container(
+                decoration: backgroundUrl != null
+                    ? BoxDecoration(
+                        image: DecorationImage(
+                          image: NetworkImage(backgroundUrl!, scale: 1.5),
+                          fit: BoxFit.cover,
+                          onError: (exception, stackTrace) => debugPrint('Background image error: $exception'),
+                        ),
+                      )
+                    : null,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          center: Alignment.center,
+                          radius: 1.6,
+                          colors: [
+                            widget.accentColor.withValues(alpha: 0.2),
+                            Colors.transparent,
+                          ],
+                          stops: const [0.0, 1.0],
+                        ),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: widget.accentColor.withValues(alpha: 0.1),
+                        ),
                       ),
-                    )
-                  : null,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: RadialGradient(
-                        center: Alignment.center,
-                        radius: 1.6,
-                        colors: [
-                          widget.accentColor.withValues(alpha: 0.2),
-                          Colors.transparent,
-                        ],
-                        stops: const [0.0, 1.0],
-                      ),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: widget.accentColor.withValues(alpha: 0.1),
-                      ),
-                    ),
-                    child: Column(
-                      children: [
-                        Expanded(
-                          child: RepaintBoundary(
-                            child: GroupChatList(
-                              groupId: widget.chatId,
-                              currentUser: widget.currentUser,
-                              groupMembers: groupMembers,
-                              onMessageLongPressed: _showMessageActions,
-                              replyingTo: replyingTo,
-                              onCancelReply: _onCancelReply,
+                      child: Column(
+                        children: [
+                          Expanded(
+                            child: RepaintBoundary(
+                              child: GroupChatList(
+                                groupId: widget.chatId,
+                                currentUser: widget.currentUser,
+                                groupMembers: groupMembers,
+                                onMessageLongPressed: _showMessageActions,
+                                replyingTo: replyingTo,
+                                onCancelReply: _onCancelReply,
+                              ),
                             ),
                           ),
-                        ),
-                        AnimatedPadding(
-                          duration: const Duration(milliseconds: 200),
-                          curve: Curves.easeOut,
-                          padding: EdgeInsets.only(bottom: bottomInset),
-                          child: Container(
+                          Container(
                             color: Colors.black.withValues(alpha: 0.5),
                             child: RepaintBoundary(
                               child: TypingArea(
@@ -641,15 +669,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
                               ),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

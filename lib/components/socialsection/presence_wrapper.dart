@@ -4,11 +4,13 @@ import 'presence_service.dart';
 class PresenceWrapper extends StatefulWidget {
   final Widget child;
   final String userId;
+  final List<String>? groupIds; // Pass group IDs
 
   const PresenceWrapper({
     super.key,
     required this.child,
     required this.userId,
+    this.groupIds,
   });
 
   @override
@@ -21,7 +23,7 @@ class _PresenceWrapperState extends State<PresenceWrapper> {
   @override
   void initState() {
     super.initState();
-    _presenceService = PresenceService(widget.userId);
+    _presenceService = PresenceService(widget.userId, groupIds: widget.groupIds);
   }
 
   @override

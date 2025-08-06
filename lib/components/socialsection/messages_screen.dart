@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'messages_controller.dart';
 import 'chat_screen.dart';
 import 'Group_chat_screen.dart';
-import 'widgets/mark_read_unread.dart'; // Import updated MessageStatusUtils
+import 'widgets/mark_read_unread.dart';
 import 'chat_tile.dart';
+import 'dart:convert';
 
 class AnimatedBackground extends StatelessWidget {
   const AnimatedBackground({super.key});
@@ -24,11 +26,46 @@ class AnimatedBackground extends StatelessWidget {
 }
 
 class ChatInfo {
-  final QueryDocumentSnapshot doc;
+  final String docId;
+  final Map<String, dynamic> docData;
+  final DocumentSnapshot<Map<String, dynamic>>? snapshot;
   final int unreadCount;
   final Map<String, dynamic>? otherUser;
+  final Map<String, dynamic>? lastMessageData;
 
-  ChatInfo({required this.doc, required this.unreadCount, this.otherUser});
+  ChatInfo({
+    required this.docId,
+    required this.docData,
+    this.snapshot,
+    required this.unreadCount,
+    this.otherUser,
+    this.lastMessageData,
+  });
+
+  factory ChatInfo.fromCache(Map<String, dynamic> item) {
+    try {
+      return ChatInfo(
+        docId: item['docId'] as String? ?? '',
+        docData: Map<String, dynamic>.from(item['docData'] as Map? ?? {}),
+        unreadCount: (item['unreadCount'] is int) ? item['unreadCount'] as int : 0,
+        otherUser: item['otherUser'] != null
+            ? Map<String, dynamic>.from(item['otherUser'] as Map)
+            : null,
+        lastMessageData: item['lastMessageData'] != null
+            ? Map<String, dynamic>.from(item['lastMessageData'] as Map)
+            : null,
+      );
+    } catch (e) {
+      debugPrint('Error parsing cached ChatInfo: $e');
+      return ChatInfo(
+        docId: '',
+        docData: {},
+        unreadCount: 0,
+        otherUser: null,
+        lastMessageData: null,
+      );
+    }
+  }
 }
 
 class MessagesScreen extends StatefulWidget {
@@ -52,6 +89,9 @@ class MessagesScreenState extends State<MessagesScreen>
   bool isExpanded = true;
   late ValueNotifier<bool> _reloadTrigger;
   late MessagesController controller;
+  final int _pageSize = 20;
+  bool _isLoadingMore = false;
+  Map<String, ChatInfo> _cachedChats = {};
 
   @override
   void initState() {
@@ -62,24 +102,272 @@ class MessagesScreenState extends State<MessagesScreen>
     _scrollController.addListener(() {
       if (mounted) {
         setState(() => isExpanded = _scrollController.offset <= 100);
+        if (_scrollController.position.extentAfter < 200 && !_isLoadingMore) {
+          _loadMoreChats();
+        }
       }
     });
 
+    _loadCachedChats();
     FirebaseFirestore.instance
         .collection('chats')
         .where('userIds', arrayContains: widget.currentUser['id'])
         .snapshots()
-        .listen((_) {
-      _reloadTrigger.value = !_reloadTrigger.value;
-    });
-
+        .listen((_) => _reloadTrigger.value = !_reloadTrigger.value);
     FirebaseFirestore.instance
         .collection('groups')
         .where('userIds', arrayContains: widget.currentUser['id'])
         .snapshots()
-        .listen((_) {
-      _reloadTrigger.value = !_reloadTrigger.value;
-    });
+        .listen((_) => _reloadTrigger.value = !_reloadTrigger.value);
+  }
+
+  /// Converts either a Firestore [Timestamp] or a cached [int] (ms since epoch)
+  /// into a Dart [DateTime].
+  DateTime _parseTimestamp(dynamic ts) {
+    if (ts is Timestamp) {
+      return ts.toDate();
+    } else if (ts is int) {
+      return DateTime.fromMillisecondsSinceEpoch(ts);
+    }
+    return DateTime.fromMillisecondsSinceEpoch(0);
+  }
+
+  Future<void> _loadCachedChats() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cachedJson = prefs.getString('chats_${widget.currentUser['id']}');
+      if (cachedJson == null) return;
+
+      final List<dynamic> list = jsonDecode(cachedJson);
+      setState(() {
+        _cachedChats = {
+          for (var item in list)
+            item['docId'] as String: ChatInfo.fromCache(item),
+        };
+      });
+    } catch (e) {
+      debugPrint('Error loading cached chats: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to load cached chats')),
+        );
+      }
+    }
+  }
+
+  Future<void> _cacheChats(List<ChatInfo> chats) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final List<Map<String, dynamic>> toCache = chats.map((c) {
+        final docData = Map<String, dynamic>.from(c.docData);
+        // Convert Timestamp to milliseconds for JSON serialization
+        if (docData['timestamp'] is Timestamp) {
+          docData['timestamp'] = (docData['timestamp'] as Timestamp).millisecondsSinceEpoch;
+        }
+        final lastMessageData = c.lastMessageData != null
+            ? Map<String, dynamic>.from(c.lastMessageData!)
+            : null;
+        if (lastMessageData != null && lastMessageData['timestamp'] is Timestamp) {
+          lastMessageData['timestamp'] = (lastMessageData['timestamp'] as Timestamp).millisecondsSinceEpoch;
+        }
+        return {
+          'docId': c.docId,
+          'docData': docData,
+          'unreadCount': c.unreadCount,
+          'otherUser': c.otherUser,
+          'lastMessageData': lastMessageData,
+        };
+      }).toList();
+
+      await prefs.setString(
+        'chats_${widget.currentUser['id']}',
+        jsonEncode(toCache),
+      );
+    } catch (e) {
+      debugPrint('Error caching chats: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to cache chats')),
+        );
+      }
+    }
+  }
+
+  Future<List<ChatInfo>> fetchChatsAndGroups(
+    String userId,
+    String tab, {
+    DocumentSnapshot? lastDoc,
+  }) async {
+    try {
+      // Set query timeout (10 seconds)
+      final timeout = const Duration(seconds: 10);
+      Query<Map<String, dynamic>> chatsQuery = FirebaseFirestore.instance
+          .collection('chats')
+          .where('userIds', arrayContains: userId)
+          .orderBy('timestamp', descending: true)
+          .limit(_pageSize);
+
+      Query<Map<String, dynamic>> groupsQuery = FirebaseFirestore.instance
+          .collection('groups')
+          .where('userIds', arrayContains: userId)
+          .orderBy('timestamp', descending: true)
+          .limit(_pageSize);
+
+      if (lastDoc != null) {
+        chatsQuery = chatsQuery.startAfterDocument(lastDoc);
+        groupsQuery = groupsQuery.startAfterDocument(lastDoc);
+      }
+
+      final chatsSnapshot = await chatsQuery.get().timeout(timeout);
+      final groupsSnapshot = await groupsQuery.get().timeout(timeout);
+
+      final combined = [...chatsSnapshot.docs, ...groupsSnapshot.docs].where((doc) {
+        final deletedBy = List<String>.from(doc.data()['deletedBy'] ?? []);
+        return !deletedBy.contains(userId);
+      }).toList();
+
+      if (tab == 'Unread') {
+        final unreadOnly = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+        for (var doc in combined) {
+          final isGroup = doc.data()['isGroup'] ?? false;
+          if (await MessageStatusUtils.isUnread(
+            chatId: doc.id,
+            userId: userId,
+            isGroup: isGroup,
+          )) {
+            unreadOnly.add(doc);
+          }
+        }
+        combined
+          ..clear()
+          ..addAll(unreadOnly);
+      } else if (tab == 'Favorites') {
+        combined.retainWhere((doc) => doc.data()['isFavorite'] == true);
+      }
+
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .get()
+          .timeout(timeout);
+      final pinnedChats = List<String>.from(userDoc.get('pinnedChats') ?? []);
+
+      combined.sort((a, b) {
+        final aTime = _parseTimestamp(a.data()['timestamp']);
+        final bTime = _parseTimestamp(b.data()['timestamp']);
+        final aPinned = pinnedChats.contains(a.id);
+        final bPinned = pinnedChats.contains(b.id);
+        if (aPinned && !bPinned) return -1;
+        if (!aPinned && bPinned) return 1;
+        return bTime.compareTo(aTime);
+      });
+
+      final chatInfoList = <ChatInfo>[];
+      for (final doc in combined) {
+        final data = doc.data();
+        final isGroup = data['isGroup'] ?? false;
+        final chatId = doc.id;
+
+        // Fetch last message
+        Map<String, dynamic>? lastMessageData;
+        final msgsSnap = await FirebaseFirestore.instance
+            .collection(isGroup ? 'groups' : 'chats')
+            .doc(chatId)
+            .collection('messages')
+            .orderBy('timestamp', descending: true)
+            .limit(1)
+            .get()
+            .timeout(timeout);
+        if (msgsSnap.docs.isNotEmpty) {
+          lastMessageData = msgsSnap.docs.first.data();
+        }
+
+        // Compute unread count (check all unread messages)
+        final unreadCount = await FirebaseFirestore.instance
+            .collection(isGroup ? 'groups' : 'chats')
+            .doc(chatId)
+            .collection('messages')
+            .where('readBy', arrayContains: userId, isEqualTo: false)
+            .count()
+            .get()
+            .timeout(timeout)
+            .then((res) => res.count ?? 0);
+
+        // Fetch otherUser for 1-1 chats
+        Map<String, dynamic>? otherUser;
+        if (!isGroup) {
+          final otherId = (data['userIds'] as List<dynamic>?)?.firstWhere(
+            (id) => id != userId,
+            orElse: () => null,
+          );
+          if (otherId != null) {
+            final u = await FirebaseFirestore.instance
+                .collection('users')
+                .doc(otherId)
+                .get()
+                .timeout(timeout);
+            if (u.exists) {
+              otherUser = u.data()!..['id'] = u.id;
+            }
+          }
+        }
+
+        chatInfoList.add(ChatInfo(
+          docId: chatId,
+          docData: data,
+          snapshot: doc,
+          unreadCount: unreadCount,
+          otherUser: otherUser,
+          lastMessageData: lastMessageData,
+        ));
+      }
+
+      _cachedChats.addAll({for (var chat in chatInfoList) chat.docId: chat});
+      await _cacheChats(chatInfoList);
+      return chatInfoList;
+    } catch (e) {
+      debugPrint('Error fetching chats: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to fetch chats')),
+        );
+      }
+      return _cachedChats.values.toList();
+    }
+  }
+
+  Future<void> _loadMoreChats() async {
+    if (_isLoadingMore) return;
+    setState(() => _isLoadingMore = true);
+
+    try {
+      final lastSnapshot = _cachedChats.values.isNotEmpty
+          ? _cachedChats.values.last.snapshot
+          : null;
+
+      final newChats = await fetchChatsAndGroups(
+        widget.currentUser['id'],
+        _tabController.index == 0
+            ? 'All'
+            : _tabController.index == 1
+                ? 'Unread'
+                : 'Favorites',
+        lastDoc: lastSnapshot,
+      );
+
+      setState(() {
+        _cachedChats.addAll({for (var chat in newChats) chat.docId: chat});
+        _isLoadingMore = false;
+      });
+    } catch (e) {
+      debugPrint('Error loading more chats: $e');
+      setState(() => _isLoadingMore = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to load more chats')),
+        );
+      }
+    }
   }
 
   @override
@@ -88,111 +376,6 @@ class MessagesScreenState extends State<MessagesScreen>
     _tabController.dispose();
     _reloadTrigger.dispose();
     super.dispose();
-  }
-
-  Future<List<ChatInfo>> fetchChatsAndGroups(String userId, String tab) async {
-    final chatsSnapshot = await FirebaseFirestore.instance
-        .collection('chats')
-        .where('userIds', arrayContains: userId)
-        .orderBy('timestamp', descending: true)
-        .limit(20)
-        .get();
-
-    final groupsSnapshot = await FirebaseFirestore.instance
-        .collection('groups')
-        .where('userIds', arrayContains: userId)
-        .orderBy('timestamp', descending: true)
-        .limit(20)
-        .get();
-
-    final combined =
-        [...chatsSnapshot.docs, ...groupsSnapshot.docs].where((doc) {
-      final data = doc.data();
-      final deletedBy = List<String>.from(data['deletedBy'] ?? []);
-      return !deletedBy.contains(userId);
-    }).toList();
-
-    if (tab == 'Unread') {
-      final filtered = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-      for (var doc in combined) {
-        final isGroup = doc.data()['isGroup'] ?? false;
-        if (await MessageStatusUtils.isUnread(
-          chatId: doc.id,
-          userId: userId,
-          isGroup: isGroup,
-        )) {
-          filtered.add(doc);
-        }
-      }
-      combined
-        ..clear()
-        ..addAll(filtered);
-    } else if (tab == 'Favorites') {
-      combined.retainWhere((doc) {
-        final data = doc.data();
-        return data['isFavorite'] == true;
-      });
-    }
-
-    final userDoc =
-        await FirebaseFirestore.instance.collection('users').doc(userId).get();
-    final pinnedChats = List<String>.from(userDoc.get('pinnedChats') ?? []);
-
-    combined.sort((a, b) {
-      final aTime =
-          (a.data()['timestamp'] as Timestamp?)?.toDate() ?? DateTime(1970);
-      final bTime =
-          (b.data()['timestamp'] as Timestamp?)?.toDate() ?? DateTime(1970);
-      final aPinned = pinnedChats.contains(a.id);
-      final bPinned = pinnedChats.contains(b.id);
-
-      if (aPinned && !bPinned) return -1;
-      if (!aPinned && bPinned) return 1;
-      return bTime.compareTo(aTime);
-    });
-
-    final chatInfoList = <ChatInfo>[];
-    for (final doc in combined) {
-      final data = doc.data();
-      final isGroup = data['isGroup'] ?? false;
-      final chatId = doc.id;
-
-      final unreadCount = await FirebaseFirestore.instance
-          .collection(isGroup ? 'groups' : 'chats')
-          .doc(chatId)
-          .collection('messages')
-          .where('readBy', arrayContains: userId, isEqualTo: false)
-          .count()
-          .get()
-          .then((res) => res.count);
-
-      Map<String, dynamic>? otherUser;
-      if (!isGroup) {
-        final userIds = List<String>.from(data['userIds'] ?? []);
-        final otherUserId = userIds.firstWhere(
-          (uid) => uid != userId,
-          orElse: () => '',
-        );
-
-        if (otherUserId.isNotEmpty) {
-          final userDoc = await FirebaseFirestore.instance
-              .collection('users')
-              .doc(otherUserId)
-              .get();
-          if (userDoc.exists) {
-            otherUser = userDoc.data()!..['id'] = userDoc.id;
-          }
-        }
-      }
-
-      chatInfoList.add(ChatInfo(
-        doc: doc,
-        unreadCount: unreadCount ?? 0,
-        otherUser: otherUser,
-      ));
-    }
-
-    return chatInfoList;
   }
 
   @override
@@ -404,7 +587,7 @@ class MessagesScreenState extends State<MessagesScreen>
                                 : controller.selectedChatId;
 
                             if (id == null) {
-                              print("No user or chat selected.");
+                              debugPrint("No user or chat selected.");
                               return;
                             }
 
@@ -458,7 +641,7 @@ class MessagesScreenState extends State<MessagesScreen>
                             final chatId = controller.selectedChatId;
 
                             if (chatId == null) {
-                              print("No chat selected");
+                              debugPrint("No chat selected");
                               return;
                             }
 
@@ -491,6 +674,7 @@ class MessagesScreenState extends State<MessagesScreen>
                           icon: Icon(Icons.close, color: widget.accentColor),
                           onPressed: () {
                             controller.clearSelection();
+                            _reloadTrigger.value = !_reloadTrigger.value;
                           },
                           tooltip: 'Cancel',
                         ),
@@ -516,9 +700,12 @@ class MessagesScreenState extends State<MessagesScreen>
                           valueListenable: _reloadTrigger,
                           builder: (context, _, __) =>
                               FutureBuilder<List<ChatInfo>>(
-                            future: fetchChatsAndGroups(currentUserId, tab),
+                            future: fetchChatsAndGroups(currentUserId, tab,
+                                lastDoc: null),
                             builder: (context, snapshot) {
-                              if (!snapshot.hasData) {
+                              if (snapshot.connectionState ==
+                                      ConnectionState.waiting &&
+                                  _cachedChats.isEmpty) {
                                 return ListView.builder(
                                   padding: const EdgeInsets.all(16.0),
                                   itemCount: 5,
@@ -588,7 +775,8 @@ class MessagesScreenState extends State<MessagesScreen>
                                 );
                               }
 
-                              final chats = snapshot.data!;
+                              final chats =
+                                  snapshot.data ?? _cachedChats.values.toList();
                               if (chats.isEmpty) {
                                 return const Center(
                                   child: Text(
@@ -600,20 +788,35 @@ class MessagesScreenState extends State<MessagesScreen>
 
                               return ListView.builder(
                                 padding: const EdgeInsets.all(16.0),
-                                itemCount: chats.length,
+                                itemCount:
+                                    chats.length + (_isLoadingMore ? 1 : 0),
                                 itemBuilder: (context, index) {
+                                  if (index == chats.length && _isLoadingMore) {
+                                    return const Center(
+                                      child: CircularProgressIndicator(),
+                                    );
+                                  }
+
                                   final chatInfo = chats[index];
-                                  final chat = chatInfo.doc;
-                                  final data =
-                                      chat.data()! as Map<String, dynamic>;
+                                  final data = chatInfo.docData;
+                                  final chatId = chatInfo.docId;
                                   final isGroup = data['isGroup'] ?? false;
-                                  final chatId = chat.id;
-                                  final lastMessage =
-                                      data['lastMessage'] ?? 'No messages yet';
-                                  final timestamp =
-                                      (data['timestamp'] as Timestamp?)
-                                          ?.toDate();
-                                  final unreadCount = chatInfo.unreadCount;
+
+                                  final lastMessageData =
+                                      chatInfo.lastMessageData;
+                                  String lastMessage = 'No messages yet';
+                                  if (lastMessageData != null) {
+                                    lastMessage =
+                                        lastMessageData['text'] ?? 'Media';
+                                    if (lastMessageData['forwardedFrom'] !=
+                                        null) {
+                                      lastMessage =
+                                          'Forwarded: ${lastMessageData['text'] ?? 'Media'}';
+                                    }
+                                  }
+                                  final timestamp = _parseTimestamp(
+                                      lastMessageData?['timestamp'] ??
+                                          data['timestamp']);
 
                                   if (isGroup) {
                                     return ChatTile(
@@ -622,7 +825,7 @@ class MessagesScreenState extends State<MessagesScreen>
                                       title: data['name'] ?? 'Group Chat',
                                       lastMessage: lastMessage,
                                       timestamp: timestamp,
-                                      unreadCount: unreadCount,
+                                      unreadCount: chatInfo.unreadCount,
                                       accentColor: widget.accentColor,
                                       isSelected:
                                           chatId == controller.selectedChatId,
@@ -646,6 +849,11 @@ class MessagesScreenState extends State<MessagesScreen>
                                               authenticatedUser:
                                                   widget.currentUser,
                                               accentColor: widget.accentColor,
+                                              forwardedMessage: lastMessageData?[
+                                                          'forwardedFrom'] !=
+                                                      null
+                                                  ? lastMessageData
+                                                  : null,
                                             ),
                                           ),
                                         );
@@ -654,6 +862,8 @@ class MessagesScreenState extends State<MessagesScreen>
                                         controller.selectedChatId = chatId;
                                         controller.selectedOtherUser = null;
                                         controller.isGroup = true;
+                                        _reloadTrigger.value =
+                                            !_reloadTrigger.value;
                                       },
                                       onChatOpened: () {
                                         _reloadTrigger.value =
@@ -663,8 +873,9 @@ class MessagesScreenState extends State<MessagesScreen>
                                   }
 
                                   final otherUser = chatInfo.otherUser;
-                                  if (otherUser == null)
+                                  if (otherUser == null) {
                                     return const SizedBox();
+                                  }
 
                                   return ChatTile(
                                     isGroup: false,
@@ -672,16 +883,16 @@ class MessagesScreenState extends State<MessagesScreen>
                                     title: otherUser['username'] ?? 'Unknown',
                                     lastMessage: lastMessage,
                                     timestamp: timestamp,
-                                    unreadCount: unreadCount,
+                                    unreadCount: chatInfo.unreadCount,
                                     photoUrl: otherUser['photoUrl'] ?? '',
                                     accentColor: widget.accentColor,
                                     isSelected:
                                         chatId == controller.selectedChatId,
                                     isBlocked: controller
-                                        .isUserBlocked(otherUser['id']),
+                                        .isUserBlocked(otherUser['id'] ?? ''),
                                     controller: controller,
                                     onTap: controller
-                                            .isUserBlocked(otherUser['id'])
+                                            .isUserBlocked(otherUser['id'] ?? '')
                                         ? null
                                         : () {
                                             controller.clearSelection();
@@ -706,6 +917,12 @@ class MessagesScreenState extends State<MessagesScreen>
                                                   storyInteractions: const [],
                                                   accentColor:
                                                       widget.accentColor,
+                                                  forwardedMessage:
+                                                      lastMessageData?[
+                                                                  'forwardedFrom'] !=
+                                                              null
+                                                          ? lastMessageData
+                                                          : null,
                                                 ),
                                               ),
                                             );
@@ -714,6 +931,8 @@ class MessagesScreenState extends State<MessagesScreen>
                                       controller.selectedChatId = chatId;
                                       controller.selectedOtherUser = otherUser;
                                       controller.isGroup = false;
+                                      _reloadTrigger.value =
+                                          !_reloadTrigger.value;
                                     },
                                     onChatOpened: () {
                                       _reloadTrigger.value =

@@ -58,23 +58,22 @@ class _AdvancedChatListState extends State<AdvancedChatList> {
     });
   }
 
-  Future<void> _updatePinnedMessage(DocumentSnapshot doc) async {
-    if (doc.exists && doc.data() != null) {
-      final data = doc.data() as Map<String, dynamic>;
-      if (data.containsKey('pinnedMessageId')) {
-        final pinnedId = data['pinnedMessageId'];
-        if (pinnedId != null) {
-          final pinned = await FirebaseFirestore.instance
-              .collection('chats')
-              .doc(widget.chatId)
-              .collection('messages')
-              .doc(pinnedId)
-              .get();
+Future<void> _updatePinnedMessage(DocumentSnapshot doc) async {
+  if (doc.exists && doc.data() != null) {
+    final data = doc.data() as Map<String, dynamic>;
+    if (data.containsKey('pinnedMessageId')) {
+      final pinnedId = data['pinnedMessageId'];
+      if (pinnedId != null) {
+        final pinned = await FirebaseFirestore.instance
+            .collection('chats')
+            .doc(widget.chatId)
+            .collection('messages')
+            .doc(pinnedId)
+            .get();
 
-          if (pinned.exists) {
+        if (pinned.exists) {
+          if (mounted) {
             setState(() => pinnedMessage = pinned);
-          } else {
-            await _clearPinnedMessage();
           }
         } else {
           await _clearPinnedMessage();
@@ -82,16 +81,24 @@ class _AdvancedChatListState extends State<AdvancedChatList> {
       } else {
         await _clearPinnedMessage();
       }
+    } else {
+      await _clearPinnedMessage();
     }
   }
+}
 
-  Future<void> _clearPinnedMessage() async {
-    await FirebaseFirestore.instance
-        .collection('chats')
-        .doc(widget.chatId)
-        .update({'pinnedMessageId': null});
+
+Future<void> _clearPinnedMessage() async {
+  await FirebaseFirestore.instance
+      .collection('chats')
+      .doc(widget.chatId)
+      .update({'pinnedMessageId': null});
+
+  if (mounted) {
     setState(() => pinnedMessage = null);
   }
+}
+
 
   void _markChatAsRead() async {
     await MessageStatusUtils.markAsRead(
