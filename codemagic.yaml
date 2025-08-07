@@ -1,6 +1,6 @@
 workflows:
   flutter-workflow:
-    name: Build Flutter App
+    name: Build Flutter App with Skia
     environment:
       flutter: stable
       xcode: latest
@@ -21,15 +21,20 @@ workflows:
           flutter clean
           rm -rf android/app/build
 
-      # 4) Give Gradle more heap (4.5 GB) to avoid splitter OOM
+      # 4) Ensure Gradle JVM args (4.5GB)
       - name: Ensure Gradle JVM args
         script: |
           grep -qxF 'org.gradle.jvmargs=-Xmx4608m' android/gradle.properties \
             || echo 'org.gradle.jvmargs=-Xmx4608m' >> android/gradle.properties
 
-      # 5) Build the release APK
-      - name: Build APK
-        script: flutter build apk --release
+      # 5) Precompile and warm up Skia Shaders (SKSL)
+      - name: Warm up SKSL cache
+        script: flutter run --release --enable-software-rendering --cache-sksl --no-pub --no-resident
+
+      # 6) Build release APK using Skia software rendering
+      - name: Build APK with Skia
+        script: flutter build apk --release --enable-software-rendering --cache-sksl
 
     artifacts:
       - build/app/outputs/flutter-apk/app-release.apk
+
