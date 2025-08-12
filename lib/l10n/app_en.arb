@@ -1,0 +1,82 @@
+{
+  "@@locale": "en",
+  "settings": "Settings",
+  "@settings": {
+    "description": "Label for the settings screen title"
+  },
+
+  "homeScreenType": "Home Screen Type",
+  "@homeScreenType": {
+    "description": "Label for selecting home screen type in settings"
+  },
+
+  "homeScreenStyle": "Home Screen Style",
+  "@homeScreenStyle": {
+    "description": "Label for selecting home screen style in settings"
+  },
+
+  "downloadQuality": "Download Quality",
+  "@downloadQuality": {
+    "description": "Label for selecting download quality in settings"
+  },
+
+  "wifiOnlyDownloads": "Wi-Fi Only Downloads",
+  "@wifiOnlyDownloads": {
+    "description": "Label for enabling Wi-Fi only downloads in settings"
+  },
+
+  "playbackQuality": "Playback Quality",
+  "@playbackQuality": {
+    "description": "Label for selecting playback quality in settings"
+  },
+
+  "subtitles": "Subtitles",
+  "@subtitles": {
+    "description": "Label for enabling subtitles in settings"
+  },
+
+  "language": "Language",
+  "@language": {
+    "description": "Label for selecting language in settings"
+  },
+
+  "autoPlayTrailers": "Auto-Play Trailers",
+  "@autoPlayTrailers": {
+    "description": "Label for enabling auto-play trailers in settings"
+  },
+
+  "notifications": "Notifications",
+  "@notifications": {
+    "description": "Label for enabling notifications in settings"
+  },
+
+  "parentalControl": "Parental Control",
+  "@parentalControl": {
+    "description": "Label for enabling parental control in settings"
+  },
+
+  "dataSaverMode": "Data Saver Mode",
+  "@dataSaverMode": {
+    "description": "Label for enabling data saver mode in settings"
+  },
+
+  "clearCache": "Clear Cache",
+  "@clearCache": {
+    "description": "Label for clearing cache in settings"
+  },
+
+  "cacheSize": "Cache Size",
+  "@cacheSize": {
+    "description": "Label for displaying cache size in settings"
+  },
+
+  "cacheCleared": "Cache Cleared",
+  "@cacheCleared": {
+    "description": "Message shown when cache is cleared"
+  },
+
+  "backgroundColor": "Background Color",
+  "@backgroundColor": {
+    "description": "Label for selecting background color in settings"
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "@@locale": "fr",
+  "settings": "Paramètres",
+  "@settings": {
+    "description": "Étiquette pour le titre de l’écran des paramètres"
+  },
+  "homeScreenStyle": "Style de l’Écran Principal",
+  "@homeScreenStyle": {
+    "description": "Étiquette pour sélectionner le style de l’écran principal dans les paramètres"
+  },
+
+  "homeScreenType": "Type d'écran d'accueil",
+  "@homeScreenType": {
+    "description": "Étiquette pour sélectionner le type d'écran d'accueil dans les paramètres"
+  },
+
+
+  "downloadQuality": "Qualité de Téléchargement",
+  "@downloadQuality": {
+    "description": "Étiquette pour sélectionner la qualité de téléchargement dans les paramètres"
+  },
+  "wifiOnlyDownloads": "Téléchargements Wi-Fi Uniquement",
+  "@wifiOnlyDownloads": {
+    "description": "Étiquette pour activer les téléchargements uniquement via Wi-Fi dans les paramètres"
+  },
+  "playbackQuality": "Qualité de Lecture",
+  "@playbackQuality": {
+    "description": "Étiquette pour sélectionner la qualité de lecture dans les paramètres"
+  },
+  "subtitles": "Sous-titres",
+  "@subtitles": {
+    "description": "Étiquette pour activer les sous-titres dans les paramètres"
+  },
+  "language": "Langue",
+  "@language": {
+    "description": "Étiquette pour sélectionner la langue dans les paramètres"
+  },
+  "autoPlayTrailers": "Lecture Automatique des Bandes-Annonces",
+  "@autoPlayTrailers": {
+    "description": "Étiquette pour activer la lecture automatique des bandes-annonces dans les paramètres"
+  },
+  "notifications": "Notifications",
+  "@notifications": {
+    "description": "Étiquette pour activer les notifications dans les paramètres"
+  },
+  "parentalControl": "Contrôle Parental",
+  "@parentalControl": {
+    "description": "Étiquette pour activer le contrôle parental dans les paramètres"
+  },
+  "dataSaverMode": "Mode Économie de Données",
+  "@dataSaverMode": {
+    "description": "Étiquette pour activer le mode économie de données dans les paramètres"
+  },
+  "clearCache": "Vider le Cache",
+  "@clearCache": {
+    "description": "Étiquette pour vider le cache dans les paramètres"
+  },
+  "cacheSize": "Taille du Cache",
+  "@cacheSize": {
+    "description": "Étiquette pour afficher la taille du cache dans les paramètres"
+  },
+  "cacheCleared": "Cache Vidé",
+  "@cacheCleared": {
+    "description": "Message affiché lorsque le cache est vidé"
+  },
+  "backgroundColor": "Couleur d’Arrière-Plan",
+  "@backgroundColor": {
+    "description": "Étiquette pour sélectionner la couleur d’arrière-plan dans les paramètres"
+  }
+}

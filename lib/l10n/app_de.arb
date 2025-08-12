@@ -1,0 +1,69 @@
+{
+  "@@locale": "de",
+  "settings": "Einstellungen",
+  "@settings": {
+    "description": "Bezeichnung für den Titel des Einstellungsbildschirms"
+  },
+  "homeScreenStyle": "Stil des Hauptbildschirms",
+  "@homeScreenStyle": {
+    "description": "Bezeichnung für die Auswahl des Hauptbildschirmstils in den Einstellungen"
+  },
+  "homeScreenType": "Startbildschirmtyp",
+  "@homeScreenType": {
+    "description": "Bezeichnung für die Auswahl des Startbildschirmtyps in den Einstellungen"
+  },
+
+
+  "downloadQuality": "Download-Qualität",
+  "@downloadQuality": {
+    "description": "Bezeichnung für die Auswahl der Download-Qualität in den Einstellungen"
+  },
+  "wifiOnlyDownloads": "Nur WLAN-Downloads",
+  "@wifiOnlyDownloads": {
+    "description": "Bezeichnung für die Aktivierung von Downloads nur über WLAN in den Einstellungen"
+  },
+  "playbackQuality": "Wiedergabequalität",
+  "@playbackQuality": {
+    "description": "Bezeichnung für die Auswahl der Wiedergabequalität in den Einstellungen"
+  },
+  "subtitles": "Untertitel",
+  "@subtitles": {
+    "description": "Bezeichnung für die Aktivierung von Untertiteln in den Einstellungen"
+  },
+  "language": "Sprache",
+  "@language": {
+    "description": "Bezeichnung für die Auswahl der Sprache in den Einstellungen"
+  },
+  "autoPlayTrailers": "Trailer Automatisch Abspielen",
+  "@autoPlayTrailers": {
+    "description": "Bezeichnung für die Aktivierung des automatischen Abspielens von Trailern in den Einstellungen"
+  },
+  "notifications": "Benachrichtigungen",
+  "@notifications": {
+    "description": "Bezeichnung für die Aktivierung von Benachrichtigungen in den Einstellungen"
+  },
+  "parentalControl": "Kindersicherung",
+  "@parentalControl": {
+    "description": "Bezeichnung für die Aktivierung der Kindersicherung in den Einstellungen"
+  },
+  "dataSaverMode": "Datensparmodus",
+  "@dataSaverMode": {
+    "description": "Bezeichnung für die Aktivierung des Datensparmodus in den Einstellungen"
+  },
+  "clearCache": "Cache Leeren",
+  "@clearCache": {
+    "description": "Bezeichnung für das Leeren des Caches in den Einstellungen"
+  },
+  "cacheSize": "Cache-Größe",
+  "@cacheSize": {
+    "description": "Bezeichnung für die Anzeige der Cache-Größe in den Einstellungen"
+  },
+  "cacheCleared": "Cache Geleert",
+  "@cacheCleared": {
+    "description": "Meldung, die angezeigt wird, wenn der Cache geleert wird"
+  },
+  "backgroundColor": "Hintergrundfarbe",
+  "@backgroundColor": {
+    "description": "Bezeichnung für die Auswahl der Hintergrundfarbe in den Einstellungen"
+  }
+}
