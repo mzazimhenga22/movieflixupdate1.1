@@ -12,6 +12,7 @@ class AdvancedChatList extends StatefulWidget {
   final void Function(QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey bubbleKey) onMessageLongPressed;
   final QueryDocumentSnapshot<Object?>? replyingTo;
   final VoidCallback? onCancelReply;
+  final void Function(QueryDocumentSnapshot<Object?> message)? onReply;
 
   const AdvancedChatList({
     required this.chatId,
@@ -20,6 +21,7 @@ class AdvancedChatList extends StatefulWidget {
     required this.onMessageLongPressed,
     this.replyingTo,
     this.onCancelReply,
+    this.onReply,
     super.key,
   });
 
