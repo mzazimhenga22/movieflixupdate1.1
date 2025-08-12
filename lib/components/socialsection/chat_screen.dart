@@ -41,14 +41,22 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMixin {
+class _ChatScreenState extends State<ChatScreen>
+    with AutomaticKeepAliveClientMixin {
   String? backgroundUrl;
   QueryDocumentSnapshot<Object?>? replyingTo;
   bool isActionOverlayVisible = false;
   late SharedPreferences prefs;
   final _kbBridge = NativeKeyboardBridge();
-  final ValueNotifier<String?> _backgroundUrlNotifier = ValueNotifier<String?>(null);
-  final ValueNotifier<QueryDocumentSnapshot<Object?>?> _replyingToNotifier = ValueNotifier<QueryDocumentSnapshot<Object?>?>(null);
+
+  // Notifiers used to avoid unnecessary rebuilds of the whole screen:
+  final ValueNotifier<String?> _backgroundUrlNotifier =
+      ValueNotifier<String?>(null);
+  final ValueNotifier<QueryDocumentSnapshot<Object?>?> _replyingToNotifier =
+      ValueNotifier<QueryDocumentSnapshot<Object?>?>(null);
+
+  // Keyboard height notifier (no setState called on keyboard changes)
+  final ValueNotifier<double> _keyboardHeightNotifier = ValueNotifier<double>(0);
 
   @override
   bool get wantKeepAlive => true;
@@ -56,17 +64,21 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
   @override
   void initState() {
     super.initState();
+
     SharedPreferences.getInstance().then((p) {
       prefs = p;
       _loadChatBackground();
       markChatAsRead(widget.chatId, widget.currentUser['id']);
       _listenForIncomingCalls();
     });
+
+    // Listen to native keyboard bridge, but update only the ValueNotifier
     _kbBridge.keyboardHeight.addListener(_onKeyboardHeightChanged);
   }
 
   void _onKeyboardHeightChanged() {
-    if (mounted) setState(() {});
+    // avoid setState; just update the notifier so only widgets depending on it rebuild
+    _keyboardHeightNotifier.value = _kbBridge.keyboardHeight.value;
   }
 
   @override
@@ -74,20 +86,21 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
     _kbBridge.keyboardHeight.removeListener(_onKeyboardHeightChanged);
     _backgroundUrlNotifier.dispose();
     _replyingToNotifier.dispose();
+    _keyboardHeightNotifier.dispose();
     super.dispose();
   }
 
   Future<void> _loadChatBackground() async {
-    if (mounted) {
-      _backgroundUrlNotifier.value = prefs.getString('chat_background_${widget.chatId}');
+    // load from prefs and notify listeners only if changed
+    final stored = prefs.getString('chat_background_${widget.chatId}');
+    if (_backgroundUrlNotifier.value != stored) {
+      _backgroundUrlNotifier.value = stored;
     }
   }
 
   Future<void> _setChatBackground(String url) async {
     await prefs.setString('chat_background_${widget.chatId}', url);
-    if (mounted) {
-      _backgroundUrlNotifier.value = url;
-    }
+    _backgroundUrlNotifier.value = url;
   }
 
   Future<bool> _isUserBlocked(String userId) async {
@@ -123,7 +136,8 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
         'replyToId': _replyingToNotifier.value!.id,
         'replyToText': _replyingToNotifier.value!['text'],
         'replyToSenderId': _replyingToNotifier.value!['senderId'],
-        'replyToSenderName': _replyingToNotifier.value!['senderId'] == widget.currentUser['id']
+        'replyToSenderName': _replyingToNotifier.value!['senderId'] ==
+                widget.currentUser['id']
             ? widget.currentUser['username'] ?? 'You'
             : widget.otherUser['username'] ?? 'Unknown',
       },
@@ -141,7 +155,8 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
       'userIds': [widget.currentUser['id'], widget.otherUser['id']],
     }, SetOptions(merge: true));
 
-    if (mounted) _replyingToNotifier.value = null;
+    // clear reply state only
+    _replyingToNotifier.value = null;
   }
 
   void sendFile(File file) async {
@@ -265,14 +280,15 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
   }
 
   void _onReplyToMessage(QueryDocumentSnapshot<Object?> message) {
-    if (mounted) _replyingToNotifier.value = message;
+    _replyingToNotifier.value = message;
   }
 
   void _onCancelReply() {
-    if (mounted) _replyingToNotifier.value = null;
+    _replyingToNotifier.value = null;
   }
 
-  void _showMessageActions(QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey messageKey) {
+  void _showMessageActions(
+      QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey messageKey) {
     if (isActionOverlayVisible) return;
 
     isActionOverlayVisible = true;
@@ -431,40 +447,40 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
         .where('status', isEqualTo: 'ringing')
         .snapshots()
         .listen((snapshot) {
-          for (final change in snapshot.docChanges) {
-            if (change.type == DocumentChangeType.added ||
-                change.type == DocumentChangeType.modified) {
-              final data = change.doc.data()! as Map<String, dynamic>;
+      for (final change in snapshot.docChanges) {
+        if (change.type == DocumentChangeType.added ||
+            change.type == DocumentChangeType.modified) {
+          final data = change.doc.data()! as Map<String, dynamic>;
 
-              if (data['callerId'] == widget.otherUser['id'] && mounted) {
-                final callId = change.doc.id;
+          if (data['callerId'] == widget.otherUser['id'] && mounted) {
+            final callId = change.doc.id;
 
-                final route = data['type'] == 'video'
-                    ? VideoCallScreen1to1(
-                        callId: callId,
-                        callerId: data['callerId'],
-                        receiverId: data['receiverId'],
-                        currentUserId: widget.currentUser['id'],
-                        caller: widget.otherUser,
-                        receiver: widget.currentUser,
-                      )
-                    : VoiceCallScreen1to1(
-                        callId: callId,
-                        callerId: data['callerId'],
-                        receiverId: data['receiverId'],
-                        currentUserId: widget.currentUser['id'],
-                        caller: widget.otherUser,
-                        receiver: widget.currentUser,
-                      );
+            final route = data['type'] == 'video'
+                ? VideoCallScreen1to1(
+                    callId: callId,
+                    callerId: data['callerId'],
+                    receiverId: data['receiverId'],
+                    currentUserId: widget.currentUser['id'],
+                    caller: widget.otherUser,
+                    receiver: widget.currentUser,
+                  )
+                : VoiceCallScreen1to1(
+                    callId: callId,
+                    callerId: data['callerId'],
+                    receiverId: data['receiverId'],
+                    currentUserId: widget.currentUser['id'],
+                    caller: widget.otherUser,
+                    receiver: widget.currentUser,
+                  );
 
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => route),
-                );
-              }
-            }
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => route),
+            );
           }
-        });
+        }
+      }
+    });
   }
 
   @override
@@ -499,35 +515,19 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
         ),
         body: Stack(
           children: [
+            // Background (isolated so it doesn't rebuild with the chat list)
             ValueListenableBuilder<String?>(
               valueListenable: _backgroundUrlNotifier,
               builder: (context, backgroundUrl, _) {
-                return Stack(
-                  children: [
-                    if (backgroundUrl != null)
-                      Positioned.fill(
-                        child: CachedNetworkImage(
-                          imageUrl: backgroundUrl,
-                          fit: BoxFit.cover,
-                          placeholder: (_, __) => const SizedBox.shrink(),
-                          errorWidget: (_, __, ___) => const SizedBox.shrink(),
-                        ),
-                      ),
-                    Positioned.fill(
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
-                        child: Container(
-                          color: Colors.black.withOpacity(0.2),
-                        ),
-                      ),
-                    ),
-                  ],
-                );
+                return _ChatBackground(backgroundUrl: backgroundUrl);
               },
             ),
+
+            // Foreground chat column
             Column(
               children: [
-                SizedBox(height: kToolbarHeight + MediaQuery.of(context).padding.top),
+                SizedBox(
+                    height: kToolbarHeight + MediaQuery.of(context).padding.top),
                 Expanded(
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(16),
@@ -540,42 +540,31 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
                       ),
                       child: Column(
                         children: [
+                          // Messages (independent widget so background doesn't rebuild)
                           Expanded(
-                            child: RepaintBoundary(
-                              child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
-                                valueListenable: _replyingToNotifier,
-                                builder: (context, replyingTo, _) {
-                                  return AdvancedChatList(
-                                    chatId: widget.chatId,
-                                    currentUser: widget.currentUser,
-                                    otherUser: widget.otherUser,
-                                    onMessageLongPressed: _showMessageActions,
-                                    replyingTo: replyingTo,
-                                    onCancelReply: _onCancelReply,
-                                  );
-                                },
-                              ),
+                            child: _ChatMessagesWrapper(
+                              chatId: widget.chatId,
+                              currentUser: widget.currentUser,
+                              otherUser: widget.otherUser,
+                              replyingToNotifier: _replyingToNotifier,
+                              onMessageLongPressed: _showMessageActions,
+                              onReplyToMessage: _onReplyToMessage,
                             ),
                           ),
+
+                          // Typing area (listens only to reply and keyboard height not whole screen)
                           Container(
                             color: Colors.black.withOpacity(0.5),
-                            child: RepaintBoundary(
-                              child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
-                                valueListenable: _replyingToNotifier,
-                                builder: (context, replyingTo, _) {
-                                  return TypingArea(
-                                    onSendMessage: sendMessage,
-                                    onSendFile: sendFile,
-                                    onSendAudio: sendAudio,
-                                    accentColor: widget.accentColor,
-                                    replyingTo: replyingTo,
-                                    isGroup: false,
-                                    currentUser: widget.currentUser,
-                                    otherUser: widget.otherUser,
-                                    onCancelReply: _onCancelReply,
-                                  );
-                                },
-                              ),
+                            child: _TypingAreaWrapper(
+                              replyingToNotifier: _replyingToNotifier,
+                              keyboardHeightNotifier: _keyboardHeightNotifier,
+                              onSendMessage: sendMessage,
+                              onSendFile: sendFile,
+                              onSendAudio: sendAudio,
+                              onCancelReply: _onCancelReply,
+                              accentColor: widget.accentColor,
+                              currentUser: widget.currentUser,
+                              otherUser: widget.otherUser,
                             ),
                           ),
                         ],
@@ -588,6 +577,148 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
           ],
         ),
       ),
+    );
+  }
+}
+
+/// ---------------------------
+/// Helper widgets below
+/// ---------------------------
+
+class _ChatBackground extends StatelessWidget {
+  final String? backgroundUrl;
+  const _ChatBackground({this.backgroundUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    // Keep in a RepaintBoundary so it doesn't repaint on unrelated rebuilds.
+    return RepaintBoundary(
+      child: Stack(
+        children: [
+          if (backgroundUrl != null)
+            Positioned.fill(
+              child: CachedNetworkImage(
+                imageUrl: backgroundUrl!,
+                fit: BoxFit.cover,
+                placeholder: (_, __) => const SizedBox.shrink(),
+                errorWidget: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            )
+          else
+            // Optional: a fallback background so there is something visible
+            Positioned.fill(
+              child: Container(color: Colors.black),
+            ),
+
+          // Blur overlay (BackdropFilter is expensive, but kept inside RepaintBoundary)
+          Positioned.fill(
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+              child: Container(
+                color: Colors.black.withOpacity(0.2),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChatMessagesWrapper extends StatelessWidget {
+  final String chatId;
+  final Map<String, dynamic> currentUser;
+  final Map<String, dynamic> otherUser;
+  final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
+  final void Function(QueryDocumentSnapshot<Object?>, bool, GlobalKey) onMessageLongPressed;
+  final void Function(QueryDocumentSnapshot<Object?>) onReplyToMessage;
+
+  const _ChatMessagesWrapper({
+    required this.chatId,
+    required this.currentUser,
+    required this.otherUser,
+    required this.replyingToNotifier,
+    required this.onMessageLongPressed,
+    required this.onReplyToMessage,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // RepaintBoundary prevents expensive background repaints from affecting the list
+    return RepaintBoundary(
+      child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
+        valueListenable: replyingToNotifier,
+        builder: (context, replyingTo, _) {
+          return AdvancedChatList(
+            chatId: chatId,
+            currentUser: currentUser,
+            otherUser: otherUser,
+            onMessageLongPressed: onMessageLongPressed,
+            replyingTo: replyingTo,
+            onCancelReply: () {
+              replyingToNotifier.value = null;
+            },
+            onReply: onReplyToMessage,
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _TypingAreaWrapper extends StatelessWidget {
+  final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
+  final ValueNotifier<double> keyboardHeightNotifier;
+  final void Function(String) onSendMessage;
+  final void Function(File) onSendFile;
+  final void Function(File) onSendAudio;
+  final VoidCallback onCancelReply;
+  final Color accentColor;
+  final Map<String, dynamic> currentUser;
+  final Map<String, dynamic> otherUser;
+
+  const _TypingAreaWrapper({
+    required this.replyingToNotifier,
+    required this.keyboardHeightNotifier,
+    required this.onSendMessage,
+    required this.onSendFile,
+    required this.onSendAudio,
+    required this.onCancelReply,
+    required this.accentColor,
+    required this.currentUser,
+    required this.otherUser,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Nest ValueListenableBuilders so only typing area and necessary small parts rebuild
+    return ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
+      valueListenable: replyingToNotifier,
+      builder: (context, replyingTo, _) {
+        return ValueListenableBuilder<double>(
+          valueListenable: keyboardHeightNotifier,
+          builder: (context, kbHeight, __) {
+            // We use bottom padding equal to kbHeight so typing area can react to keyboard open,
+            // but this only rebuilds the TypingArea section.
+            return Padding(
+              padding: EdgeInsets.only(bottom: kbHeight),
+              child: RepaintBoundary(
+                child: TypingArea(
+                  onSendMessage: onSendMessage,
+                  onSendFile: onSendFile,
+                  onSendAudio: onSendAudio,
+                  accentColor: accentColor,
+                  replyingTo: replyingTo,
+                  isGroup: false,
+                  currentUser: currentUser,
+                  otherUser: otherUser,
+                  onCancelReply: onCancelReply,
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }
