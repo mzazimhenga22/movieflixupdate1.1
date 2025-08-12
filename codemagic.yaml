@@ -28,7 +28,6 @@ workflows:
             || echo 'org.gradle.jvmargs=-Xmx4608m' >> android/gradle.properties
 
       # 5) Run in profile mode to generate SKSL shader cache
-      # This step runs the app, collects shaders, and writes them to flutter_01.sksl.json
       - name: Warm up SKSL cache
         script: |
           flutter run --profile --enable-software-rendering --no-pub --no-resident \
