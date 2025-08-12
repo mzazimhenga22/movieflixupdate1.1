@@ -26,16 +26,19 @@ workflows:
         script: |
           grep -qxF 'org.gradle.jvmargs=-Xmx4608m' android/gradle.properties \
             || echo 'org.gradle.jvmargs=-Xmx4608m' >> android/gradle.properties
-# 5) Profile run to generate SKSL file
-- name: Warm up SKSL cache
-  script: |
-    flutter run --profile --cache-sksl --purge-persistent-cache \
-      --no-resident --no-pub \
-      --bundle-sksl-path flutter_01.sksl.json
 
-# 6) Build release APK with SKSL preloaded
-- name: Build APK with Skia
-  script: flutter build apk --release --bundle-sksl-path flutter_01.sksl.json
+      # 5) Run in profile mode to generate SKSL shader cache
+      # This step runs the app, collects shaders, and writes them to flutter_01.sksl.json
+      - name: Warm up SKSL cache
+        script: |
+          flutter run --profile --enable-software-rendering --no-pub --no-resident \
+            --purge-persistent-cache \
+            --bundle-sksl-path flutter_01.sksl.json || true
+
+      # 6) Build release APK using the generated SKSL file
+      - name: Build APK with Skia
+        script: flutter build apk --release --enable-software-rendering \
+          --bundle-sksl-path flutter_01.sksl.json
 
     artifacts:
       - build/app/outputs/flutter-apk/app-release.apk
