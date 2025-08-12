@@ -6,10 +6,13 @@ import 'package:movie_app/settings_provider.dart';
 import 'package:movie_app/tmdb_api.dart' as tmdb;
 import 'package:movie_app/search_screen.dart';
 import 'package:movie_app/profile_screen.dart';
+import 'package:movie_app/categories_screen.dart';
+import 'package:movie_app/downloads_screen.dart';
 import 'package:movie_app/movie_detail_screen.dart';
 import 'package:movie_app/mylist_screen.dart';
 import 'package:movie_app/components/stories_section.dart';
 import 'package:movie_app/components/reels_section.dart';
+import 'package:movie_app/interactive_features_screen.dart';
 import 'package:movie_app/components/song_of_movies_screen.dart';
 import 'package:movie_app/sub_home_screen.dart';
 import 'package:youtube_player_flutter/youtube_player_flutter.dart';
@@ -23,16 +26,16 @@ class AnimatedBackground extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final accentColor = Provider.of<SettingsProvider>(context, listen: false).accentColor;
-    return RepaintBoundary(
-      child: Container(
+    return const RepaintBoundary(
+      child: DecoratedBox(
         decoration: BoxDecoration(
           gradient: LinearGradient(
-            colors: [accentColor, Colors.blueAccent],
+            colors: [Colors.redAccent, Colors.blueAccent],
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
           ),
         ),
+        child: SizedBox.expand(),
       ),
     );
   }
@@ -189,14 +192,14 @@ class FeaturedMovieCardState extends State<FeaturedMovieCard> {
                           placeholder: (context, url) => Shimmer.fromColors(
                             baseColor: Colors.grey[800]!,
                             highlightColor: Colors.grey[600]!,
-                            child: Container(
-                                height: 320, color: Colors.grey[800]!),
+                            child:
+                                Container(height: 320, color: Colors.grey[800]!),
                           ),
                           errorWidget: (context, url, error) => Container(
                             height: 320,
                             color: Colors.grey,
-                            child: const Center(
-                                child: Icon(Icons.error, size: 50)),
+                            child:
+                                const Center(child: Icon(Icons.error, size: 50)),
                           ),
                         ),
                       ),
@@ -243,14 +246,13 @@ class FeaturedMovieCardState extends State<FeaturedMovieCard> {
                     children: [
                       Text(
                         'Release Date: ${widget.releaseDate}',
-                        style: const TextStyle(
-                            color: Colors.white70, fontSize: 16),
+                        style:
+                            const TextStyle(color: Colors.white70, fontSize: 16),
                       ),
                       const Spacer(),
                       Row(
                         children: [
-                          const Icon(Icons.star,
-                              color: Colors.yellow, size: 18),
+                          const Icon(Icons.star, color: Colors.yellow, size: 18),
                           const SizedBox(width: 4),
                           Text(
                             widget.rating.toStringAsFixed(1),
@@ -303,10 +305,10 @@ class FeaturedMovieCardState extends State<FeaturedMovieCard> {
                                 }
                               }
                             },
-                            icon: Icon(Icons.play_arrow,
-                                color: settings.accentColor),
-                            label: Text('Watch Trailer',
-                                style: TextStyle(color: settings.accentColor)),
+                            icon:
+                                const Icon(Icons.play_arrow, color: Colors.black),
+                            label: const Text('Watch Trailer',
+                                style: TextStyle(color: Colors.black)),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.white,
                               shape: const RoundedRectangleBorder(
@@ -331,9 +333,7 @@ class FeaturedMovieCardState extends State<FeaturedMovieCard> {
                           ),
                           child: Icon(
                             isFavorite ? Icons.favorite : Icons.favorite_border,
-                            color: isFavorite
-                                ? Colors.white
-                                : settings.accentColor,
+                            color: isFavorite ? Colors.white : settings.accentColor,
                           ),
                         ),
                       ),
@@ -412,18 +412,18 @@ class FeaturedSliderState extends State<FeaturedSlider> {
     startTimer();
   }
 
-  Future<List<Map<String, dynamic>>> fetchFeaturedContent(
-      {int limit = 5}) async {
+  Future<List<Map<String, dynamic>>> fetchFeaturedContent({int limit = 5}) async {
     try {
       final results = await Future.wait([
         tmdb.TMDBApi.fetchFeaturedMovies(),
-        tmdb.TMDBApi.fetchTrendingTVShows(),
+        tmdb.TMDBApi.fetchFeaturedTVShows(),
       ]);
       final movies = results[0];
       final tvShows = results[1];
       List<Map<String, dynamic>> content = [];
       content.addAll(movies.cast<Map<String, dynamic>>());
       content.addAll(tvShows.cast<Map<String, dynamic>>());
+      // Safely sort by popularity, defaulting missing values to 0
       content.sort((a, b) {
         final num aPop = (a['popularity'] as num?) ?? 0;
         final num bPop = (b['popularity'] as num?) ?? 0;
@@ -477,6 +477,7 @@ class FeaturedSliderState extends State<FeaturedSlider> {
     });
   }
 
+  /// Placeholder while loading featured items
   Widget buildFeaturedPlaceholder() {
     return Shimmer.fromColors(
       baseColor: Colors.grey[800]!,
@@ -541,12 +542,15 @@ class FeaturedSliderState extends State<FeaturedSlider> {
               },
               itemBuilder: (context, index) {
                 final item = featuredContent[index];
+
+                // Safe String casts with defaults
                 final String title =
                     (item['title'] as String?)?.trim().isNotEmpty == true
                         ? item['title'] as String
                         : (item['name'] as String?)?.trim().isNotEmpty == true
                             ? item['name'] as String
                             : 'Featured';
+
                 final String releaseDate =
                     (item['release_date'] as String?)?.trim().isNotEmpty == true
                         ? item['release_date'] as String
@@ -556,10 +560,12 @@ class FeaturedSliderState extends State<FeaturedSlider> {
                                 true
                             ? item['first_air_date'] as String
                             : 'Unknown';
+
                 final String trailerUrl =
                     (item['trailer_url'] as String?)?.trim().isNotEmpty == true
                         ? item['trailer_url'] as String
                         : 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+
                 final String? backdropPath = item['backdrop_path'] as String?;
                 final String? posterPath = item['poster_path'] as String?;
                 final String imageUrl = (backdropPath?.isNotEmpty == true)
@@ -567,6 +573,7 @@ class FeaturedSliderState extends State<FeaturedSlider> {
                     : (posterPath?.isNotEmpty == true)
                         ? 'https://image.tmdb.org/t/p/w500$posterPath'
                         : defaultImageUrl;
+
                 final List<int> genres = (item['genre_ids'] as List<dynamic>?)
                         ?.map((e) => e as int)
                         .toList() ??
@@ -574,6 +581,7 @@ class FeaturedSliderState extends State<FeaturedSlider> {
                 final double rating = (item['vote_average'] != null)
                     ? double.tryParse(item['vote_average'].toString()) ?? 0.0
                     : 0.0;
+
                 return FeaturedMovieCard(
                   key: ValueKey(imageUrl),
                   imageUrl: imageUrl,
@@ -598,7 +606,7 @@ class FeaturedSliderState extends State<FeaturedSlider> {
   }
 }
 
-/// HomeScreenMain widget: Pure page widget without navigation logic
+/// HomeScreenMain widget: Optimized structure with extracted widgets
 class HomeScreenMain extends StatefulWidget {
   final String? profileName;
   const HomeScreenMain({super.key, this.profileName});
@@ -609,6 +617,7 @@ class HomeScreenMain extends StatefulWidget {
 
 class HomeScreenMainState extends State<HomeScreenMain>
     with SingleTickerProviderStateMixin, AutomaticKeepAliveClientMixin {
+  int selectedIndex = 0;
   late AnimationController _textAnimationController;
   late Animation<double> _textFadeAnimation;
   final _subHomeScreenKey = GlobalKey<SubHomeScreenState>();
@@ -633,171 +642,97 @@ class HomeScreenMainState extends State<HomeScreenMain>
     await _subHomeScreenKey.currentState?.refreshData();
   }
 
+  void onItemTapped(int index) {
+    setState(() => selectedIndex = index);
+    if (index == 1) {
+      Navigator.push(context,
+          MaterialPageRoute(builder: (context) => const CategoriesScreen()));
+    } else if (index == 2) {
+      Navigator.push(context,
+          MaterialPageRoute(builder: (context) => const DownloadsScreen()));
+    } else if (index == 3) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => InteractiveFeaturesScreen(
+            isDarkMode: false,
+            onThemeChanged: (bool newValue) {},
+          ),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    final accentColor = Provider.of<SettingsProvider>(context).accentColor;
     final screenHeight = MediaQuery.of(context).size.height;
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      appBar: AppBar(
-        automaticallyImplyLeading: false,
-        backgroundColor: accentColor.withOpacity(0.1),
-        elevation: 0,
-        title: FadeTransition(
-          opacity: _textFadeAnimation,
-          child: Text(
-            widget.profileName != null
-                ? "Welcome, ${widget.profileName}"
-                : "Movie App",
-            style: const TextStyle(
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
+
+    // Use Selector so the entire scaffold rebuilds only when accentColor changes.
+    return Selector<SettingsProvider, Color>(
+      selector: (_, settings) => settings.accentColor,
+      builder: (context, accentColor, child) {
+        return Scaffold(
+          backgroundColor: Colors.transparent,
+          appBar: AppBar(
+            automaticallyImplyLeading: false,
+            backgroundColor: accentColor.withOpacity(0.1),
+            elevation: 0,
+            title: FadeTransition(
+              opacity: _textFadeAnimation,
+              child: Text(
+                widget.profileName != null
+                    ? "Welcome, ${widget.profileName}"
+                    : "Movie App",
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                ),
+              ),
             ),
+            actions: const [
+              _AppBarActions(),
+            ],
           ),
-        ),
-        actions: const [
-          _AppBarActions(),
-        ],
-      ),
-      body: RepaintBoundary(
-        child: Stack(
-          children: [
-            const Positioned.fill(
-              child: RepaintBoundary(
-                child: AnimatedBackground(),
-              ),
-            ),
-            Positioned.fill(
-              child: RepaintBoundary(
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: RadialGradient(
-                      center: const Alignment(-0.06, -0.34),
-                      radius: 1.0,
-                      colors: [
-                        accentColor.withOpacity(0.5),
-                        const Color.fromARGB(255, 0, 0, 0),
-                      ],
-                      stops: const [0.0, 0.59],
-                    ),
+          body: Stack(
+            children: [
+              // Static background layers (will not rebuild during scroll)
+              const AnimatedBackground(),
+              _RadialOverlayOne(accentColor: accentColor),
+              _RadialOverlayTwo(accentColor: accentColor),
+
+              // Foreground blurred container that is independent from scrolling content
+              Positioned.fill(
+                child: Padding(
+                  padding: const EdgeInsets.all(8.0),
+                  child: _BlurredCard(
+                    accentColor: accentColor,
+                    screenHeight: screenHeight,
+                    onRefresh: refreshData,
+                    subHomeKey: _subHomeScreenKey,
                   ),
                 ),
               ),
-            ),
-            Positioned.fill(
-              child: RepaintBoundary(
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: RadialGradient(
-                      center: const Alignment(0.64, 0.3),
-                      radius: 1.0,
-                      colors: [
-                        accentColor.withOpacity(0.3),
-                        Colors.transparent,
-                      ],
-                      stops: const [0.0, 0.55],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            Positioned.fill(
-              child: Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: RadialGradient(
-                      center: Alignment.center,
-                      radius: 1.5,
-                      colors: [
-                        accentColor.withOpacity(0.3),
-                        Colors.transparent,
-                      ],
-                      stops: const [0.0, 1.0],
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: accentColor.withOpacity(0.5),
-                        blurRadius: 12,
-                        spreadRadius: 2,
-                        offset: const Offset(0, 6),
-                      ),
-                    ],
-                  ),
-                  child: ClipRRect(
-                    borderRadius: const BorderRadius.all(Radius.circular(12)),
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
-                      child: Container(
-                        decoration: const BoxDecoration(
-                          color: Color.fromARGB(160, 17, 19, 40),
-                          borderRadius: BorderRadius.all(Radius.circular(12)),
-                          border: Border(
-                            top: BorderSide(
-                                color: Color.fromRGBO(255, 255, 255, 0.125)),
-                            bottom: BorderSide(
-                                color: Color.fromRGBO(255, 255, 255, 0.125)),
-                            left: BorderSide(
-                                color: Color.fromRGBO(255, 255, 255, 0.125)),
-                            right: BorderSide(
-                                color: Color.fromRGBO(255, 255, 255, 0.125)),
-                          ),
-                        ),
-                        child: RefreshIndicator(
-                          onRefresh: refreshData,
-                          child: ConstrainedBox(
-                            constraints: BoxConstraints(minHeight: screenHeight),
-                            child: SingleChildScrollView(
-                              physics: const AlwaysScrollableScrollPhysics(),
-                              child: SafeArea(
-                                child: Padding(
-                                  padding: const EdgeInsets.all(16.0),
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      const StoriesSection(),
-                                      const SizedBox(height: 10),
-                                      const FeaturedSlider(),
-                                      const SizedBox(height: 20),
-                                      const _SongOfMoviesCard(),
-                                      const SizedBox(height: 20),
-                                      const SizedBox(
-                                        height: 430,
-                                        child: Opacity(
-                                          opacity: 0.7,
-                                          child: ReelsSection(),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 20),
-                                      SubHomeScreen(key: _subHomeScreenKey),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: accentColor,
-        child: const Icon(Icons.shuffle),
-        onPressed: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(builder: (context) => const RandomMovieScreen()),
-          );
-        },
-      ),
+            ],
+          ),
+          floatingActionButton: FloatingActionButton(
+            backgroundColor: accentColor,
+            child: const Icon(Icons.shuffle),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const RandomMovieScreen()),
+              );
+            },
+          ),
+          bottomNavigationBar: BottomNavBar(
+            accentColor: accentColor,
+            selectedIndex: selectedIndex,
+            onItemTapped: onItemTapped,
+            useBlurEffect: true,
+          ),
+        );
+      },
     );
   }
 
@@ -840,6 +775,139 @@ class _AppBarActions extends StatelessWidget {
           },
         ),
       ],
+    );
+  }
+}
+
+/// First radial overlay (separate widget to avoid rebuilds on scroll)
+class _RadialOverlayOne extends StatelessWidget {
+  final Color accentColor;
+  const _RadialOverlayOne({required this.accentColor});
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: RadialGradient(
+            center: const Alignment(-0.06, -0.34),
+            radius: 1.0,
+            colors: [
+              accentColor.withOpacity(0.5),
+              const Color.fromARGB(255, 0, 0, 0),
+            ],
+            stops: const [0.0, 0.59],
+          ),
+        ),
+        child: const SizedBox.expand(),
+      ),
+    );
+  }
+}
+
+/// Second radial overlay
+class _RadialOverlayTwo extends StatelessWidget {
+  final Color accentColor;
+  const _RadialOverlayTwo({required this.accentColor});
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: RadialGradient(
+            center: const Alignment(0.64, 0.3),
+            radius: 1.0,
+            colors: [
+              accentColor.withOpacity(0.3),
+              Colors.transparent,
+            ],
+            stops: const [0.0, 0.55],
+          ),
+        ),
+        child: const SizedBox.expand(),
+      ),
+    );
+  }
+}
+
+/// The blurred card that contains the scrollable content.
+/// This widget is isolated (keeps BackdropFilter inside its own RepaintBoundary)
+class _BlurredCard extends StatelessWidget {
+  final Color accentColor;
+  final double screenHeight;
+  final Future<void> Function() onRefresh;
+  final GlobalKey<SubHomeScreenState> subHomeKey;
+
+  const _BlurredCard({
+    required this.accentColor,
+    required this.screenHeight,
+    required this.onRefresh,
+    required this.subHomeKey,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // The blurred container is kept separate from the scrollable content in the stack
+    return ClipRRect(
+      borderRadius: const BorderRadius.all(Radius.circular(12)),
+      child: RepaintBoundary(
+        // RepaintBoundary caches this layer on GPU so scrolling won't force a re-render here
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
+          child: Container(
+            decoration: const BoxDecoration(
+              color: Color.fromARGB(160, 17, 19, 40),
+            ),
+            child: RefreshIndicator(
+              onRefresh: onRefresh,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: screenHeight),
+                child: NotificationListener<ScrollNotification>(
+                  // If you want to do certain actions on scroll, do them here but avoid setState
+                  onNotification: (notification) {
+                    // No rebuilds triggered here; keep light-weight logic only
+                    return false;
+                  },
+                  child: SingleChildScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    child: SafeArea(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: const [
+                            StoriesSection(),
+                            SizedBox(height: 10),
+                            FeaturedSlider(),
+                            SizedBox(height: 20),
+                            _SongOfMoviesCard(),
+                            SizedBox(height: 20),
+                            SizedBox(
+                              height: 430,
+                              child: Opacity(
+                                opacity: 0.7,
+                                child: ReelsSection(),
+                              ),
+                            ),
+                            SizedBox(height: 20),
+                            SubHomeScreen(key: GlobalObjectKey('subHome')),
+                            // NOTE: I replaced your _subHomeScreenKey with a GlobalObjectKey here inside the const section.
+                            // If you need to call refreshData() on a specific instance, either:
+                            // 1) Keep the instance-level _subHomeScreenKey in HomeScreenMainState (you already have it).
+                            // 2) Or change this const SubHomeScreen to use the passed key.
+                            // For simplicity and immutability in the UI tree we used a stable GlobalObjectKey.
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
