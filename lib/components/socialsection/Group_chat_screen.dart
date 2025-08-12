@@ -8,7 +8,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:movie_app/webrtc/group_rtc_manager.dart';
 import 'package:movie_app/utils/read_status_utils.dart';
 import 'package:flutter/foundation.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 import 'Group_profile_screen.dart';
 import 'widgets/GroupChatAppBar.dart';
 import 'widgets/typing_area.dart';
@@ -40,18 +39,23 @@ class GroupChatScreen extends StatefulWidget {
   State<GroupChatScreen> createState() => _GroupChatScreenState();
 }
 
-class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAliveClientMixin {
-  String? backgroundUrl;
-  List<Map<String, dynamic>> groupMembers = [];
-  Map<String, dynamic>? groupData;
-  QueryDocumentSnapshot<Object?>? replyingTo;
+class _GroupChatScreenState extends State<GroupChatScreen>
+    with AutomaticKeepAliveClientMixin {
+  // Use ValueNotifiers to avoid full-screen rebuilds on keyboard / small state changes
+  final ValueNotifier<String?> _backgroundUrlNotifier = ValueNotifier<String?>(null);
+  final ValueNotifier<List<Map<String, dynamic>>> _groupMembersNotifier =
+      ValueNotifier<List<Map<String, dynamic>>>([]);
+  final ValueNotifier<Map<String, dynamic>?> _groupDataNotifier =
+      ValueNotifier<Map<String, dynamic>?>(null);
+  final ValueNotifier<QueryDocumentSnapshot<Object?>?> _replyingToNotifier =
+      ValueNotifier<QueryDocumentSnapshot<Object?>?>(null);
+  final ValueNotifier<double> _keyboardHeightNotifier = ValueNotifier<double>(0);
+
   bool isActionOverlayVisible = false;
   late SharedPreferences prefs;
   final _kbBridge = NativeKeyboardBridge();
   Timer? _debounce;
   String? _activeCallId;
-  final ValueNotifier<String?> _backgroundUrlNotifier = ValueNotifier<String?>(null);
-  final ValueNotifier<QueryDocumentSnapshot<Object?>?> _replyingToNotifier = ValueNotifier<QueryDocumentSnapshot<Object?>?>(null);
 
   @override
   bool get wantKeepAlive => true;
@@ -70,33 +74,39 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
   }
 
   void _onKeyboardHeightChanged() {
-    if (mounted) setState(() {});
+    // avoid calling setState — update notifier so only typing area rebuilds
+    _keyboardHeightNotifier.value = _kbBridge.keyboardHeight.value;
   }
 
   @override
   void dispose() {
     _kbBridge.keyboardHeight.removeListener(_onKeyboardHeightChanged);
-    _debounce?.cancel();
     _backgroundUrlNotifier.dispose();
+    _groupMembersNotifier.dispose();
+    _groupDataNotifier.dispose();
     _replyingToNotifier.dispose();
+    _keyboardHeightNotifier.dispose();
+    _debounce?.cancel();
     super.dispose();
   }
 
   Future<void> _loadChatBackground() async {
-    if (mounted) {
-      _backgroundUrlNotifier.value = prefs.getString('chat_background_${widget.chatId}');
+    final stored = prefs.getString('chat_background_${widget.chatId}');
+    if (_backgroundUrlNotifier.value != stored) {
+      _backgroundUrlNotifier.value = stored;
     }
   }
 
   Future<void> _loadCachedGroupData() async {
     final cachedData = prefs.getString('group_data_${widget.chatId}');
     if (cachedData != null) {
-      final data = await compute(jsonDecode, cachedData) as Map<String, dynamic>;
-      if (mounted) {
-        setState(() {
-          groupData = data;
-          groupMembers = List<Map<String, dynamic>>.from(data['members'] ?? []);
-        });
+      try {
+        final data = await compute(jsonDecode, cachedData) as Map<String, dynamic>;
+        final members = List<Map<String, dynamic>>.from(data['members'] ?? []);
+        _groupDataNotifier.value = data;
+        _groupMembersNotifier.value = members;
+      } catch (e) {
+        debugPrint('Failed to load cached group data: $e');
       }
     }
   }
@@ -116,12 +126,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
     );
   }
 
+  /// Recursively converts all `Timestamp` values in a map to ISO8601 strings.
   Map<String, dynamic> _convertTimestamps(Map<String, dynamic> map) {
     map.forEach((key, value) {
       if (value is Timestamp) {
         map[key] = value.toDate().toIso8601String();
       } else if (value is Map<String, dynamic>) {
-        map[key] = _convertTimestamps(value);
+        map[key] = _convertTimestamps(Map<String, dynamic>.from(value));
       } else if (value is List) {
         map[key] = value.map((item) {
           if (item is Timestamp) {
@@ -151,43 +162,49 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
         .doc(widget.chatId)
         .snapshots()
         .listen((chatDoc) async {
-          if (!chatDoc.exists || chatDoc.data()?['isGroup'] != true) {
-            if (mounted) setState(() {});
-            return;
-          }
+      if (!chatDoc.exists || chatDoc.data()?['isGroup'] != true) {
+        // keep notifiers as-is or clear them
+        _groupDataNotifier.value = chatDoc.data();
+        return;
+      }
 
-          final memberIds = List<String>.from(chatDoc.data()?['userIds'] ?? []);
-          final membersSnapshots = await Future.wait(memberIds.map(
-            (uid) => FirebaseFirestore.instance.collection('users').doc(uid).get(),
-          ));
+      final memberIds = List<String>.from(chatDoc.data()?['userIds'] ?? []);
+      final membersSnapshots = await Future.wait(memberIds.map(
+        (uid) => FirebaseFirestore.instance.collection('users').doc(uid).get(),
+      ));
 
-          final members = membersSnapshots
-              .where((doc) => doc.exists)
-              .map((doc) => doc.data()!..['id'] = doc.id)
-              .toList();
+      final members = membersSnapshots
+          .where((doc) => doc.exists)
+          .map((doc) {
+            final d = Map<String, dynamic>.from(doc.data()!);
+            d['id'] = doc.id;
+            return d;
+          })
+          .toList();
 
+      _groupDataNotifier.value = chatDoc.data();
+      _groupMembersNotifier.value = members;
+
+      await _cacheGroupData(chatDoc.data()!, members);
+
+      // Listen to members changes but debounce UI updates to avoid churn
+      FirebaseFirestore.instance
+          .collection('users')
+          .where(FieldPath.documentId, whereIn: memberIds.isEmpty ? [''] : memberIds)
+          .snapshots()
+          .listen((snapshot) {
+        _debounce?.cancel();
+        _debounce = Timer(const Duration(milliseconds: 300), () {
+          // simple refresh — since members could update presence etc.
           if (mounted) {
-            setState(() {
-              groupData = chatDoc.data();
-              groupMembers = members;
-            });
+            // We only update notifiers; avoid full-screen setState
+            _groupMembersNotifier.value = List<Map<String, dynamic>>.from(_groupMembersNotifier.value);
           }
-
-          await _cacheGroupData(chatDoc.data()!, members);
-
-          FirebaseFirestore.instance
-              .collection('users')
-              .where(FieldPath.documentId, whereIn: memberIds)
-              .snapshots()
-              .listen((snapshot) {
-                _debounce?.cancel();
-                _debounce = Timer(const Duration(milliseconds: 300), () {
-                  if (mounted) setState(() {});
-                });
-              });
-
-          await markGroupAsRead(widget.chatId, widget.currentUser['id']);
         });
+      });
+
+      await markGroupAsRead(widget.chatId, widget.currentUser['id']);
+    });
   }
 
   void sendMessage(String text) async {
@@ -206,7 +223,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
         'replyToId': _replyingToNotifier.value!.id,
         'replyToText': _replyingToNotifier.value!['text'],
         'replyToSenderId': _replyingToNotifier.value!['senderId'],
-        'replyToSenderName': groupMembers.firstWhere(
+        'replyToSenderName': _groupMembersNotifier.value.firstWhere(
           (member) => member['id'] == _replyingToNotifier.value!['senderId'],
           orElse: () => {'username': 'Unknown'},
         )['username'] ?? 'Unknown',
@@ -223,10 +240,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
       'lastMessage': text,
       'timestamp': FieldValue.serverTimestamp(),
       'unreadBy': FieldValue.arrayUnion(
-          groupMembers.map((m) => m['id']).where((id) => id != widget.currentUser['id']).toList()),
+          _groupMembersNotifier.value.map((m) => m['id']).where((id) => id != widget.currentUser['id']).toList()),
     }, SetOptions(merge: true));
 
-    if (mounted) _replyingToNotifier.value = null;
+    // clear reply state only
+    _replyingToNotifier.value = null;
   }
 
   void sendFile(File file) async {
@@ -273,7 +291,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
       if (existingCall.docs.isNotEmpty) {
         final callId = existingCall.docs.first.id;
         if (mounted && _activeCallId == null) {
-          _activeCallId = callId;
+          setState(() => _activeCallId = callId);
           await Navigator.push(
             context,
             MaterialPageRoute(
@@ -282,14 +300,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
                       callId: callId,
                       callerId: widget.currentUser['id'],
                       groupId: widget.chatId,
-                      participants: groupMembers,
+                      participants: _groupMembersNotifier.value,
                     )
                   : VoiceCallScreen(
                       callId: callId,
                       callerId: widget.currentUser['id'],
                       groupId: widget.chatId,
                       receiverId: widget.currentUser['id'],
-                      participants: groupMembers,
+                      participants: _groupMembersNotifier.value,
                     ),
             ),
           );
@@ -302,7 +320,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
 
       final callId = await GroupRtcManager.startGroupCall(
         caller: widget.currentUser,
-        participants: groupMembers,
+        participants: _groupMembersNotifier.value,
         isVideo: isVideo,
       );
 
@@ -312,12 +330,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
         'groupId': widget.chatId,
         'timestamp': FieldValue.serverTimestamp(),
         'status': 'ringing',
-        'participants': groupMembers.map((m) => m['id']).toList(),
+        'participants': _groupMembersNotifier.value.map((m) => m['id']).toList(),
         'participantStatus': {widget.currentUser['id']: 'joined'},
       });
 
       if (mounted) {
-        _activeCallId = callId;
+        setState(() => _activeCallId = callId);
         await Navigator.push(
           context,
           MaterialPageRoute(
@@ -326,14 +344,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
                     callId: callId,
                     callerId: widget.currentUser['id'],
                     groupId: widget.chatId,
-                    participants: groupMembers,
+                    participants: _groupMembersNotifier.value,
                   )
                 : VoiceCallScreen(
                     callId: callId,
                     callerId: widget.currentUser['id'],
                     groupId: widget.chatId,
                     receiverId: widget.currentUser['id'],
-                    participants: groupMembers,
+                    participants: _groupMembersNotifier.value,
                   ),
           ),
         );
@@ -351,11 +369,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
   }
 
   void _onReplyToMessage(QueryDocumentSnapshot<Object?> message) {
-    if (mounted) _replyingToNotifier.value = message;
+    _replyingToNotifier.value = message;
   }
 
   void _onCancelReply() {
-    if (mounted) _replyingToNotifier.value = null;
+    _replyingToNotifier.value = null;
   }
 
   void _showMessageActions(QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey messageKey) {
@@ -397,7 +415,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
               ),
             ),
           );
-          isActionOverlayVisible = false;
+          setState(() => isActionOverlayVisible = false);
         }
       },
       onDelete: () async {
@@ -426,7 +444,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
 
         if (mounted) {
           Navigator.of(context, rootNavigator: false).pop();
-          isActionOverlayVisible = false;
+          setState(() => isActionOverlayVisible = false);
         }
       },
       onBlock: () async {
@@ -438,7 +456,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
         });
         if (mounted) {
           Navigator.of(context, rootNavigator: false).pop();
-          isActionOverlayVisible = false;
+          setState(() => isActionOverlayVisible = false);
         }
       },
       onForward: () async {
@@ -458,7 +476,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
             const SnackBar(content: Text('Message forwarded')),
           );
           Navigator.of(context, rootNavigator: false).pop();
-          isActionOverlayVisible = false;
+          setState(() => isActionOverlayVisible = false);
         }
       },
       onEdit: () async {
@@ -474,7 +492,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
         }
         if (mounted) {
           Navigator.of(context, rootNavigator: false).pop();
-          isActionOverlayVisible = false;
+          setState(() => isActionOverlayVisible = false);
         }
       },
       onReactEmoji: (emoji) async {
@@ -502,7 +520,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
         }
         if (mounted) {
           Navigator.of(context, rootNavigator: false).pop();
-          isActionOverlayVisible = false;
+          setState(() => isActionOverlayVisible = false);
         }
       },
     );
@@ -515,48 +533,49 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
         .where('status', isEqualTo: 'ringing')
         .snapshots()
         .listen((snapshot) {
-          if (snapshot.docs.isEmpty) return;
+      if (snapshot.docs.isEmpty) return;
 
-          for (final doc in snapshot.docs) {
-            final data = doc.data();
-            final callId = doc.id;
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final callId = doc.id;
 
-            final isIncoming = data['callerId'] != widget.currentUser['id'];
+        final isIncoming = data['callerId'] != widget.currentUser['id'];
 
-            if (mounted && _activeCallId == null && isIncoming) {
-              _activeCallId = callId;
+        if (mounted && _activeCallId == null && isIncoming) {
+          setState(() => _activeCallId = callId);
 
-              final callScreen = data['type'] == 'video'
-                  ? VideoCallScreenGroup(
-                      callId: callId,
-                      callerId: data['callerId'],
-                      groupId: widget.chatId,
-                      participants: groupMembers,
-                    )
-                  : VoiceCallScreen(
-                      callId: callId,
-                      callerId: data['callerId'],
-                      groupId: widget.chatId,
-                      receiverId: widget.currentUser['id'],
-                      participants: groupMembers,
-                    );
+          final callScreen = data['type'] == 'video'
+              ? VideoCallScreenGroup(
+                  callId: callId,
+                  callerId: data['callerId'],
+                  groupId: widget.chatId,
+                  participants: _groupMembersNotifier.value,
+                )
+              : VoiceCallScreen(
+                  callId: callId,
+                  callerId: data['callerId'],
+                  groupId: widget.chatId,
+                  receiverId: widget.currentUser['id'],
+                  participants: _groupMembersNotifier.value,
+                );
 
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => callScreen),
-              ).then((_) {
-                if (mounted) {
-                  setState(() => _activeCallId = null);
-                }
-              });
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => callScreen),
+          ).then((_) {
+            if (mounted) {
+              setState(() => _activeCallId = null);
             }
-          }
-        });
+          });
+        }
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    // leave bottomInset read if you need it for fallback logic
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
     return PresenceWrapper(
@@ -565,118 +584,294 @@ class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAli
       child: Scaffold(
         appBar: PreferredSize(
           preferredSize: const Size.fromHeight(kToolbarHeight),
-          child: GroupChatAppBar(
-            groupId: widget.chatId,
-            groupName: groupData?['name'] ?? 'Loading...',
-            groupPhotoUrl: groupData?['avatarUrl'] ?? '',
-            onBack: () => Navigator.pop(context),
-            onGroupInfoTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => GroupProfileScreen(
-                  groupId: widget.chatId,
-                  currentUserId: widget.currentUser['id'],
+          child: ValueListenableBuilder<Map<String, dynamic>?>(
+            valueListenable: _groupDataNotifier,
+            builder: (context, groupData, _) {
+              return GroupChatAppBar(
+                groupId: widget.chatId,
+                groupName: groupData?['name'] ?? 'Loading...',
+                groupPhotoUrl: groupData?['avatarUrl'] ?? '',
+                onBack: () => Navigator.pop(context),
+                onGroupInfoTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => GroupProfileScreen(
+                      groupId: widget.chatId,
+                      currentUserId: widget.currentUser['id'],
+                    ),
+                  ),
                 ),
-              ),
-            ),
-            onVideoCall: () => startGroupCall(true),
-            onVoiceCall: () => startGroupCall(false),
-            accentColor: widget.accentColor,
+                onVideoCall: () => startGroupCall(true),
+                onVoiceCall: () => startGroupCall(false),
+                accentColor: widget.accentColor,
+              );
+            },
           ),
         ),
         body: Stack(
           children: [
-            ValueListenableBuilder<String?>(
-              valueListenable: _backgroundUrlNotifier,
-              builder: (context, backgroundUrl, _) {
-                return Stack(
-                  children: [
-                    if (backgroundUrl != null)
-                      Positioned.fill(
-                        child: CachedNetworkImage(
-                          imageUrl: backgroundUrl,
-                          fit: BoxFit.cover,
-                          placeholder: (_, __) => const SizedBox.shrink(),
-                          errorWidget: (_, __, ___) => const SizedBox.shrink(),
-                        ),
-                      ),
-                    Positioned.fill(
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
-                        child: Container(
-                          color: Colors.black.withOpacity(0.2),
-                        ),
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-            Column(
-              children: [
-                SizedBox(height: kToolbarHeight + MediaQuery.of(context).padding.top),
-                Expanded(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        border: Border.all(
-                          color: widget.accentColor.withOpacity(0.1),
-                        ),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: Column(
-                        children: [
-                          Expanded(
-                            child: RepaintBoundary(
-                              child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
-                                valueListenable: _replyingToNotifier,
-                                builder: (context, replyingTo, _) {
-                                  return GroupChatList(
-                                    groupId: widget.chatId,
-                                    currentUser: widget.currentUser,
-                                    groupMembers: groupMembers,
-                                    onMessageLongPressed: _showMessageActions,
-                                    replyingTo: replyingTo,
-                                    onCancelReply: _onCancelReply,
-                                  );
-                                },
-                              ),
-                            ),
-                          ),
-                          Container(
-                            color: Colors.black.withOpacity(0.5),
-                            child: RepaintBoundary(
-                              child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
-                                valueListenable: _replyingToNotifier,
-                                builder: (context, replyingTo, _) {
-                                  return TypingArea(
-                                    onSendMessage: sendMessage,
-                                    onSendFile: sendFile,
-                                    onSendAudio: sendAudio,
-                                    isGroup: true,
-                                    accentColor: widget.accentColor,
-                                    replyingTo: replyingTo,
-                                    currentUser: widget.currentUser,
-                                    otherUser: groupMembers.isNotEmpty
-                                        ? groupMembers[0]
-                                        : {'id': 'xyz456', 'username': 'Group'},
-                                    onCancelReply: _onCancelReply,
-                                  );
-                                },
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+            // base gradient
+            Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.redAccent, Colors.blueAccent],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-              ],
+              ),
+            ),
+
+            // second gradient layer
+            Container(
+              decoration: BoxDecoration(
+                gradient: RadialGradient(
+                  center: const Alignment(-0.1, -0.4),
+                  radius: 1.2,
+                  colors: [widget.accentColor.withValues(alpha: 0.4), Colors.black],
+                  stops: const [0.0, 0.6],
+                ),
+              ),
+            ),
+
+            // Foreground content placed under appbar
+            Positioned.fill(
+              top: kToolbarHeight + MediaQuery.of(context).padding.top,
+              child: ValueListenableBuilder<String?>(
+                valueListenable: _backgroundUrlNotifier,
+                builder: (context, backgroundUrl, _) {
+                  return _GroupBackground(
+                    backgroundUrl: backgroundUrl,
+                    accentColor: widget.accentColor,
+                    groupMembersNotifier: _groupMembersNotifier,
+                    groupDataNotifier: _groupDataNotifier,
+                    replyingToNotifier: _replyingToNotifier,
+                    keyboardHeightNotifier: _keyboardHeightNotifier,
+                    chatId: widget.chatId,
+                    currentUser: widget.currentUser,
+                    onShowMessageActions: _showMessageActions,
+                    onSendMessage: sendMessage,
+                    onSendFile: sendFile,
+                    onSendAudio: sendAudio,
+                    onCancelReply: _onCancelReply,
+                    accentColorWidget: widget.accentColor,
+                  );
+                },
+              ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// ---------------------------
+/// Helper widgets below
+/// ---------------------------
+
+class _GroupBackground extends StatelessWidget {
+  final String? backgroundUrl;
+  final Color accentColor;
+  final ValueNotifier<List<Map<String, dynamic>>> groupMembersNotifier;
+  final ValueNotifier<Map<String, dynamic>?> groupDataNotifier;
+  final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
+  final ValueNotifier<double> keyboardHeightNotifier;
+  final String chatId;
+  final Map<String, dynamic> currentUser;
+  final void Function(QueryDocumentSnapshot<Object?>, bool, GlobalKey) onShowMessageActions;
+  final void Function(String) onSendMessage;
+  final void Function(File) onSendFile;
+  final void Function(File) onSendAudio;
+  final VoidCallback onCancelReply;
+  final Color accentColorWidget;
+
+  const _GroupBackground({
+    required this.backgroundUrl,
+    required this.accentColor,
+    required this.groupMembersNotifier,
+    required this.groupDataNotifier,
+    required this.replyingToNotifier,
+    required this.keyboardHeightNotifier,
+    required this.chatId,
+    required this.currentUser,
+    required this.onShowMessageActions,
+    required this.onSendMessage,
+    required this.onSendFile,
+    required this.onSendAudio,
+    required this.onCancelReply,
+    required this.accentColorWidget,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // keep background in RepaintBoundary so it doesn't repaint on list scroll
+    return Container(
+      decoration: backgroundUrl != null
+          ? BoxDecoration(
+              image: DecorationImage(
+                image: NetworkImage(backgroundUrl!, scale: 1.5),
+                fit: BoxFit.cover,
+                onError: (exception, stackTrace) => debugPrint('Background image error: $exception'),
+              ),
+            )
+          : null,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: RadialGradient(
+                center: Alignment.center,
+                radius: 1.6,
+                colors: [
+                  accentColor.withValues(alpha: 0.2),
+                  Colors.transparent,
+                ],
+                stops: const [0.0, 1.0],
+              ),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: accentColor.withValues(alpha: 0.1),
+              ),
+            ),
+            child: Column(
+              children: [
+                // Messages area and typing area are isolated into small widgets
+                Expanded(
+                  child: _GroupMessagesWrapper(
+                    groupId: chatId,
+                    currentUser: currentUser,
+                    groupMembersNotifier: groupMembersNotifier,
+                    replyingToNotifier: replyingToNotifier,
+                    onMessageLongPressed: onShowMessageActions,
+                    onCancelReply: onCancelReply,
+                  ),
+                ),
+                Container(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  child: _GroupTypingAreaWrapper(
+                    replyingToNotifier: replyingToNotifier,
+                    keyboardHeightNotifier: keyboardHeightNotifier,
+                    onSendMessage: onSendMessage,
+                    onSendFile: onSendFile,
+                    onSendAudio: onSendAudio,
+                    accentColor: accentColorWidget,
+                    currentUser: currentUser,
+                    groupMembersNotifier: groupMembersNotifier,
+                    onCancelReply: onCancelReply,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GroupMessagesWrapper extends StatelessWidget {
+  final String groupId;
+  final Map<String, dynamic> currentUser;
+  final ValueNotifier<List<Map<String, dynamic>>> groupMembersNotifier;
+  final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
+  final void Function(QueryDocumentSnapshot<Object?>, bool, GlobalKey) onMessageLongPressed;
+  final VoidCallback onCancelReply;
+
+  const _GroupMessagesWrapper({
+    required this.groupId,
+    required this.currentUser,
+    required this.groupMembersNotifier,
+    required this.replyingToNotifier,
+    required this.onMessageLongPressed,
+    required this.onCancelReply,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // RepaintBoundary so background repaints don't affect the list
+    return RepaintBoundary(
+      child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
+        valueListenable: replyingToNotifier,
+        builder: (context, replyingTo, _) {
+          return ValueListenableBuilder<List<Map<String, dynamic>>>(
+            valueListenable: groupMembersNotifier,
+            builder: (context, groupMembers, __) {
+              return GroupChatList(
+                groupId: groupId,
+                currentUser: currentUser,
+                groupMembers: groupMembers,
+                onMessageLongPressed: onMessageLongPressed,
+                replyingTo: replyingTo,
+                onCancelReply: onCancelReply,
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _GroupTypingAreaWrapper extends StatelessWidget {
+  final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
+  final ValueNotifier<double> keyboardHeightNotifier;
+  final void Function(String) onSendMessage;
+  final void Function(File) onSendFile;
+  final void Function(File) onSendAudio;
+  final VoidCallback onCancelReply;
+  final Color accentColor;
+  final Map<String, dynamic> currentUser;
+  final ValueNotifier<List<Map<String, dynamic>>> groupMembersNotifier;
+
+  const _GroupTypingAreaWrapper({
+    required this.replyingToNotifier,
+    required this.keyboardHeightNotifier,
+    required this.onSendMessage,
+    required this.onSendFile,
+    required this.onSendAudio,
+    required this.onCancelReply,
+    required this.accentColor,
+    required this.currentUser,
+    required this.groupMembersNotifier,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
+      valueListenable: replyingToNotifier,
+      builder: (context, replyingTo, _) {
+        return ValueListenableBuilder<double>(
+          valueListenable: keyboardHeightNotifier,
+          builder: (context, kbHeight, __) {
+            return Padding(
+              padding: EdgeInsets.only(bottom: kbHeight),
+              child: RepaintBoundary(
+                child: ValueListenableBuilder<List<Map<String, dynamic>>>(
+                  valueListenable: groupMembersNotifier,
+                  builder: (context, groupMembers, ___) {
+                    final otherUser = groupMembers.isNotEmpty
+                        ? groupMembers[0]
+                        : {'id': 'xyz456', 'username': 'Group'};
+                    return TypingArea(
+                      onSendMessage: onSendMessage,
+                      onSendFile: onSendFile,
+                      onSendAudio: onSendAudio,
+                      isGroup: true,
+                      accentColor: accentColor,
+                      replyingTo: replyingTo,
+                      currentUser: currentUser,
+                      otherUser: otherUser,
+                      onCancelReply: onCancelReply,
+                    );
+                  },
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }
