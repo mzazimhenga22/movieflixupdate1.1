@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 import 'package:logger/logger.dart';
 import 'dart:io';
+import 'dart:async';
 import 'package:path_provider/path_provider.dart';
 import 'package:universal_html/html.dart' as html;
 
@@ -81,14 +82,16 @@ class StreamingService {
       }
 
       final decoded = Map<String, dynamic>.from(decodedRaw);
-      dynamic raw = decoded['streams'] ?? (decoded.containsKey('stream') ? [decoded['stream']] : null);
+      dynamic raw = decoded['streams'] ??
+          (decoded.containsKey('stream') ? [decoded['stream']] : null);
       if (raw == null) {
         _logger.e('No streams found: $decoded');
         throw StreamingNotAvailableException('No streaming links available.');
       }
 
       final streams = List<Map<String, dynamic>>.from(raw);
-      if (streams.isEmpty) throw StreamingNotAvailableException('No streams available.');
+      if (streams.isEmpty)
+        throw StreamingNotAvailableException('No streams available.');
 
       Map<String, dynamic> selectedStream;
 
@@ -109,7 +112,9 @@ class StreamingService {
       String subtitleUrl = '';
 
       final playlistEncoded = selectedStream['playlist'] as String?;
-      if (playlistEncoded != null && playlistEncoded.startsWith('data:application/vnd.apple.mpegurl;base64,')) {
+      if (playlistEncoded != null &&
+          playlistEncoded
+              .startsWith('data:application/vnd.apple.mpegurl;base64,')) {
         final base64Part = playlistEncoded.split(',')[1];
         playlist = utf8.decode(base64Decode(base64Part));
 
@@ -118,7 +123,8 @@ class StreamingService {
           final blob = html.Blob([bytes], 'application/vnd.apple.mpegurl');
           streamUrl = html.Url.createObjectUrlFromBlob(blob);
         } else {
-          final file = File('${(await getTemporaryDirectory()).path}/$tmdbId-playlist.m3u8');
+          final file = File(
+              '${(await getTemporaryDirectory()).path}/$tmdbId-playlist.m3u8');
           await file.writeAsString(playlist);
           streamUrl = file.path;
         }
@@ -132,7 +138,8 @@ class StreamingService {
         if (streamUrl.endsWith('.m3u8') && forDownload && !kIsWeb) {
           final playlistResponse = await http.get(Uri.parse(streamUrl));
           if (playlistResponse.statusCode == 200) {
-            final file = File('${(await getTemporaryDirectory()).path}/$tmdbId-playlist.m3u8');
+            final file = File(
+                '${(await getTemporaryDirectory()).path}/$tmdbId-playlist.m3u8');
             await file.writeAsString(playlistResponse.body);
             streamUrl = file.path;
           }
@@ -155,7 +162,8 @@ class StreamingService {
               final srtContent = utf8.decode(subtitleResponse.bodyBytes);
               final vttContent = _convertSrtToVtt(srtContent);
 
-              final vttFile = File('${(await getTemporaryDirectory()).path}/$tmdbId-subtitles.vtt');
+              final vttFile = File(
+                  '${(await getTemporaryDirectory()).path}/$tmdbId-subtitles.vtt');
               await vttFile.writeAsString(vttContent);
 
               subtitleUrl = vttFile.path;
@@ -318,7 +326,9 @@ class OfflineDownloader {
       }
 
       final iosink = outFile.openWrite(mode: FileMode.append);
-      final totalBytes = streamed.contentLength != null ? (existing + streamed.contentLength!) : null;
+      final totalBytes = streamed.contentLength != null
+          ? (existing + streamed.contentLength!)
+          : null;
       int downloaded = existing;
       final completer = Completer<String>();
       streamed.stream.listen((chunk) async {
@@ -365,7 +375,8 @@ class OfflineDownloader {
     final client = http.Client();
     try {
       final resp = await client.get(baseUri);
-      if (resp.statusCode != 200) throw Exception('Playlist download failed: ${resp.statusCode}');
+      if (resp.statusCode != 200)
+        throw Exception('Playlist download failed: ${resp.statusCode}');
       String playlist = resp.body.replaceAll('\r\n', '\n');
 
       // Master playlist detection and variant selection
@@ -379,7 +390,8 @@ class OfflineDownloader {
             while (j < lines.length && lines[j].trim().isEmpty) j++;
             if (j < lines.length) {
               final candidate = lines[j].trim();
-              if (preferredResolution != null && l.contains(preferredResolution)) {
+              if (preferredResolution != null &&
+                  l.contains(preferredResolution)) {
                 pickedVariant = candidate;
                 break;
               }
@@ -387,10 +399,13 @@ class OfflineDownloader {
             }
           }
         }
-        if (pickedVariant == null) throw Exception('No variant streams found in master playlist.');
+        if (pickedVariant == null)
+          throw Exception('No variant streams found in master playlist.');
         final variantUrl = _resolveUri(baseUri, pickedVariant);
         final vresp = await client.get(Uri.parse(variantUrl));
-        if (vresp.statusCode != 200) throw Exception('Variant playlist download failed: ${vresp.statusCode}');
+        if (vresp.statusCode != 200)
+          throw Exception(
+              'Variant playlist download failed: ${vresp.statusCode}');
         playlist = vresp.body.replaceAll('\r\n', '\n');
       }
 
@@ -421,7 +436,9 @@ class OfflineDownloader {
           final attrs = _parseAttributes(kl.substring('#EXT-X-KEY:'.length));
           final method = attrs['METHOD'];
           final uriRaw = attrs['URI']?.replaceAll('"', '');
-          if (method != null && method.toUpperCase() == 'AES-128' && uriRaw != null) {
+          if (method != null &&
+              method.toUpperCase() == 'AES-128' &&
+              uriRaw != null) {
             final keyUri = _resolveUri(baseUri, uriRaw);
             uniqueKeyUris.add(keyUri);
           }
@@ -431,7 +448,8 @@ class OfflineDownloader {
       final keyCache = <String, Uint8List>{};
       for (var keyUri in uniqueKeyUris) {
         final kresp = await client.get(Uri.parse(keyUri));
-        if (kresp.statusCode != 200) throw Exception('Failed to download key: ${kresp.statusCode}');
+        if (kresp.statusCode != 200)
+          throw Exception('Failed to download key: ${kresp.statusCode}');
         keyCache[keyUri] = Uint8List.fromList(kresp.bodyBytes);
       }
 
@@ -464,19 +482,25 @@ class OfflineDownloader {
             }
 
             final r = await client.get(segUri);
-            if (r.statusCode != 200) throw Exception('Failed to download segment ${seg.url}: ${r.statusCode}');
+            if (r.statusCode != 200)
+              throw Exception(
+                  'Failed to download segment ${seg.url}: ${r.statusCode}');
             Uint8List data = Uint8List.fromList(r.bodyBytes);
 
             // Decrypt if AES-128 key present for this segment
             if (seg.keyLine != null) {
-              final attrs = _parseAttributes(seg.keyLine!.substring('#EXT-X-KEY:'.length));
+              final attrs = _parseAttributes(
+                  seg.keyLine!.substring('#EXT-X-KEY:'.length));
               final method = attrs['METHOD'];
               final uriRaw = attrs['URI']?.replaceAll('"', '');
               final ivRaw = attrs['IV']; // optional
-              if (method != null && method.toUpperCase() == 'AES-128' && uriRaw != null) {
+              if (method != null &&
+                  method.toUpperCase() == 'AES-128' &&
+                  uriRaw != null) {
                 final keyUri = _resolveUri(baseUri, uriRaw);
                 final key = keyCache[keyUri];
-                if (key == null) throw Exception('Key missing for AES-128 segment');
+                if (key == null)
+                  throw Exception('Key missing for AES-128 segment');
                 Uint8List iv;
                 if (ivRaw != null) {
                   iv = _hexToBytes(ivRaw.replaceFirst('0x', ''));
@@ -532,7 +556,8 @@ class OfflineDownloader {
             final segUri = Uri.parse(seg.url);
             final filename = p.basename(segUri.path);
             final segFile = File(p.join(outDir.path, filename));
-            if (!await segFile.exists()) throw Exception('Segment missing: ${segFile.path}');
+            if (!await segFile.exists())
+              throw Exception('Segment missing: ${segFile.path}');
             final bytes = await segFile.readAsBytes();
             raf.writeFromSync(bytes);
           }
@@ -557,8 +582,10 @@ class OfflineDownloader {
   // -------------------------
   static String _resolveUri(Uri playlistUri, String line) {
     final trimmed = line.trim();
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
-    if (trimmed.startsWith('/')) return '${playlistUri.scheme}://${playlistUri.authority}$trimmed';
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://'))
+      return trimmed;
+    if (trimmed.startsWith('/'))
+      return '${playlistUri.scheme}://${playlistUri.authority}$trimmed';
     return playlistUri.resolve(trimmed).toString();
   }
 
@@ -568,7 +595,8 @@ class OfflineDownloader {
     for (final m in parts) {
       final key = m.group(1)!;
       var value = m.group(2)!;
-      if (value.startsWith('"') && value.endsWith('"')) value = value.substring(1, value.length - 1);
+      if (value.startsWith('"') && value.endsWith('"'))
+        value = value.substring(1, value.length - 1);
       map[key] = value;
     }
     return map;
@@ -590,7 +618,8 @@ class OfflineDownloader {
     return iv;
   }
 
-  static Uint8List _aes128CbcDecrypt(Uint8List data, Uint8List key, Uint8List iv) {
+  static Uint8List _aes128CbcDecrypt(
+      Uint8List data, Uint8List key, Uint8List iv) {
     final params = ParametersWithIV(KeyParameter(key), iv);
     final cipher = CBCBlockCipher(AESEngine())..init(false, params);
 
@@ -601,7 +630,9 @@ class OfflineDownloader {
     final output = Uint8List(blockSize);
 
     while (offset < data.length) {
-      final inLen = ((offset + blockSize) <= data.length) ? blockSize : data.length - offset;
+      final inLen = ((offset + blockSize) <= data.length)
+          ? blockSize
+          : data.length - offset;
       input.fillRange(0, blockSize, 0);
       input.setRange(0, inLen, data, offset);
       cipher.processBlock(input, 0, output, 0);
@@ -633,6 +664,7 @@ class _AsyncSemaphore {
     _waiters.add(c);
     return c.future;
   }
+
   void release() {
     if (_waiters.isNotEmpty) {
       final c = _waiters.removeAt(0);
@@ -642,4 +674,3 @@ class _AsyncSemaphore {
     }
   }
 }
-

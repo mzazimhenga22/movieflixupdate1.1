@@ -45,6 +45,12 @@ class ChatInfo {
 
   factory ChatInfo.fromCache(Map<String, dynamic> item) {
     try {
+      // validate docId exists and is a non-empty string
+      final docId = (item['docId'] as String?) ?? '';
+      if (docId.isEmpty) {
+        throw FormatException('cached entry missing docId');
+      }
+
       // Convert integer timestamps back to DateTime-friendly values remain ints,
       // callers convert them via _parseTimestamp.
       final docData = Map<String, dynamic>.from(item['docData'] as Map? ?? {});
@@ -53,7 +59,7 @@ class ChatInfo {
           : null;
 
       return ChatInfo(
-        docId: item['docId'] as String? ?? '',
+        docId: docId,
         docData: docData,
         unreadCount:
             (item['unreadCount'] is int) ? item['unreadCount'] as int : 0,
@@ -63,8 +69,8 @@ class ChatInfo {
         lastMessageData: lastMessageData,
         snapshot: null,
       );
-    } catch (e) {
-      debugPrint('Error parsing cached ChatInfo: $e');
+    } catch (e, st) {
+      debugPrint('Error parsing cached ChatInfo: $e\n$st');
       return ChatInfo(
         docId: '',
         docData: {},
@@ -148,24 +154,42 @@ class MessagesScreenState extends State<MessagesScreen>
     return DateTime.fromMillisecondsSinceEpoch(0);
   }
 
-  /// Recursively convert Timestamp instances in a Map to ints (msEpoch) so we can JSON encode safely.
+  /// Sanitize a value so it's JSON-serializable for caching.
+  dynamic _sanitizeForCache(dynamic value) {
+    if (value == null) return null;
+    if (value is Timestamp) return value.millisecondsSinceEpoch;
+    if (value is DateTime) return value.millisecondsSinceEpoch;
+    if (value is num || value is String || value is bool) return value;
+    if (value is GeoPoint) {
+      return {'__geo__': true, 'lat': value.latitude, 'lng': value.longitude};
+    }
+    // DocumentReference can be represented by its path
+    if (value is DocumentReference) {
+      return {'__ref__': value.path};
+    }
+    if (value is Map) {
+      final out = <String, dynamic>{};
+      (value as Map).forEach((k, v) {
+        out[k.toString()] = _sanitizeForCache(v);
+      });
+      return out;
+    }
+    if (value is List) {
+      return value.map((v) => _sanitizeForCache(v)).toList();
+    }
+    // fallback - stringify unknown types so jsonEncode won't crash
+    try {
+      return value.toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Recursively convert Timestamp instances and other Firestore types in a Map to JSON-serializable values.
   Map<String, dynamic> _convertTimestampsForCache(Map<String, dynamic> map) {
     final out = <String, dynamic>{};
     map.forEach((k, v) {
-      if (v is Timestamp) {
-        out[k] = v.millisecondsSinceEpoch;
-      } else if (v is Map) {
-        out[k] = _convertTimestampsForCache(Map<String, dynamic>.from(v));
-      } else if (v is List) {
-        out[k] = v.map((item) {
-          if (item is Timestamp) return item.millisecondsSinceEpoch;
-          if (item is Map)
-            return _convertTimestampsForCache(Map<String, dynamic>.from(item));
-          return item;
-        }).toList();
-      } else {
-        out[k] = v;
-      }
+      out[k] = _sanitizeForCache(v);
     });
     return out;
   }
@@ -176,14 +200,32 @@ class MessagesScreenState extends State<MessagesScreen>
       final cachedJson = prefs.getString('chats_${widget.currentUser['id']}');
       if (cachedJson == null) return;
 
-      final List<dynamic> list = jsonDecode(cachedJson);
+      final decoded = jsonDecode(cachedJson);
+      if (decoded is! List) {
+        debugPrint('[loadCachedChats] cached payload is not a List');
+        return;
+      }
+      final List<dynamic> list = decoded;
       for (var item in list) {
-        final chat = ChatInfo.fromCache(Map<String, dynamic>.from(item as Map));
-        _cachedChats[chat.docId] = chat;
+        try {
+          if (item is! Map) {
+            debugPrint('[loadCachedChats] skipped non-map cached item');
+            continue;
+          }
+          final chat = ChatInfo.fromCache(Map<String, dynamic>.from(item as Map));
+          if (chat.docId.isEmpty) {
+            debugPrint('[loadCachedChats] skipped invalid cached chat entry (empty docId)');
+            continue;
+          }
+          _cachedChats[chat.docId] = chat;
+        } catch (e, st) {
+          debugPrint('[loadCachedChats] failed parsing one cached item: $e\n$st');
+        }
       }
       if (mounted) setState(() {}); // initial render with cache
-    } catch (e) {
-      debugPrint('Error loading cached chats: $e');
+      debugPrint('[loadCachedChats] loaded ${_cachedChats.length} cached chats');
+    } catch (e, st) {
+      debugPrint('Error loading cached chats: $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Failed to load cached chats')),
@@ -219,10 +261,18 @@ class MessagesScreenState extends State<MessagesScreen>
         };
       }).toList();
 
-      await prefs.setString(
-          'chats_${widget.currentUser['id']}', jsonEncode(toCache));
-    } catch (e) {
-      debugPrint('Error caching chats: $e');
+      final encoded = jsonEncode(toCache);
+      debugPrint('[cacheChats] serialised ${toCache.length} chats, size=${encoded.length} bytes');
+
+      // safety guard — warn if cache is getting large
+      if (encoded.length > 500000) {
+        debugPrint('[cacheChats] WARNING: cache size > 500KB; consider using Hive/sqflite or trimming stored fields');
+      }
+
+      await prefs.setString('chats_${widget.currentUser['id']}', encoded);
+      debugPrint('[cacheChats] saved cache for user ${widget.currentUser['id']}');
+    } catch (e, st) {
+      debugPrint('Error caching chats: $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Failed to cache chats')),
@@ -334,8 +384,7 @@ class MessagesScreenState extends State<MessagesScreen>
 
         Map<String, dynamic>? lastMessageData;
         final msgsSnap = lastMessagesSnapshots[i];
-        if (msgsSnap.docs.isNotEmpty)
-          lastMessageData = msgsSnap.docs.first.data();
+        if (msgsSnap.docs.isNotEmpty) lastMessageData = msgsSnap.docs.first.data();
 
         // Prefer doc metadata for unreadCount, otherwise default to 0
         int unreadCount = 0;
@@ -996,8 +1045,7 @@ class MessagesScreenState extends State<MessagesScreen>
                                   }
 
                                   final otherUser = chatInfo.otherUser;
-                                  if (otherUser == null)
-                                    return const SizedBox();
+                                  if (otherUser == null) return const SizedBox();
 
                                   return ChatTile(
                                     isGroup: false,
