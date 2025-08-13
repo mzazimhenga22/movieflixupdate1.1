@@ -2,43 +2,109 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'dart:ui';
+import 'package:cached_network_image/cached_network_image.dart';
 
-// Simple in-memory cache for user data
+// ---------- Small helper to avoid deprecated withOpacity calls ----------
+Color _withOpacity(Color color, double opacity) =>
+    Color.fromARGB((opacity * 255).round(), color.red, color.green, color.blue);
+
+// ---------- Simple in-memory cache for user data (fallback/preload) ----------
 class UserCache {
   static final Map<String, Map<String, dynamic>> _cache = {};
 
+  /// Try to return cached user, otherwise fetch from Firestore and cache.
   static Future<Map<String, dynamic>?> getUser(String userId) async {
-    if (_cache.containsKey(userId)) {
-      return _cache[userId];
-    }
+    if (_cache.containsKey(userId)) return _cache[userId];
     try {
       final userDoc = await FirebaseFirestore.instance
           .collection('users')
           .doc(userId)
           .get()
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 6));
       if (userDoc.exists) {
-        final userData = userDoc.data()! as Map<String, dynamic>;
+        final userData = Map<String, dynamic>.from(userDoc.data()! as Map);
         userData['id'] = userDoc.id;
         _cache[userId] = userData;
         return userData;
       }
     } catch (e) {
-      debugPrint('Error fetching user $userId: $e');
+      debugPrint('UserCache error: $e');
     }
     return null;
   }
 
-  static void clear() {
-    _cache.clear();
+  static void put(String id, Map<String, dynamic> user) => _cache[id] = user;
+  static void clear() => _cache.clear();
+}
+
+// ---------- Shared audio player service (singleton) ----------
+class SharedAudioService extends ChangeNotifier {
+  SharedAudioService._internal() {
+    _player.positionStream.listen((p) {
+      position = p;
+      notifyListeners();
+    });
+    _player.durationStream.listen((d) {
+      duration = d ?? Duration.zero;
+      notifyListeners();
+    });
+    _player.playerStateStream.listen((state) {
+      isPlaying = state.playing;
+      notifyListeners();
+    });
+  }
+
+  static final SharedAudioService instance = SharedAudioService._internal();
+
+  final AudioPlayer _player = AudioPlayer();
+  String? _currentUrl;
+  Duration position = Duration.zero;
+  Duration duration = Duration.zero;
+  bool isPlaying = false;
+
+  Future<void> play(String url) async {
+    try {
+      if (_currentUrl != url) {
+        await _player.stop();
+        _currentUrl = url;
+        await _player.setUrl(url);
+      }
+      await _player.play();
+    } catch (e) {
+      debugPrint('SharedAudioService.play error: $e');
+    }
+  }
+
+  Future<void> pause() async {
+    try {
+      await _player.pause();
+    } catch (e) {
+      debugPrint('SharedAudioService.pause error: $e');
+    }
+  }
+
+  Future<void> stop() async {
+    try {
+      await _player.stop();
+    } catch (e) {
+      debugPrint('SharedAudioService.stop error: $e');
+    }
+  }
+
+  bool playingUrl(String url) => _currentUrl == url && isPlaying;
+
+  void disposeService() {
+    _player.dispose();
   }
 }
 
+// ---------- MessageBubble (optimized) ----------
+/// Note: prefer to preload `participants` at chat screen level and pass as prop.
 class MessageBubble extends StatelessWidget {
   final QueryDocumentSnapshot message;
   final Map<String, dynamic> currentUser;
-  final Map<String, dynamic> otherUser; // Used only for 1:1 chats
+  final Map<String, dynamic>? otherUser; // for 1:1 chats (optional)
+  final Map<String, Map<String, dynamic>>? participants; // preloaded users map
   final bool isGroup;
   final bool showSenderName;
   final GlobalKey? bubbleKey;
@@ -47,7 +113,8 @@ class MessageBubble extends StatelessWidget {
   const MessageBubble({
     required this.message,
     required this.currentUser,
-    required this.otherUser,
+    this.otherUser,
+    this.participants,
     this.isGroup = false,
     this.showSenderName = false,
     this.bubbleKey,
@@ -67,6 +134,11 @@ class MessageBubble extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
+    // Precompute formatted timestamp once per build
+    final timestampText = (data['timestamp'] != null)
+        ? DateFormat.jm().format((data['timestamp'] as Timestamp).toDate())
+        : '';
+
     return _MessageContent(
       key: bubbleKey,
       data: data,
@@ -74,15 +146,16 @@ class MessageBubble extends StatelessWidget {
       isGroup: isGroup,
       currentUser: currentUser,
       otherUser: otherUser,
+      participants: participants,
       buildContent: _buildContent,
       accentColor: accentColor,
       reactions: reactions,
       senderId: message['senderId'] as String,
+      timestampText: timestampText,
     );
   }
 
-  Widget _buildContent() {
-    final data = message.data() as Map<String, dynamic>;
+  Widget _buildContent(Map<String, dynamic> data) {
     final content = data['text'] ?? '';
 
     if (data['isCall'] == true) {
@@ -90,47 +163,43 @@ class MessageBubble extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(Icons.call, size: 16, color: accentColor),
-          const SizedBox(width: 4),
-          Text(
-            data['callType'] ?? 'Call',
-            style: TextStyle(color: accentColor),
-          ),
+          const SizedBox(width: 6),
+          Text(data['callType'] ?? 'Call', style: TextStyle(color: accentColor)),
         ],
       );
     } else if (data['voiceUrl'] != null) {
       return VoicePlayer(url: data['voiceUrl'], accentColor: accentColor);
     } else if (data['mediaUrl'] != null) {
-      return Image.network(
-        data['mediaUrl'],
-        cacheWidth: 800,
-        fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) => const Icon(Icons.error),
+      return ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 320),
+        child: CachedNetworkImage(
+          imageUrl: data['mediaUrl'],
+          placeholder: (c, s) => SizedBox(width: 120, height: 80, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
+          errorWidget: (c, s, e) => const Icon(Icons.error),
+          fit: BoxFit.cover,
+        ),
       );
     } else if (data['location'] != null) {
-      return const Text(
-        "📍 Location: shared",
-        style: TextStyle(color: Colors.white),
-      );
+      return const Text('📍 Location: shared', style: TextStyle(color: Colors.white));
     } else {
-      return Text(
-        content,
-        style: const TextStyle(color: Colors.white),
-        softWrap: true,
-      );
+      return Text(content, style: const TextStyle(color: Colors.white), softWrap: true);
     }
   }
 }
 
+// ---------- Internal message content widget (avoids repeated FutureBuilders) ----------
 class _MessageContent extends StatelessWidget {
   final Map<String, dynamic> data;
   final bool isMe;
   final bool isGroup;
   final Map<String, dynamic> currentUser;
-  final Map<String, dynamic> otherUser;
-  final Widget Function() buildContent;
+  final Map<String, dynamic>? otherUser;
+  final Map<String, Map<String, dynamic>>? participants;
+  final Widget Function(Map<String, dynamic>) buildContent;
   final Color accentColor;
   final List<dynamic> reactions;
   final String senderId;
+  final String timestampText;
 
   const _MessageContent({
     super.key,
@@ -139,72 +208,59 @@ class _MessageContent extends StatelessWidget {
     required this.isGroup,
     required this.currentUser,
     required this.otherUser,
+    required this.participants,
     required this.buildContent,
     required this.accentColor,
     required this.reactions,
     required this.senderId,
+    required this.timestampText,
   });
 
   @override
   Widget build(BuildContext context) {
     final crossAlign = isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start;
 
+    // Try to synchronously get user data from preloaded participants or otherUser.
+    Map<String, dynamic>? syncUser;
+    if (!isMe) {
+      if (isGroup) {
+        syncUser = participants != null ? participants![senderId] : null;
+      } else {
+        syncUser = otherUser;
+      }
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Row(
         mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Avatar for non-me messages
           if (!isMe) ...[
-            FutureBuilder<Map<String, dynamic>?>(
-              future: isGroup ? UserCache.getUser(senderId) : Future.value(otherUser),
-              builder: (context, snapshot) {
-                String initial = 'U';
-                ImageProvider? avatar;
-                if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
-                  final user = snapshot.data!;
-                  avatar = user['avatarUrl'] != null ? NetworkImage(user['avatarUrl']) : null;
-                  initial = (user['username'] as String?)?.isNotEmpty == true
-                      ? user['username'][0].toUpperCase()
-                      : 'U';
-                }
-                return CircleAvatar(
-                  radius: 16,
-                  backgroundImage: avatar,
-                  child: avatar == null
-                      ? Text(initial, style: const TextStyle(color: Colors.white))
-                      : null,
-                );
-              },
-            ),
+            // Avatar (sync when possible, fallback to async fetch if not preloaded)
+            _AvatarWidget(syncUser: syncUser, userId: senderId, accentColor: accentColor),
             const SizedBox(width: 8),
           ],
+
+          // Bubble area
           Flexible(
             child: Column(
               crossAxisAlignment: crossAlign,
               children: [
-                // Message bubble with tail at top
                 CustomPaint(
-                  painter: BubbleTailPainter(
-                    isMe: isMe,
-                    accentColor: accentColor,
-                    avatarRadius: 16,
-                    isTopTail: true, // Tail at top
-                  ),
-                  child: IntrinsicWidth(
+                  painter: BubbleTailPainter(isMe: isMe, accentColor: accentColor, avatarRadius: 16, isTopTail: true),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.72),
                     child: Container(
-                      padding: const EdgeInsets.all(12),
+                      padding: const EdgeInsets.all(8),
                       margin: const EdgeInsets.symmetric(vertical: 4),
-                      constraints: BoxConstraints(
-                        maxWidth: MediaQuery.of(context).size.width * 0.7,
-                      ),
                       decoration: BoxDecoration(
                         gradient: LinearGradient(
                           begin: Alignment.topLeft,
                           end: Alignment.bottomRight,
                           colors: isMe
-                              ? [accentColor.withOpacity(0.6), accentColor.withOpacity(0.3)]
-                              : [accentColor.withOpacity(0.4), accentColor.withOpacity(0.2)],
+                              ? [_withOpacity(accentColor, 0.65), _withOpacity(accentColor, 0.35)]
+                              : [_withOpacity(accentColor, 0.45), _withOpacity(accentColor, 0.22)],
                         ),
                         borderRadius: BorderRadius.only(
                           topLeft: isMe ? const Radius.circular(16) : Radius.zero,
@@ -213,176 +269,52 @@ class _MessageContent extends StatelessWidget {
                           bottomRight: const Radius.circular(16),
                         ),
                       ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.only(
-                          topLeft: isMe ? const Radius.circular(16) : Radius.zero,
-                          topRight: isMe ? Radius.zero : const Radius.circular(16),
-                          bottomLeft: const Radius.circular(16),
-                          bottomRight: const Radius.circular(16),
+                      child: Container(
+                        // Keep a single lightweight visual effect without nesting expensive blurs.
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: _withOpacity(accentColor, 0.28)),
+                          borderRadius: BorderRadius.only(
+                            topLeft: isMe ? const Radius.circular(16) : Radius.zero,
+                            topRight: isMe ? Radius.zero : const Radius.circular(16),
+                            bottomLeft: const Radius.circular(16),
+                            bottomRight: const Radius.circular(16),
+                          ),
                         ),
-                        child: BackdropFilter(
-                          filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                          child: Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              border: Border.all(color: accentColor.withOpacity(0.3)),
-                              borderRadius: BorderRadius.only(
-                                topLeft: isMe ? const Radius.circular(16) : Radius.zero,
-                                topRight: isMe ? Radius.zero : const Radius.circular(16),
-                                bottomLeft: const Radius.circular(16),
-                                bottomRight: const Radius.circular(16),
-                              ),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: crossAlign,
+                        child: Column(
+                          crossAxisAlignment: crossAlign,
+                          children: [
+                            // Sender name for group
+                            if (isGroup && !isMe)
+                              _GroupNameWidget(userId: senderId, participants: participants, currentUser: currentUser, accentColor: accentColor),
+
+                            // Forwarded
+                            if (data['forwardedFrom'] != null) _ForwardedWidget(forwardedId: data['forwardedFrom'] as String),
+
+                            // Reply preview
+                            if (data['replyToText'] != null)
+                              _ReplyPreviewWidget(data: data, participants: participants, currentUser: currentUser, accentColor: accentColor),
+
+                            // Actual content
+                            buildContent(data),
+
+                            const SizedBox(height: 6),
+
+                            // Reactions + timestamp
+                            Row(
+                              mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
                               children: [
-                                // Sender name inside bubble for group chats (non-me)
-                                if (isGroup && !isMe)
-                                  FutureBuilder<Map<String, dynamic>?>(
-                                    future: UserCache.getUser(senderId),
-                                    builder: (context, snapshot) {
-                                      String name = 'Loading...';
-                                      if (snapshot.connectionState == ConnectionState.done &&
-                                          snapshot.hasData) {
-                                        name = snapshot.data!['username'] ?? 'Unknown';
-                                      }
-                                      return Padding(
-                                        padding: const EdgeInsets.only(bottom: 8),
-                                        child: Text(
-                                          name,
-                                          style: TextStyle(
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.bold,
-                                            color: accentColor,
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                // Forwarded message
-                                if (data['forwardedFrom'] != null)
-                                  FutureBuilder<Map<String, dynamic>?>(
-                                    future: UserCache.getUser(data['forwardedFrom'] as String),
-                                    builder: (context, snapshot) {
-                                      String forwarderName = 'Unknown';
-                                      if (snapshot.connectionState == ConnectionState.done &&
-                                          snapshot.hasData) {
-                                        forwarderName = snapshot.data!['username'] ?? 'Unknown';
-                                      }
-                                      return Padding(
-                                        padding: const EdgeInsets.only(bottom: 8),
-                                        child: Text(
-                                          'Forwarded from $forwarderName',
-                                          style: const TextStyle(
-                                            fontStyle: FontStyle.italic,
-                                            color: Colors.white70,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                // Reply-to message
-                                if (data['replyToText'] != null)
+                                if (reactions.isNotEmpty)
                                   Container(
-                                    padding: const EdgeInsets.all(10),
-                                    margin: const EdgeInsets.only(bottom: 8),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withOpacity(0.3),
-                                      borderRadius: BorderRadius.circular(10),
-                                    ),
-                                    child: ClipRRect(
-                                      borderRadius: BorderRadius.circular(10),
-                                      child: BackdropFilter(
-                                        filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                          decoration: BoxDecoration(
-                                            border: Border(
-                                              left: BorderSide(
-                                                color: accentColor,
-                                                width: 3,
-                                              ),
-                                            ),
-                                          ),
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              FutureBuilder<Map<String, dynamic>?>(
-                                                future: UserCache.getUser(data['replyToSenderId'] as String),
-                                                builder: (context, snapshot) {
-                                                  String senderName = 'Unknown';
-                                                  if (snapshot.connectionState == ConnectionState.done &&
-                                                      snapshot.hasData) {
-                                                    senderName = snapshot.data!['username'] ?? 'Unknown';
-                                                  } else if (data['replyToSenderId'] == currentUser['id']) {
-                                                    senderName = currentUser['username'] ?? 'You';
-                                                  }
-                                                  return Text(
-                                                    senderName,
-                                                    style: TextStyle(
-                                                      fontWeight: FontWeight.bold,
-                                                      color: accentColor,
-                                                    ),
-                                                  );
-                                                },
-                                              ),
-                                              const SizedBox(height: 4),
-                                              Text(
-                                                data['replyToText'],
-                                                style: const TextStyle(
-                                                  fontStyle: FontStyle.italic,
-                                                  color: Colors.white,
-                                                  fontSize: 13,
-                                                ),
-                                                softWrap: true,
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      ),
-                                    ),
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(color: _withOpacity(Colors.black, 0.18), borderRadius: BorderRadius.circular(12)),
+                                    child: Row(mainAxisSize: MainAxisSize.min, children: reactions.map((r) => Padding(padding: const EdgeInsets.symmetric(horizontal: 2), child: Text(r.toString(), style: const TextStyle(fontSize: 16, color: Colors.white)))).toList()),
                                   ),
-                                // Message content
-                                buildContent(),
-                                const SizedBox(height: 6),
-                                // Reactions and timestamp
-                                Wrap(
-                                  spacing: 4,
-                                  runSpacing: 4,
-                                  alignment: isMe ? WrapAlignment.end : WrapAlignment.start,
-                                  children: [
-                                    if (reactions.isNotEmpty)
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                        decoration: BoxDecoration(
-                                          color: Colors.black.withOpacity(0.3),
-                                          borderRadius: BorderRadius.circular(12),
-                                        ),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: reactions
-                                              .map((reaction) => Padding(
-                                                    padding: const EdgeInsets.symmetric(horizontal: 2),
-                                                    child: Text(
-                                                      reaction,
-                                                      style: const TextStyle(fontSize: 16, color: Colors.white),
-                                                    ),
-                                                  ))
-                                              .toList(),
-                                        ),
-                                      ),
-                                    Text(
-                                      data['timestamp'] != null
-                                          ? DateFormat.jm().format(data['timestamp'].toDate())
-                                          : '',
-                                      style: const TextStyle(fontSize: 10, color: Colors.white70),
-                                    ),
-                                  ],
-                                ),
+                                const SizedBox(width: 8),
+                                Text(timestampText, style: const TextStyle(fontSize: 10, color: Colors.white70)),
                               ],
                             ),
-                          ),
+                          ],
                         ),
                       ),
                     ),
@@ -391,22 +323,14 @@ class _MessageContent extends StatelessWidget {
               ],
             ),
           ),
-          // Avatar for me
+
+          // My avatar on the right
           if (isMe) ...[
             const SizedBox(width: 8),
             CircleAvatar(
               radius: 16,
-              backgroundImage: currentUser['avatarUrl'] != null
-                  ? NetworkImage(currentUser['avatarUrl'])
-                  : null,
-              child: currentUser['avatarUrl'] == null
-                  ? Text(
-                      currentUser['username']?.isNotEmpty == true
-                          ? currentUser['username'][0].toUpperCase()
-                          : 'U',
-                      style: const TextStyle(color: Colors.white),
-                    )
-                  : null,
+              backgroundImage: currentUser['avatarUrl'] != null ? CachedNetworkImageProvider(currentUser['avatarUrl']) : null,
+              child: currentUser['avatarUrl'] == null ? Text((currentUser['username'] ?? 'U')[0].toUpperCase(), style: const TextStyle(color: Colors.white)) : null,
             ),
           ],
         ],
@@ -415,26 +339,145 @@ class _MessageContent extends StatelessWidget {
   }
 }
 
+// ---------- Helper widgets used inside message content ----------
+class _AvatarWidget extends StatelessWidget {
+  final Map<String, dynamic>? syncUser;
+  final String userId;
+  final Color accentColor;
+  const _AvatarWidget({this.syncUser, required this.userId, required this.accentColor});
+
+  @override
+  Widget build(BuildContext context) {
+    if (syncUser != null) {
+      final avatarUrl = syncUser!['avatarUrl'] as String?;
+      final initial = (syncUser!['username'] as String?)?.isNotEmpty == true ? syncUser!['username'][0].toUpperCase() : 'U';
+      return CircleAvatar(
+        radius: 16,
+        backgroundImage: avatarUrl != null ? CachedNetworkImageProvider(avatarUrl) : null,
+        child: avatarUrl == null ? Text(initial, style: const TextStyle(color: Colors.white)) : null,
+      );
+    }
+
+    // Fallback: fetch user asynchronously
+    return FutureBuilder<Map<String, dynamic>?>(
+      future: UserCache.getUser(userId),
+      builder: (context, snapshot) {
+        String initial = 'U';
+        ImageProvider? avatar;
+        if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
+          final user = snapshot.data!;
+          avatar = (user['avatarUrl'] != null) ? CachedNetworkImageProvider(user['avatarUrl']) : null;
+          initial = (user['username'] as String?)?.isNotEmpty == true ? user['username'][0].toUpperCase() : 'U';
+        }
+        return CircleAvatar(radius: 16, backgroundImage: avatar, child: avatar == null ? Text(initial, style: const TextStyle(color: Colors.white)) : null);
+      },
+    );
+  }
+}
+
+class _GroupNameWidget extends StatelessWidget {
+  final String userId;
+  final Map<String, Map<String, dynamic>>? participants;
+  final Map<String, dynamic> currentUser;
+  final Color accentColor;
+  const _GroupNameWidget({required this.userId, required this.participants, required this.currentUser, required this.accentColor});
+
+  @override
+  Widget build(BuildContext context) {
+    final sync = participants != null ? participants![userId] : null;
+    if (sync != null) {
+      final name = sync['username'] ?? 'Unknown';
+      return Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: accentColor)));
+    }
+    return FutureBuilder<Map<String, dynamic>?>(
+      future: UserCache.getUser(userId),
+      builder: (context, snapshot) {
+        String name = 'Loading...';
+        if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) name = snapshot.data!['username'] ?? 'Unknown';
+        return Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: accentColor)));
+      },
+    );
+  }
+}
+
+class _ForwardedWidget extends StatelessWidget {
+  final String forwardedId;
+  const _ForwardedWidget({required this.forwardedId});
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<Map<String, dynamic>?>(
+      future: UserCache.getUser(forwardedId),
+      builder: (context, snapshot) {
+        String forwarderName = 'Unknown';
+        if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) forwarderName = snapshot.data!['username'] ?? 'Unknown';
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Text('Forwarded from $forwarderName', style: const TextStyle(fontStyle: FontStyle.italic, color: Colors.white70, fontSize: 12)),
+        );
+      },
+    );
+  }
+}
+
+class _ReplyPreviewWidget extends StatelessWidget {
+  final Map<String, dynamic> data;
+  final Map<String, Map<String, dynamic>>? participants;
+  final Map<String, dynamic> currentUser;
+  final Color accentColor;
+  const _ReplyPreviewWidget({required this.data, this.participants, required this.currentUser, required this.accentColor});
+
+  @override
+  Widget build(BuildContext context) {
+    final replyToSenderId = data['replyToSenderId'] as String?;
+    final replyToText = data['replyToText'] as String?;
+    if (replyToText == null) {
+      return const SizedBox.shrink();
+    }
+
+    final sync = replyToSenderId != null ? (participants != null ? participants![replyToSenderId] : null) : null;
+
+    return Container(
+      padding: const EdgeInsets.all(8),
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(color: _withOpacity(Colors.black, 0.2), borderRadius: BorderRadius.circular(10)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (replyToSenderId != null) ...[
+          if (sync != null) ...[
+            Text(sync['username'] ?? 'Unknown', style: TextStyle(fontWeight: FontWeight.bold, color: accentColor)),
+          ] else ...[
+            FutureBuilder<Map<String, dynamic>?>(
+              future: UserCache.getUser(replyToSenderId),
+              builder: (c, s) {
+                String senderName = 'Unknown';
+                if (s.connectionState == ConnectionState.done && s.hasData) senderName = s.data!['username'] ?? 'Unknown';
+                else if (replyToSenderId == currentUser['id']) senderName = currentUser['username'] ?? 'You';
+                return Text(senderName, style: TextStyle(fontWeight: FontWeight.bold, color: accentColor));
+              },
+            ),
+          ]
+        ],
+        const SizedBox(height: 4),
+        Text(replyToText, style: const TextStyle(fontStyle: FontStyle.italic, color: Colors.white, fontSize: 13)),
+      ]),
+    );
+  }
+}
+
+// ---------- Bubble tail painter (optimized shouldRepaint) ----------
 class BubbleTailPainter extends CustomPainter {
   final bool isMe;
   final Color accentColor;
   final double avatarRadius;
   final bool isTopTail;
 
-  BubbleTailPainter({
-    required this.isMe,
-    required this.accentColor,
-    required this.avatarRadius,
-    this.isTopTail = false,
-  });
+  BubbleTailPainter({required this.isMe, required this.accentColor, required this.avatarRadius, this.isTopTail = false});
 
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..shader = LinearGradient(
-        colors: isMe
-            ? [accentColor.withOpacity(0.6), accentColor.withOpacity(0.3)]
-            : [accentColor.withOpacity(0.4), accentColor.withOpacity(0.2)],
+        colors: isMe ? [_withOpacity(accentColor, 0.6), _withOpacity(accentColor, 0.3)] : [_withOpacity(accentColor, 0.4), _withOpacity(accentColor, 0.2)],
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
       ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
@@ -444,66 +487,26 @@ class BubbleTailPainter extends CustomPainter {
     if (isMe) {
       if (isTopTail) {
         path.moveTo(size.width, 4);
-        path.quadraticBezierTo(
-          size.width + 8,
-          8,
-          size.width + avatarRadius * 1.5,
-          avatarRadius * 0.5,
-        );
+        path.quadraticBezierTo(size.width + 8, 8, size.width + avatarRadius * 1.5, avatarRadius * 0.5);
         path.lineTo(size.width + avatarRadius * 0.5, avatarRadius * 0.5);
-        path.quadraticBezierTo(
-          size.width + 4,
-          4,
-          size.width,
-          4,
-        );
+        path.quadraticBezierTo(size.width + 4, 4, size.width, 4);
       } else {
         path.moveTo(size.width, size.height - 4);
-        path.quadraticBezierTo(
-          size.width + 8,
-          size.height - 8,
-          size.width + avatarRadius * 1.5,
-          size.height - avatarRadius * 0.5,
-        );
+        path.quadraticBezierTo(size.width + 8, size.height - 8, size.width + avatarRadius * 1.5, size.height - avatarRadius * 0.5);
         path.lineTo(size.width + avatarRadius * 0.5, size.height - avatarRadius * 0.5);
-        path.quadraticBezierTo(
-          size.width + 4,
-          size.height - 4,
-          size.width,
-          size.height - 4,
-        );
+        path.quadraticBezierTo(size.width + 4, size.height - 4, size.width, size.height - 4);
       }
     } else {
       if (isTopTail) {
         path.moveTo(0, 4);
-        path.quadraticBezierTo(
-          -8,
-          8,
-          -avatarRadius * 1.5,
-          avatarRadius * 0.5,
-        );
+        path.quadraticBezierTo(-8, 8, -avatarRadius * 1.5, avatarRadius * 0.5);
         path.lineTo(-avatarRadius * 0.5, avatarRadius * 0.5);
-        path.quadraticBezierTo(
-          -4,
-          4,
-          0,
-          4,
-        );
+        path.quadraticBezierTo(-4, 4, 0, 4);
       } else {
         path.moveTo(0, size.height - 4);
-        path.quadraticBezierTo(
-          -8,
-          size.height - 8,
-          -avatarRadius * 1.5,
-          size.height - avatarRadius * 0.5,
-        );
+        path.quadraticBezierTo(-8, size.height - 8, -avatarRadius * 1.5, size.height - avatarRadius * 0.5);
         path.lineTo(-avatarRadius * 0.5, size.height - avatarRadius * 0.5);
-        path.quadraticBezierTo(
-          -4,
-          size.height - 4,
-          0,
-          size.height - 4,
-        );
+        path.quadraticBezierTo(-4, size.height - 4, 0, size.height - 4);
       }
     }
 
@@ -512,114 +515,53 @@ class BubbleTailPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant BubbleTailPainter oldDelegate) {
+    return oldDelegate.isMe != isMe || oldDelegate.accentColor != accentColor || oldDelegate.avatarRadius != avatarRadius || oldDelegate.isTopTail != isTopTail;
+  }
 }
 
-class VoicePlayer extends StatefulWidget {
+// ---------- Voice player that uses the shared audio service (no per-message player) ----------
+class VoicePlayer extends StatelessWidget {
   final String url;
   final Color accentColor;
 
   const VoicePlayer({required this.url, required this.accentColor, super.key});
 
-  @override
-  State<VoicePlayer> createState() => _VoicePlayerState();
-}
-
-class _VoicePlayerState extends State<VoicePlayer> {
-  final player = AudioPlayer();
-  bool isPlaying = false;
-  Duration duration = Duration.zero;
-  Duration position = Duration.zero;
-
-  @override
-  void initState() {
-    super.initState();
-    _initAudioPlayer();
-  }
-
-  Future<void> _initAudioPlayer() async {
-    try {
-      await player.setUrl(widget.url);
-      player.durationStream.listen((d) {
-        if (mounted) setState(() => duration = d ?? Duration.zero);
-      });
-      player.positionStream.listen((p) {
-        if (mounted) setState(() => position = p);
-      });
-    } catch (e) {
-      debugPrint('Error loading audio: $e');
-    }
-  }
-
-  @override
-  void dispose() {
-    player.dispose();
-    super.dispose();
-  }
-
-  void _toggle() async {
-    try {
-      if (isPlaying) {
-        await player.pause();
-      } else {
-        await player.play();
-      }
-      if (mounted) setState(() => isPlaying = !isPlaying);
-    } catch (e) {
-      debugPrint('Error toggling audio: $e');
-    }
+  String _formatDuration(Duration d) {
+    final minutes = d.inMinutes.toString().padLeft(2, '0');
+    final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
   }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            widget.accentColor.withOpacity(0.4),
-            widget.accentColor.withOpacity(0.2),
-          ],
-        ),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              border: Border.all(color: widget.accentColor.withOpacity(0.3)),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                IconButton(
-                  icon: Icon(
-                    isPlaying ? Icons.pause : Icons.play_arrow,
-                    color: widget.accentColor,
-                  ),
-                  onPressed: _toggle,
-                ),
-                Text(
-                  "Voice message (${_formatDuration(position)} / ${_formatDuration(duration)})",
-                  style: const TextStyle(color: Colors.white),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+    final audio = SharedAudioService.instance;
 
-  String _formatDuration(Duration duration) {
-    final minutes = duration.inMinutes.toString().padLeft(2, '0');
-    final seconds = (duration.inSeconds % 60).toString().padLeft(2, '0');
-    return '$minutes:$seconds';
+    return AnimatedBuilder(
+      animation: audio,
+      builder: (context, _) {
+        final playing = audio.playingUrl(url);
+        final pos = audio.position;
+        final dur = audio.duration;
+
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [_withOpacity(accentColor, 0.4), _withOpacity(accentColor, 0.2)]),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                icon: Icon(playing ? Icons.pause : Icons.play_arrow, color: accentColor),
+                onPressed: () => playing ? audio.pause() : audio.play(url),
+              ),
+              Text('Voice message (${_formatDuration(pos)} / ${_formatDuration(dur)})', style: const TextStyle(color: Colors.white)),
+            ],
+          ),
+        );
+      },
+    );
   }
 }

@@ -617,7 +617,6 @@ class HomeScreenMain extends StatefulWidget {
 
 class HomeScreenMainState extends State<HomeScreenMain>
     with SingleTickerProviderStateMixin, AutomaticKeepAliveClientMixin {
-  int selectedIndex = 0;
   late AnimationController _textAnimationController;
   late Animation<double> _textFadeAnimation;
   final _subHomeScreenKey = GlobalKey<SubHomeScreenState>();
@@ -640,27 +639,6 @@ class HomeScreenMainState extends State<HomeScreenMain>
 
   Future<void> refreshData() async {
     await _subHomeScreenKey.currentState?.refreshData();
-  }
-
-  void onItemTapped(int index) {
-    setState(() => selectedIndex = index);
-    if (index == 1) {
-      Navigator.push(context,
-          MaterialPageRoute(builder: (context) => const CategoriesScreen()));
-    } else if (index == 2) {
-      Navigator.push(context,
-          MaterialPageRoute(builder: (context) => const DownloadsScreen()));
-    } else if (index == 3) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => InteractiveFeaturesScreen(
-            isDarkMode: false,
-            onThemeChanged: (bool newValue) {},
-          ),
-        ),
-      );
-    }
   }
 
   @override
@@ -725,12 +703,7 @@ class HomeScreenMainState extends State<HomeScreenMain>
               );
             },
           ),
-          bottomNavigationBar: BottomNavBar(
-            accentColor: accentColor,
-            selectedIndex: selectedIndex,
-            onItemTapped: onItemTapped,
-            useBlurEffect: true,
-          ),
+          // NOTE: bottomNavigationBar removed so the app will use the one from your main tab screen / common widgets.
         );
       },
     );
@@ -742,6 +715,7 @@ class HomeScreenMainState extends State<HomeScreenMain>
     super.dispose();
   }
 }
+
 
 /// Extracted AppBar actions to reduce rebuilds
 class _AppBarActions extends StatelessWidget {

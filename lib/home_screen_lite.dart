@@ -291,7 +291,7 @@ class _SongOfMoviesCardLite extends StatelessWidget {
   }
 }
 
-/// Lightweight FeaturedMovieCard without video playback but with shadow effect
+/// Improved FeaturedMovieCardLite with modern UI
 class FeaturedMovieCardLite extends StatelessWidget {
   final String imageUrl;
   final String title;
@@ -310,7 +310,7 @@ class FeaturedMovieCardLite extends StatelessWidget {
     this.onTap,
   });
 
-  final Map<int, String> genreMap = const {
+  static const Map<int, String> _genreMap = {
     28: "Action",
     12: "Adventure",
     16: "Animation",
@@ -322,90 +322,173 @@ class FeaturedMovieCardLite extends StatelessWidget {
   };
 
   String getGenresText() {
-    return genres.map((id) => genreMap[id] ?? "Unknown").join(', ');
+    return genres.map((id) => _genreMap[id] ?? "Unknown").join(', ');
+  }
+
+  List<Widget> buildGenreChips(Color accent) {
+    final genreNames =
+        genres.map((id) => _genreMap[id] ?? "Unknown").take(3).toList();
+    return genreNames
+        .map((g) => Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+              margin: const EdgeInsets.only(right: 6),
+              decoration: BoxDecoration(
+                color: accent.withOpacity(0.18),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                g,
+                style: TextStyle(color: Colors.white.withOpacity(0.95), fontSize: 12),
+              ),
+            ))
+        .toList();
   }
 
   @override
   Widget build(BuildContext context) {
     final settings = Provider.of<SettingsProvider>(context, listen: false);
+    final accent = settings.accentColor;
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.5),
-              blurRadius: 10,
-              spreadRadius: 2,
-            ),
-          ],
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: Stack(
-            children: [
-              CachedNetworkImage(
-                imageUrl: imageUrl,
-                height: 320,
-                width: double.infinity,
-                fit: BoxFit.cover,
-                placeholder: (context, url) => Shimmer.fromColors(
-                  baseColor: Colors.grey[800]!,
-                  highlightColor: Colors.grey[600]!,
-                  child: Container(height: 320, color: Colors.grey[800]!),
-                ),
-                errorWidget: (context, url, error) => Container(
-                  height: 320,
-                  color: Colors.grey,
-                  child: const Center(child: Icon(Icons.error, size: 50)),
-                ),
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          height: 320,
+          margin: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.55),
+                blurRadius: 18,
+                offset: const Offset(0, 10),
               ),
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                child: Container(
-                  padding: const EdgeInsets.all(8.0),
-                  color: Colors.black.withOpacity(0.7),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                // Image
+                Hero(
+                  tag: imageUrl,
+                  child: CachedNetworkImage(
+                    imageUrl: imageUrl,
+                    fit: BoxFit.cover,
+                    placeholder: (context, url) => Shimmer.fromColors(
+                      baseColor: Colors.grey[800]!,
+                      highlightColor: Colors.grey[600]!,
+                      child: Container(color: Colors.grey[800]!),
+                    ),
+                    errorWidget: (context, url, error) => Container(
+                      color: Colors.grey,
+                      child: const Center(child: Icon(Icons.error, size: 48)),
+                    ),
+                  ),
+                ),
+
+                // Dark gradient overlay for readability
+                Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [
+                        Colors.black.withOpacity(0.78),
+                        Colors.black.withOpacity(0.45),
+                        Colors.transparent,
+                      ],
+                      stops: const [0.0, 0.45, 0.95],
+                    ),
+                  ),
+                ),
+
+                // Top-left rating badge
+                Positioned(
+                  top: 12,
+                  left: 12,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.45),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: accent.withOpacity(0.4)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.star, size: 16, color: Colors.yellow),
+                        const SizedBox(width: 6),
+                        Text(
+                          rating.toStringAsFixed(1),
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // Center play button overlay
+                Positioned.fill(
+                  child: Align(
+                    alignment: Alignment.center,
+                    child: Container(
+                      width: 68,
+                      height: 68,
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.32),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white24),
+                      ),
+                      child: Icon(Icons.play_arrow, size: 36, color: Colors.white.withOpacity(0.95)),
+                    ),
+                  ),
+                ),
+
+                // Bottom information panel
+                Positioned(
+                  left: 12,
+                  right: 12,
+                  bottom: 12,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // Title
                       Text(
                         title,
                         style: TextStyle(
-                          color: settings.accentColor,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
+                          color: accent,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                          shadows: [
+                            Shadow(blurRadius: 6, color: Colors.black54, offset: const Offset(1, 1)),
+                          ],
                         ),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      Text(
-                        'Release: $releaseDate',
-                        style: const TextStyle(color: Colors.white70, fontSize: 12),
-                      ),
-                      Text(
-                        'Genres: ${getGenresText()}',
-                        style: const TextStyle(color: Colors.white70, fontSize: 12),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      const SizedBox(height: 6),
+
+                      // Small meta row: release date + spacer + genres chips
                       Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
-                          const Icon(Icons.star, color: Colors.yellow, size: 14),
-                          const SizedBox(width: 4),
                           Text(
-                            rating.toStringAsFixed(1),
+                            releaseDate.isNotEmpty ? releaseDate : 'Unknown',
                             style: const TextStyle(color: Colors.white70, fontSize: 12),
                           ),
+                          const Spacer(),
+                          ...buildGenreChips(accent),
                         ],
                       ),
+
+                      const SizedBox(height: 8),
                     ],
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -499,11 +582,12 @@ class FeaturedSliderLiteState extends State<FeaturedSliderLite> {
     try {
       final paletteGenerator = await PaletteGenerator.fromImageProvider(
         NetworkImage(imageUrl),
-        size: const Size(100, 100),
+        size: const Size(200, 200),
         maximumColorCount: 8,
       );
       setState(() {
-        backgroundColor = paletteGenerator.dominantColor?.color ?? Colors.black;
+        backgroundColor =
+            paletteGenerator.dominantColor?.color ?? Colors.black;
         widget.onBackgroundColorChanged?.call(backgroundColor);
       });
     } catch (e) {
@@ -548,22 +632,31 @@ class FeaturedSliderLiteState extends State<FeaturedSliderLite> {
       child: isLoading || featuredContent.isEmpty
           ? buildFeaturedPlaceholder()
           : Padding(
-              padding: const EdgeInsets.all(16.0),
+              padding: const EdgeInsets.symmetric(horizontal: 8.0),
               child: Center(
                 child: SizedBox(
-                  width: screenWidth * 0.9,
+                  width: screenWidth * 0.95,
                   child: FeaturedMovieCardLite(
                     imageUrl: getImageUrl(featuredContent[currentIndex]),
-                    title: (featuredContent[currentIndex]['title'] as String?)?.trim().isNotEmpty == true
+                    title: (featuredContent[currentIndex]['title'] as String?)?.trim().isNotEmpty ==
+                            true
                         ? featuredContent[currentIndex]['title'] as String
-                        : (featuredContent[currentIndex]['name'] as String?)?.trim().isNotEmpty == true
+                        : (featuredContent[currentIndex]['name'] as String?)?.trim().isNotEmpty ==
+                                true
                             ? featuredContent[currentIndex]['name'] as String
                             : 'Featured',
-                    releaseDate: (featuredContent[currentIndex]['release_date'] as String?)?.trim().isNotEmpty == true
-                        ? featuredContent[currentIndex]['release_date'] as String
-                        : (featuredContent[currentIndex]['first_air_date'] as String?)?.trim().isNotEmpty == true
-                            ? featuredContent[currentIndex]['first_air_date'] as String
-                            : 'Unknown',
+                    releaseDate:
+                        (featuredContent[currentIndex]['release_date'] as String?)
+                                    ?.trim()
+                                    .isNotEmpty ==
+                                true
+                            ? featuredContent[currentIndex]['release_date'] as String
+                            : (featuredContent[currentIndex]['first_air_date'] as String?)
+                                        ?.trim()
+                                        .isNotEmpty ==
+                                    true
+                                ? featuredContent[currentIndex]['first_air_date'] as String
+                                : 'Unknown',
                     genres: (featuredContent[currentIndex]['genre_ids'] as List<dynamic>?)
                             ?.map((e) => e as int)
                             .toList() ??

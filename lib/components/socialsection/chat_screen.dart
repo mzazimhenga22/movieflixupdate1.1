@@ -13,7 +13,6 @@ import 'widgets/chat_app_bar.dart';
 import 'widgets/typing_area.dart';
 import 'widgets/advanced_chat_list.dart';
 import 'widgets/message_actions.dart';
-import 'package:movie_app/utils/native_keyboard_bridge.dart';
 import 'forward_message_screen.dart';
 import 'presence_wrapper.dart';
 
@@ -47,16 +46,12 @@ class _ChatScreenState extends State<ChatScreen>
   QueryDocumentSnapshot<Object?>? replyingTo;
   bool isActionOverlayVisible = false;
   late SharedPreferences prefs;
-  final _kbBridge = NativeKeyboardBridge();
 
   // Notifiers used to avoid unnecessary rebuilds of the whole screen:
   final ValueNotifier<String?> _backgroundUrlNotifier =
       ValueNotifier<String?>(null);
   final ValueNotifier<QueryDocumentSnapshot<Object?>?> _replyingToNotifier =
       ValueNotifier<QueryDocumentSnapshot<Object?>?>(null);
-
-  // Keyboard height notifier (no setState called on keyboard changes)
-  final ValueNotifier<double> _keyboardHeightNotifier = ValueNotifier<double>(0);
 
   @override
   bool get wantKeepAlive => true;
@@ -71,22 +66,12 @@ class _ChatScreenState extends State<ChatScreen>
       markChatAsRead(widget.chatId, widget.currentUser['id']);
       _listenForIncomingCalls();
     });
-
-    // Listen to native keyboard bridge, but update only the ValueNotifier
-    _kbBridge.keyboardHeight.addListener(_onKeyboardHeightChanged);
-  }
-
-  void _onKeyboardHeightChanged() {
-    // avoid setState; just update the notifier so only widgets depending on it rebuild
-    _keyboardHeightNotifier.value = _kbBridge.keyboardHeight.value;
   }
 
   @override
   void dispose() {
-    _kbBridge.keyboardHeight.removeListener(_onKeyboardHeightChanged);
     _backgroundUrlNotifier.dispose();
     _replyingToNotifier.dispose();
-    _keyboardHeightNotifier.dispose();
     super.dispose();
   }
 
@@ -516,7 +501,7 @@ class _ChatScreenState extends State<ChatScreen>
         body: Stack(
           children: [
             // Background (isolated so it doesn't rebuild with the chat list)
-            ValueListenableBuilder<String?>(
+            ValueListenableBuilder<String?>(              // <-- kept as before
               valueListenable: _backgroundUrlNotifier,
               builder: (context, backgroundUrl, _) {
                 return _ChatBackground(backgroundUrl: backgroundUrl);
@@ -552,12 +537,12 @@ class _ChatScreenState extends State<ChatScreen>
                             ),
                           ),
 
-                          // Typing area (listens only to reply and keyboard height not whole screen)
+                          // Typing area (let Flutter handle keyboard insets)
                           Container(
                             color: Colors.black.withOpacity(0.5),
                             child: _TypingAreaWrapper(
                               replyingToNotifier: _replyingToNotifier,
-                              keyboardHeightNotifier: _keyboardHeightNotifier,
+                              bottomInset: bottomInset,
                               onSendMessage: sendMessage,
                               onSendFile: sendFile,
                               onSendAudio: sendAudio,
@@ -646,7 +631,7 @@ class _ChatMessagesWrapper extends StatelessWidget {
   Widget build(BuildContext context) {
     // RepaintBoundary prevents expensive background repaints from affecting the list
     return RepaintBoundary(
-      child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
+      child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>( 
         valueListenable: replyingToNotifier,
         builder: (context, replyingTo, _) {
           return AdvancedChatList(
@@ -668,7 +653,7 @@ class _ChatMessagesWrapper extends StatelessWidget {
 
 class _TypingAreaWrapper extends StatelessWidget {
   final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
-  final ValueNotifier<double> keyboardHeightNotifier;
+  final double bottomInset;
   final void Function(String) onSendMessage;
   final void Function(File) onSendFile;
   final void Function(File) onSendAudio;
@@ -679,7 +664,7 @@ class _TypingAreaWrapper extends StatelessWidget {
 
   const _TypingAreaWrapper({
     required this.replyingToNotifier,
-    required this.keyboardHeightNotifier,
+    required this.bottomInset,
     required this.onSendMessage,
     required this.onSendFile,
     required this.onSendAudio,
@@ -695,28 +680,23 @@ class _TypingAreaWrapper extends StatelessWidget {
     return ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
       valueListenable: replyingToNotifier,
       builder: (context, replyingTo, _) {
-        return ValueListenableBuilder<double>(
-          valueListenable: keyboardHeightNotifier,
-          builder: (context, kbHeight, __) {
-            // We use bottom padding equal to kbHeight so typing area can react to keyboard open,
-            // but this only rebuilds the TypingArea section.
-            return Padding(
-              padding: EdgeInsets.only(bottom: kbHeight),
-              child: RepaintBoundary(
-                child: TypingArea(
-                  onSendMessage: onSendMessage,
-                  onSendFile: onSendFile,
-                  onSendAudio: onSendAudio,
-                  accentColor: accentColor,
-                  replyingTo: replyingTo,
-                  isGroup: false,
-                  currentUser: currentUser,
-                  otherUser: otherUser,
-                  onCancelReply: onCancelReply,
-                ),
-              ),
-            );
-          },
+        // We use bottom padding equal to MediaQuery.viewInsetsOf(context).bottom so typing area can react to keyboard open,
+        // but this only rebuilds the TypingArea section.
+        return Padding(
+          padding: EdgeInsets.only(bottom: bottomInset),
+          child: RepaintBoundary(
+            child: TypingArea(
+              onSendMessage: onSendMessage,
+              onSendFile: onSendFile,
+              onSendAudio: onSendAudio,
+              accentColor: accentColor,
+              replyingTo: replyingTo,
+              isGroup: false,
+              currentUser: currentUser,
+              otherUser: otherUser,
+              onCancelReply: onCancelReply,
+            ),
+          ),
         );
       },
     );

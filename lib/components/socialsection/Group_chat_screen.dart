@@ -16,7 +16,6 @@ import 'widgets/message_actions.dart';
 import 'forward_message_screen.dart';
 import 'VideoCallScreen_Group.dart';
 import 'VoiceCallScreen_Group.dart';
-import 'package:movie_app/utils/native_keyboard_bridge.dart';
 import 'presence_wrapper.dart';
 
 class GroupChatScreen extends StatefulWidget {
@@ -49,11 +48,9 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       ValueNotifier<Map<String, dynamic>?>(null);
   final ValueNotifier<QueryDocumentSnapshot<Object?>?> _replyingToNotifier =
       ValueNotifier<QueryDocumentSnapshot<Object?>?>(null);
-  final ValueNotifier<double> _keyboardHeightNotifier = ValueNotifier<double>(0);
 
   bool isActionOverlayVisible = false;
   late SharedPreferences prefs;
-  final _kbBridge = NativeKeyboardBridge();
   Timer? _debounce;
   String? _activeCallId;
 
@@ -70,22 +67,14 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       _loadGroupDataAndListen();
       _listenForIncomingCalls();
     });
-    _kbBridge.keyboardHeight.addListener(_onKeyboardHeightChanged);
-  }
-
-  void _onKeyboardHeightChanged() {
-    // avoid calling setState — update notifier so only typing area rebuilds
-    _keyboardHeightNotifier.value = _kbBridge.keyboardHeight.value;
   }
 
   @override
   void dispose() {
-    _kbBridge.keyboardHeight.removeListener(_onKeyboardHeightChanged);
     _backgroundUrlNotifier.dispose();
     _groupMembersNotifier.dispose();
     _groupDataNotifier.dispose();
     _replyingToNotifier.dispose();
-    _keyboardHeightNotifier.dispose();
     _debounce?.cancel();
     super.dispose();
   }
@@ -645,7 +634,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                     groupMembersNotifier: _groupMembersNotifier,
                     groupDataNotifier: _groupDataNotifier,
                     replyingToNotifier: _replyingToNotifier,
-                    keyboardHeightNotifier: _keyboardHeightNotifier,
+                    bottomInset: bottomInset,
                     chatId: widget.chatId,
                     currentUser: widget.currentUser,
                     onShowMessageActions: _showMessageActions,
@@ -675,7 +664,7 @@ class _GroupBackground extends StatelessWidget {
   final ValueNotifier<List<Map<String, dynamic>>> groupMembersNotifier;
   final ValueNotifier<Map<String, dynamic>?> groupDataNotifier;
   final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
-  final ValueNotifier<double> keyboardHeightNotifier;
+  final double bottomInset;
   final String chatId;
   final Map<String, dynamic> currentUser;
   final void Function(QueryDocumentSnapshot<Object?>, bool, GlobalKey) onShowMessageActions;
@@ -691,7 +680,7 @@ class _GroupBackground extends StatelessWidget {
     required this.groupMembersNotifier,
     required this.groupDataNotifier,
     required this.replyingToNotifier,
-    required this.keyboardHeightNotifier,
+    required this.bottomInset,
     required this.chatId,
     required this.currentUser,
     required this.onShowMessageActions,
@@ -752,7 +741,7 @@ class _GroupBackground extends StatelessWidget {
                   color: Colors.black.withValues(alpha: 0.5),
                   child: _GroupTypingAreaWrapper(
                     replyingToNotifier: replyingToNotifier,
-                    keyboardHeightNotifier: keyboardHeightNotifier,
+                    bottomInset: bottomInset,
                     onSendMessage: onSendMessage,
                     onSendFile: onSendFile,
                     onSendAudio: onSendAudio,
@@ -816,7 +805,7 @@ class _GroupMessagesWrapper extends StatelessWidget {
 
 class _GroupTypingAreaWrapper extends StatelessWidget {
   final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
-  final ValueNotifier<double> keyboardHeightNotifier;
+  final double bottomInset;
   final void Function(String) onSendMessage;
   final void Function(File) onSendFile;
   final void Function(File) onSendAudio;
@@ -827,7 +816,7 @@ class _GroupTypingAreaWrapper extends StatelessWidget {
 
   const _GroupTypingAreaWrapper({
     required this.replyingToNotifier,
-    required this.keyboardHeightNotifier,
+    required this.bottomInset,
     required this.onSendMessage,
     required this.onSendFile,
     required this.onSendAudio,
@@ -842,34 +831,29 @@ class _GroupTypingAreaWrapper extends StatelessWidget {
     return ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
       valueListenable: replyingToNotifier,
       builder: (context, replyingTo, _) {
-        return ValueListenableBuilder<double>(
-          valueListenable: keyboardHeightNotifier,
-          builder: (context, kbHeight, __) {
-            return Padding(
-              padding: EdgeInsets.only(bottom: kbHeight),
-              child: RepaintBoundary(
-                child: ValueListenableBuilder<List<Map<String, dynamic>>>(
-                  valueListenable: groupMembersNotifier,
-                  builder: (context, groupMembers, ___) {
-                    final otherUser = groupMembers.isNotEmpty
-                        ? groupMembers[0]
-                        : {'id': 'xyz456', 'username': 'Group'};
-                    return TypingArea(
-                      onSendMessage: onSendMessage,
-                      onSendFile: onSendFile,
-                      onSendAudio: onSendAudio,
-                      isGroup: true,
-                      accentColor: accentColor,
-                      replyingTo: replyingTo,
-                      currentUser: currentUser,
-                      otherUser: otherUser,
-                      onCancelReply: onCancelReply,
-                    );
-                  },
-                ),
-              ),
-            );
-          },
+        return Padding(
+          padding: EdgeInsets.only(bottom: bottomInset),
+          child: RepaintBoundary(
+            child: ValueListenableBuilder<List<Map<String, dynamic>>>(
+              valueListenable: groupMembersNotifier,
+              builder: (context, groupMembers, ___) {
+                final otherUser = groupMembers.isNotEmpty
+                    ? groupMembers[0]
+                    : {'id': 'xyz456', 'username': 'Group'};
+                return TypingArea(
+                  onSendMessage: onSendMessage,
+                  onSendFile: onSendFile,
+                  onSendAudio: onSendAudio,
+                  isGroup: true,
+                  accentColor: accentColor,
+                  replyingTo: replyingTo,
+                  currentUser: currentUser,
+                  otherUser: otherUser,
+                  onCancelReply: onCancelReply,
+                );
+              },
+            ),
+          ),
         );
       },
     );

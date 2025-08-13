@@ -1,4 +1,4 @@
-// messages_controller.dart (updated: fixes for unused helpers, casts, and withOpacity deprecation)
+// messages_controller.dart (fixed: balanced braces and minor cleanup)
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -29,43 +29,70 @@ class MessagesController extends ChangeNotifier {
     _loadCachedData();
   }
 
+  // Helper: safe decode of a JSON string expected to be a List<String>
+  List<String> _safeDecodeStringList(String? raw) {
+    if (raw == null) return [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded.map((e) => e?.toString() ?? '').where((s) => s.isNotEmpty).cast<String>().toList();
+      }
+      debugPrint('[MessagesController] expected list but got: ${decoded.runtimeType}');
+      return [];
+    } catch (e, st) {
+      debugPrint('[MessagesController] failed to decode cached list: $e\n$st');
+      return [];
+    }
+  }
+
   Future<void> _loadCachedData() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final blockedRaw = prefs.getString('blockedUsers_${currentUser['id']}');
-      final mutedRaw = prefs.getString('mutedUsers_${currentUser['id']}');
-      final pinnedRaw = prefs.getString('pinnedChats_${currentUser['id']}');
+      final uid = currentUser['id'] as String?;
+      if (uid == null || uid.isEmpty) {
+        debugPrint('[MessagesController] _loadCachedData: currentUser id missing, skipping cache load');
+        return;
+      }
 
-      if (blockedRaw != null) {
-        _blockedUsers
-          ..clear()
-          ..addAll((jsonDecode(blockedRaw) as List).cast<String>());
-      }
-      if (mutedRaw != null) {
-        _mutedUsers
-          ..clear()
-          ..addAll((jsonDecode(mutedRaw) as List).cast<String>());
-      }
-      if (pinnedRaw != null) {
-        _pinnedChats
-          ..clear()
-          ..addAll((jsonDecode(pinnedRaw) as List).cast<String>());
-      }
+      final prefs = await SharedPreferences.getInstance();
+      final blockedRaw = prefs.getString('blockedUsers_$uid');
+      final mutedRaw = prefs.getString('mutedUsers_$uid');
+      final pinnedRaw = prefs.getString('pinnedChats_$uid');
+
+      final blockedList = _safeDecodeStringList(blockedRaw);
+      final mutedList = _safeDecodeStringList(mutedRaw);
+      final pinnedList = _safeDecodeStringList(pinnedRaw);
+
+      _blockedUsers
+        ..clear()
+        ..addAll(blockedList);
+      _mutedUsers
+        ..clear()
+        ..addAll(mutedList);
+      _pinnedChats
+        ..clear()
+        ..addAll(pinnedList);
 
       notifyListeners();
-    } catch (e) {
-      debugPrint('Failed to load cached messages controller data: $e');
+      debugPrint('[MessagesController] loaded cached lists: blocked=${_blockedUsers.length}, muted=${_mutedUsers.length}, pinned=${_pinnedChats.length}');
+    } catch (e, st) {
+      debugPrint('Failed to load cached messages controller data: $e\n$st');
     }
   }
 
   Future<void> _saveCachedData() async {
     try {
+      final uid = currentUser['id'] as String?;
+      if (uid == null || uid.isEmpty) {
+        debugPrint('[MessagesController] _saveCachedData: currentUser id missing, skipping cache save');
+        return;
+      }
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('blockedUsers_${currentUser['id']}', jsonEncode(_blockedUsers));
-      await prefs.setString('mutedUsers_${currentUser['id']}', jsonEncode(_mutedUsers));
-      await prefs.setString('pinnedChats_${currentUser['id']}', jsonEncode(_pinnedChats));
-    } catch (e) {
-      debugPrint('Failed to save cached messages controller data: $e');
+      await prefs.setString('blockedUsers_$uid', jsonEncode(_blockedUsers));
+      await prefs.setString('mutedUsers_$uid', jsonEncode(_mutedUsers));
+      await prefs.setString('pinnedChats_$uid', jsonEncode(_pinnedChats));
+      debugPrint('[MessagesController] saved cache for user $uid (blocked=${_blockedUsers.length}, muted=${_mutedUsers.length}, pinned=${_pinnedChats.length})');
+    } catch (e, st) {
+      debugPrint('Failed to save cached messages controller data: $e\n$st');
     }
   }
 
@@ -109,7 +136,9 @@ class MessagesController extends ChangeNotifier {
   // server-backed refresh helpers (used by the async wrappers)
   Future<bool> _fetchUserBlocked(String userId) async {
     try {
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).get();
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return false;
+      final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
       final blockedUsers = List<String>.from(userDoc.data()?['blockedUsers'] ?? []);
       _blockedUsers
         ..clear()
@@ -125,7 +154,9 @@ class MessagesController extends ChangeNotifier {
 
   Future<bool> _fetchUserMuted(String userId) async {
     try {
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).get();
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return false;
+      final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
       final mutedUsers = List<String>.from(userDoc.data()?['mutedUsers'] ?? []);
       _mutedUsers
         ..clear()
@@ -141,7 +172,9 @@ class MessagesController extends ChangeNotifier {
 
   Future<bool> _fetchChatPinned(String chatId) async {
     try {
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).get();
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return false;
+      final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
       final pinnedChats = List<String>.from(userDoc.data()?['pinnedChats'] ?? []);
       _pinnedChats
         ..clear()
@@ -664,3 +697,4 @@ class MessagesController extends ChangeNotifier {
     );
   }
 }
+
