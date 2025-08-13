@@ -1,45 +1,23 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:cached_network_image/cached_network_image.dart';
+import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter_downloader/flutter_downloader.dart';
-import 'package:movie_app/components/similar_movies_section.dart';
-import 'package:movie_app/components/trailer_section.dart';
-import 'package:movie_app/main_videoplayer.dart';
-import 'package:movie_app/mylist_screen.dart';
-import 'package:movie_app/settings_provider.dart';
-import 'package:movie_app/streaming_service.dart';
-import 'package:movie_app/tmdb_api.dart' as tmdb;
-import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
+import 'package:flutter_downloader/flutter_downloader.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shimmer/shimmer.dart';
+import 'package:movie_app/main_videoplayer.dart';
+import 'package:movie_app/components/trailer_section.dart';
+import 'package:movie_app/components/similar_movies_section.dart';
+import 'package:movie_app/mylist_screen.dart';
+import 'package:movie_app/tmdb_api.dart' as tmdb;
+import 'package:movie_app/streaming_service.dart';
 import 'package:visibility_detector/visibility_detector.dart';
-import 'package:movie_app/components/database_helper.dart';
-
-// Download update model
-class DownloadUpdate {
-  final String taskId;
-  final DownloadTaskStatus status;
-  final int progress;
-  final bool isFFmpeg;
-
-  DownloadUpdate(this.taskId, this.status, this.progress, {this.isFFmpeg = false});
-}
-
-// Singleton for download updates
-final _downloadUpdates = StreamController<DownloadUpdate>.broadcast();
-Stream<DownloadUpdate> get downloadUpdates => _downloadUpdates.stream;
-
-// Top-level download callback
-@pragma('vm:entry-point')
-void downloadCallback(String taskId, int status, int progress) {
-  final DownloadTaskStatus taskStatus = DownloadTaskStatus.values[status];
-  _downloadUpdates.add(DownloadUpdate(taskId, taskStatus, progress, isFFmpeg: false));
-}
+import 'package:movie_app/settings_provider.dart';
 
 class MovieDetailScreen extends StatefulWidget {
   final Map<String, dynamic> movie;
@@ -57,10 +35,7 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
   late final bool _isTvShow;
   List<Map<String, dynamic>> _similarMovies = [];
   int? _releaseYear;
-  Map<String, DownloadTaskStatus> _downloadStatus = {};
-  Map<String, int> _downloadProgress = {};
-  StreamSubscription<DownloadUpdate>? _sub;
-  StreamSubscription<Map<String, dynamic>>? _ffmpegSub;
+  final ValueNotifier<DownloadProgress?> _downloadProgressNotifier = ValueNotifier(null);
 
   @override
   void initState() {
@@ -72,42 +47,11 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
     }
     _fetchSimilarMovies();
     _fetchReleaseYear();
-    FlutterDownloader.registerCallback(downloadCallback);
-    _sub = downloadUpdates.listen((upd) {
-      if (mounted) {
-        setState(() {
-          _downloadStatus[upd.taskId] = upd.status;
-          _downloadProgress[upd.taskId] = upd.progress;
-          if (upd.status == DownloadTaskStatus.complete && !upd.isFFmpeg) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text("Download completed for task: ${upd.taskId}")),
-            );
-          }
-        });
-      }
-    });
-_ffmpegSub = ffmpegProgressStream.listen((upd) {
-  if (mounted) {
-    setState(() {
-      final taskId = upd['taskId'] as String;
-      _downloadStatus[taskId] = DownloadTaskStatus.running;
-      _downloadProgress[taskId] = (upd['progress'] as int).clamp(0, 100);
-      if (upd['progress'] == 100) {
-        _downloadStatus[taskId] = DownloadTaskStatus.complete;
-        _downloadUpdates.add(DownloadUpdate(taskId, DownloadTaskStatus.complete, 100, isFFmpeg: true));
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("FFmpeg download completed for task: $taskId")),
-        );
-      }
-    });
-  }
-});
   }
 
   @override
   void dispose() {
-    _sub?.cancel();
-    _ffmpegSub?.cancel();
+    _downloadProgressNotifier.dispose();
     super.dispose();
   }
 
@@ -188,13 +132,19 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
 
   Future<bool> _requestStoragePermission() async {
     if (Platform.isAndroid) {
-      final status = await Permission.manageExternalStorage.status;
-      if (status.isGranted) return true;
+      // On Android 11+ (API 30+) we must ask for "all files access"
+      final ManageStatus = await Permission.manageExternalStorage.status;
+      if (ManageStatus.isGranted) {
+        return true;
+      }
 
       final result = await Permission.manageExternalStorage.request();
-      if (result.isGranted) return true;
+      if (result.isGranted) {
+        return true;
+      }
 
       if (result.isPermanentlyDenied) {
+        // Take the user to Settings
         await showDialog(
           context: context,
           builder: (_) => AlertDialog(
@@ -221,6 +171,7 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
       }
       return false;
     } else {
+      // iOS or Android < 11: fall back to the old storage permission
       final status = await Permission.storage.status;
       if (status.isGranted) return true;
 
@@ -232,20 +183,8 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
   Future<void> _downloadMovie(Map<String, dynamic> details, {required String resolution, required bool subtitles}) async {
     final tmdbId = details['id']?.toString() ?? '';
     final title = details['title']?.toString() ?? details['name']?.toString() ?? 'Untitled';
-    if (!await _requestStoragePermission()) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Storage permission is required to download.")),
-        );
-      }
-      return;
-    }
-
-    final taskId = "${tmdbId}-$resolution";
-    setState(() {
-      _downloadStatus[taskId] = DownloadTaskStatus.running;
-      _downloadProgress[taskId] = 0;
-    });
+    final idSuffix = _isTvShow ? '_s${details['season'] ?? ''}_e${details['episode'] ?? ''}' : '';
+    final downloadId = 'movie_${tmdbId}${idSuffix}'; // unique folder id
 
     Map<String, String> streamingInfo;
     try {
@@ -255,18 +194,13 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
         releaseYear: _releaseYear ?? 1970,
         resolution: resolution,
         enableSubtitles: subtitles,
-        forDownload: true,
+        forDownload: true, // ask backend to return playlist if embedded
       );
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _downloadStatus.remove(taskId);
-          _downloadProgress.remove(taskId);
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Unable to start download: $e")),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Unable to start download. Please try again later.")),
+      );
       return;
     }
 
@@ -274,251 +208,210 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
     final urlType = streamingInfo['type'] ?? 'unknown';
 
     if (downloadUrl == null || downloadUrl.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _downloadStatus.remove(taskId);
-          _downloadProgress.remove(taskId);
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Download unavailable at this time.")),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Download unavailable at this time.")),
+      );
       return;
     }
 
-    if (urlType == 'mp4' && File(downloadUrl).existsSync()) {
-      final directory = Platform.isAndroid
-          ? (await getExternalStorageDirectory())!
-          : await getApplicationDocumentsDirectory();
-      final fileName = "${title.replaceAll(RegExp(r'[^\w\s]'), '_')}-$resolution.mp4";
-      final filePath = "${directory.path}/$fileName";
-      try {
-        await File(downloadUrl).copy(filePath); // Copy FFmpeg-generated file
-        await DatabaseHelper().insertDownload(
-          taskId,
-          filePath,
-          fileName,
-          'complete',
-        );
-        if (mounted) {
-          setState(() {
-            _downloadStatus[taskId] = DownloadTaskStatus.complete;
-            _downloadProgress[taskId] = 100;
-          });
-          _downloadUpdates.add(DownloadUpdate(taskId, DownloadTaskStatus.complete, 100, isFFmpeg: true));
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Downloaded: $title")),
-          );
-        }
-      } catch (e) {
-        if (mounted) {
-          setState(() {
-            _downloadStatus.remove(taskId);
-            _downloadProgress.remove(taskId);
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Failed to save download: $e")),
-          );
-        }
-      }
-    } else if (downloadUrl.startsWith('http')) {
-      final directory = Platform.isAndroid
-          ? (await getExternalStorageDirectory())!
-          : await getApplicationDocumentsDirectory();
-      final fileName = "${title.replaceAll(RegExp(r'[^\w\s]'), '_')}-$resolution.mp4";
-      try {
-        final actualTaskId = await FlutterDownloader.enqueue(
-          url: downloadUrl,
-          savedDir: directory.path,
-          fileName: fileName,
-          showNotification: true,
-          openFileFromNotification: true,
-        );
-        if (mounted && actualTaskId != null) {
-          setState(() {
-            _downloadStatus[actualTaskId] = DownloadTaskStatus.running;
-            _downloadProgress[actualTaskId] = 0;
-            if (actualTaskId != taskId) {
-              _downloadStatus.remove(taskId);
-              _downloadProgress.remove(taskId);
-            }
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Downloading: $title")),
-          );
-        } else {
-          throw Exception("Failed to enqueue download: taskId is null");
-        }
-      } catch (e) {
-        if (mounted) {
-          setState(() {
-            _downloadStatus.remove(taskId);
-            _downloadProgress.remove(taskId);
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Failed to start download: $e")),
-          );
-        }
-      }
-    } else {
-      if (mounted) {
-        setState(() {
-          _downloadStatus.remove(taskId);
-          _downloadProgress.remove(taskId);
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Invalid download URL.")),
-        );
-      }
-    }
-  }
-
-  Future<void> _downloadEpisode(Map<String, dynamic> episode, int seasonNumber, Map<String, dynamic> details) async {
-    final episodeNumber = (episode['episode_number'] as num?)?.toInt() ?? 1;
-    final episodeName = episode['name'] as String? ?? 'Untitled';
-    final tmdbId = details['id']?.toString() ?? '';
-    final title = details['name']?.toString() ?? details['title']?.toString() ?? episodeName;
+    // Ask for storage permission
     if (!await _requestStoragePermission()) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Storage permission is required to download.")),
+      );
+      return;
+    }
+
+    final cancelToken = CancelToken();
+    bool finished = false;
+    Map<String, String>? result;
+
+    // Show progress dialog and start download in background
+    _showDownloadProgressDialog(cancelToken);
+
+    try {
+      result = await OfflineDownloader.downloadAnyStream(
+        streamInfo: streamingInfo,
+        id: downloadId,
+        preferredResolution: resolution,
+        mergeSegments: true, // create merged .ts for simpler playback; set false if you prefer playlist
+        concurrency: 6,
+        onProgress: (p) {
+          // publish progress to the notifier
+          _downloadProgressNotifier.value = p;
+        },
+        cancelToken: cancelToken,
+      );
+      finished = true;
+    } catch (e) {
+      if (e.toString().contains('Cancelled')) {
+        if (mounted) {
+          Navigator.of(context, rootNavigator: true).pop(); // close dialog if open
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download cancelled.')));
+        }
+        return;
+      }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Storage permission is required to download.")),
-        );
+        Navigator.of(context, rootNavigator: true).pop(); // close dialog if open
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Download failed: $e')));
+      }
+      return;
+    } finally {
+      // Ensure progress dialog is closed if still open
+      if (mounted) {
+        try {
+          Navigator.of(context, rootNavigator: true).pop();
+        } catch (_) {}
+      }
+    }
+
+    if (!finished || result == null) return;
+
+    // Determine playable path (merged ts > file (mp4) > playlist)
+    final playablePath = result['merged'] ?? result['file'] ?? result['playlist'] ?? '';
+
+    if (playablePath.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download finished but no playable file found.')));
       }
       return;
     }
 
-    final taskId = "${tmdbId}-S$seasonNumber-E$episodeNumber";
-    setState(() {
-      _downloadStatus[taskId] = DownloadTaskStatus.running;
-      _downloadProgress[taskId] = 0;
+    // Save download metadata
+    await _saveDownloadRecord({
+      'id': downloadId,
+      'tmdbId': tmdbId,
+      'title': title,
+      'path': playablePath,
+      'type': result['type'] ?? urlType,
+      'resolution': resolution,
+      'timestamp': DateTime.now().toIso8601String(),
     });
 
-    Map<String, String> streamingInfo;
-    try {
-      streamingInfo = await StreamingService.getStreamingLink(
-        tmdbId: tmdbId,
-        title: title,
-        releaseYear: _releaseYear ?? 1970,
-        season: seasonNumber,
-        episode: episodeNumber,
-        resolution: _selectedResolution,
-        enableSubtitles: _enableSubtitles,
-        forDownload: true,
-      );
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _downloadStatus.remove(taskId);
-          _downloadProgress.remove(taskId);
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Unable to start download: $e")),
-        );
-      }
-      return;
-    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Download finished: ${details['title'] ?? details['name']}'),
+        action: SnackBarAction(
+          label: 'Play',
+          onPressed: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => MainVideoPlayer(
+                  videoPath: playablePath,
+                  title: title,
+                  releaseYear: _releaseYear ?? 1970,
+                  isFullSeason: _isTvShow,
+                  episodeFiles: const [],
+                  similarMovies: _similarMovies,
+                  subtitleUrl: result['type'] == 'm3u8' ? null : streamingInfo['subtitleUrl'],
+                  isHls: result['type'] == 'm3u8',
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
 
-    final downloadUrl = streamingInfo['url'];
-    final urlType = streamingInfo['type'] ?? 'unknown';
+  // ---------- DOWNLOAD HELPERS ADDED ----------
+  // Shows a cancellable progress dialog that listens to _downloadProgressNotifier.
+  void _showDownloadProgressDialog(CancelToken cancelToken) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: Colors.black87,
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ValueListenableBuilder<DownloadProgress?>(
+              valueListenable: _downloadProgressNotifier,
+              builder: (context, progress, _) {
+                final downloaded = progress?.downloadedSegments ?? 0;
+                final total = progress?.totalSegments ?? 0;
+                final bytes = progress?.bytesDownloaded ?? 0;
+                final percent = (total > 0) ? (downloaded / total) : null;
+                final percentStr = percent != null ? (percent * 100).toStringAsFixed(1) + '%' : _bytesToReadable(bytes);
 
-    if (downloadUrl == null || downloadUrl.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _downloadStatus.remove(taskId);
-          _downloadProgress.remove(taskId);
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Download unavailable at this time.")),
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Downloading...', style: TextStyle(color: Colors.white)),
+                    const SizedBox(height: 12),
+                    LinearProgressIndicator(value: percent),
+                    const SizedBox(height: 8),
+                    Text(
+                      total > 0 ? '$downloaded / $total segments ($percentStr)' : percentStr,
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: () {
+                            // Cancel download
+                            cancelToken.cancel();
+                            Navigator.of(context, rootNavigator: true).pop();
+                          },
+                          child: const Text('Cancel', style: TextStyle(color: Colors.red)),
+                        )
+                      ],
+                    )
+                  ],
+                );
+              },
+            ),
+          ),
         );
-      }
-      return;
-    }
+      },
+    );
+  }
 
-    if (urlType == 'mp4' && File(downloadUrl).existsSync()) {
-      final directory = Platform.isAndroid
-          ? (await getExternalStorageDirectory())!
-          : await getApplicationDocumentsDirectory();
-      final fileName = "${episodeName.replaceAll(RegExp(r'[^\w\s]'), '_')}-S${seasonNumber}E${episodeNumber}-$_selectedResolution.mp4";
-      final filePath = "${directory.path}/$fileName";
-      try {
-        await File(downloadUrl).copy(filePath); // Copy FFmpeg-generated file
-        await DatabaseHelper().insertDownload(
-          taskId,
-          filePath,
-          fileName,
-          'complete',
-        );
-        if (mounted) {
-          setState(() {
-            _downloadStatus[taskId] = DownloadTaskStatus.complete;
-            _downloadProgress[taskId] = 100;
-          });
-          _downloadUpdates.add(DownloadUpdate(taskId, DownloadTaskStatus.complete, 100, isFFmpeg: true));
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Downloaded: $episodeName")),
-          );
-        }
-      } catch (e) {
-        if (mounted) {
-          setState(() {
-            _downloadStatus.remove(taskId);
-            _downloadProgress.remove(taskId);
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Failed to save download: $e")),
-          );
-        }
-      }
-    } else if (downloadUrl.startsWith('http')) {
-      final directory = Platform.isAndroid
-          ? (await getExternalStorageDirectory())!
-          : await getApplicationDocumentsDirectory();
-      final fileName = "${episodeName.replaceAll(RegExp(r'[^\w\s]'), '_')}-S${seasonNumber}E${episodeNumber}-$_selectedResolution.mp4";
-      try {
-        final actualTaskId = await FlutterDownloader.enqueue(
-          url: downloadUrl,
-          savedDir: directory.path,
-          fileName: fileName,
-          showNotification: true,
-          openFileFromNotification: true,
-        );
-        if (mounted && actualTaskId != null) {
-          setState(() {
-            _downloadStatus[actualTaskId] = DownloadTaskStatus.running;
-            _downloadProgress[actualTaskId] = 0;
-            if (actualTaskId != taskId) {
-              _downloadStatus.remove(taskId);
-              _downloadProgress.remove(taskId);
-            }
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Downloading: $episodeName")),
-          );
-        } else {
-          throw Exception("Failed to enqueue download: taskId is null");
-        }
-      } catch (e) {
-        if (mounted) {
-          setState(() {
-            _downloadStatus.remove(taskId);
-            _downloadProgress.remove(taskId);
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Failed to start download: $e")),
-          );
-        }
-      }
-    } else {
-      if (mounted) {
-        setState(() {
-          _downloadStatus.remove(taskId);
-          _downloadProgress.remove(taskId);
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Invalid download URL.")),
-        );
-      }
+  /// Save simple download record to SharedPreferences under key 'downloads'
+  Future<void> _saveDownloadRecord(Map<String, dynamic> record) async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList('downloads') ?? [];
+    list.add(json.encode(record));
+    await prefs.setStringList('downloads', list);
+  }
+
+  // utility to show bytes as a readable string
+  String _bytesToReadable(int bytes) {
+    if (bytes <= 0) return '0 B';
+    const suffixes = ['B', 'KB', 'MB', 'GB'];
+    var i = 0;
+    double size = bytes.toDouble();
+    while (size >= 1024 && i < suffixes.length - 1) {
+      size /= 1024;
+      i++;
     }
+    return '${size.toStringAsFixed(2)} ${suffixes[i]}';
+  }
+  // ---------- END DOWNLOAD HELPERS ----------
+
+  void _rateMovie(Map<String, dynamic> details) {
+    double rating = 3.0;
+    showDialog(
+      context: context,
+      builder: (context) {
+        return _RatingDialog(
+          title: details['title'] ?? details['name'] ?? 'Rate Item',
+          onRatingChanged: (value) => rating = value,
+          onSubmit: () {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text("Rating submitted: $rating")),
+            );
+          },
+        );
+      },
+    );
   }
 
   void _showPlayOptionsModal(Map<String, dynamic> details, bool isTvShow) {
@@ -577,9 +470,8 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
             episode: initialEpisodeNumber,
             resolution: resolution,
             enableSubtitles: subtitles,
-            forDownload: false,
           );
-          episodeFiles = episodes.map<String>((e) => '').toList();
+          episodeFiles = episodes.map<String>((e) => '').toList(); // Kept for compatibility
         } else {
           throw Exception('No seasons available');
         }
@@ -590,7 +482,6 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
           releaseYear: _releaseYear ?? 1970,
           resolution: resolution,
           enableSubtitles: subtitles,
-          forDownload: false,
         );
       }
     } catch (e) {
@@ -654,25 +545,7 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
     );
   }
 
-  void _rateMovie(Map<String, dynamic> details) {
-    double rating = 3.0;
-    showDialog(
-      context: context,
-      builder: (context) {
-        return _RatingDialog(
-          title: details['title'] ?? details['name'] ?? 'Rate Item',
-          onRatingChanged: (value) => rating = value,
-          onSubmit: () {
-            if (!mounted) return;
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text("Rating submitted: $rating")),
-            );
-          },
-        );
-      },
-    );
-  }
-
+  // Smaller widget components for _buildDetailsContent
   Widget _TitleSection(Map<String, dynamic> details, bool isTvShow) {
     final title = isTvShow
         ? (details['name'] ?? details['title'] ?? 'No Title')
@@ -912,7 +785,6 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
           tvId: details['id'],
           seasons: details['seasons'] ?? [],
           tvShowName: details['name']?.toString() ?? details['title']?.toString() ?? 'Unknown Show',
-          onDownload: (episode, seasonNumber) => _downloadEpisode(episode, seasonNumber, details),
         ),
       const _SectionTitle(title: 'Trailers'),
       VisibilityDetector(
@@ -933,8 +805,6 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
   Widget _buildDetailScreen(Map<String, dynamic> details) {
     final posterUrl = 'https://image.tmdb.org/t/p/w500${details['poster'] ?? details['poster_path'] ?? ''}';
     final settings = Provider.of<SettingsProvider>(context);
-    final title = details['title'] ?? details['name'] ?? 'Untitled';
-    final taskId = "${details['id']}-$_selectedResolution";
 
     return Scaffold(
       body: Stack(
@@ -946,7 +816,7 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
                 expandedHeight: 400,
                 pinned: true,
                 backgroundColor: Colors.black87,
-                title: Text(title),
+                title: Text(details['title'] ?? details['name'] ?? ''),
                 flexibleSpace: FlexibleSpaceBar(
                   background: Stack(
                     fit: StackFit.expand,
@@ -983,8 +853,6 @@ _ffmpegSub = ffmpegProgressStream.listen((upd) {
                         onDownload: () => _showDownloadOptionsModal(details),
                         onRate: () => _rateMovie(details),
                         accentColor: settings.accentColor,
-                        isDownloading: _downloadStatus[taskId] == DownloadTaskStatus.running,
-                        downloadProgress: _downloadProgress[taskId] ?? 0,
                       ),
                     ],
                   ),
@@ -1141,8 +1009,6 @@ class _GlassActionBar extends StatelessWidget {
   final VoidCallback onDownload;
   final VoidCallback onRate;
   final Color accentColor;
-  final bool isDownloading;
-  final int downloadProgress;
 
   const _GlassActionBar({
     required this.onShare,
@@ -1150,8 +1016,6 @@ class _GlassActionBar extends StatelessWidget {
     required this.onDownload,
     required this.onRate,
     required this.accentColor,
-    required this.isDownloading,
-    required this.downloadProgress,
   });
 
   @override
@@ -1172,25 +1036,7 @@ class _GlassActionBar extends StatelessWidget {
           children: [
             IconButton(icon: const Icon(Icons.share, color: Colors.white), onPressed: onShare),
             IconButton(icon: const Icon(Icons.add, color: Colors.white), onPressed: onAddToList),
-            Stack(
-              alignment: Alignment.center,
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.download, color: Colors.white),
-                  onPressed: isDownloading ? null : onDownload,
-                ),
-                if (isDownloading)
-                  SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(
-                      value: downloadProgress / 100.0,
-                      strokeWidth: 2,
-                      color: accentColor,
-                    ),
-                  ),
-              ],
-            ),
+            IconButton(icon: const Icon(Icons.download, color: Colors.white), onPressed: onDownload),
             IconButton(icon: const Icon(Icons.star, color: Colors.white), onPressed: onRate),
           ],
         ),
@@ -1465,15 +1311,8 @@ class TVShowEpisodesSection extends StatefulWidget {
   final int tvId;
   final List<dynamic> seasons;
   final String tvShowName;
-  final void Function(Map<String, dynamic>, int) onDownload;
 
-  const TVShowEpisodesSection({
-    super.key,
-    required this.tvId,
-    required this.seasons,
-    required this.tvShowName,
-    required this.onDownload,
-  });
+  const TVShowEpisodesSection({super.key, required this.tvId, required this.seasons, required this.tvShowName});
 
   @override
   TVShowEpisodesSectionState createState() => TVShowEpisodesSectionState();
@@ -1485,34 +1324,12 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> {
   bool _isLoading = false;
   bool _isVisible = false;
   int? _releaseYear;
-  Map<String, DownloadTaskStatus> _downloadStatus = {};
-  Map<String, int> _downloadProgress = {};
-  StreamSubscription<DownloadUpdate>? _sub;
 
   @override
   void initState() {
     super.initState();
     _selectedSeasonNumber = widget.seasons.isNotEmpty ? (widget.seasons.first['season_number'] as int? ?? 1) : 1;
     _fetchTVShowDetails();
-    _sub = downloadUpdates.listen((upd) {
-      if (mounted) {
-        setState(() {
-          _downloadStatus[upd.taskId] = upd.status;
-          _downloadProgress[upd.taskId] = upd.progress;
-          if (upd.status == DownloadTaskStatus.complete && !upd.isFFmpeg) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text("Download completed for task: ${upd.taskId}")),
-            );
-          }
-        });
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _sub?.cancel();
-    super.dispose();
   }
 
   Future<void> _fetchTVShowDetails() async {
@@ -1532,6 +1349,11 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> {
         });
       }
     }
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
   }
 
   Future<void> _fetchEpisodes(int seasonNumber) async {
@@ -1587,7 +1409,6 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> {
                 episode: episodeNumber,
                 resolution: resolution,
                 enableSubtitles: subtitles,
-                forDownload: false,
               );
             } catch (e) {
               if (mounted) {
@@ -1636,7 +1457,6 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> {
               );
             }
           },
-          onDownload: () => widget.onDownload(episode, seasonNumber),
         );
       },
     );
@@ -1716,14 +1536,10 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> {
       itemCount: episodes.length,
       itemBuilder: (context, index) {
         final episode = episodes[index];
-        final episodeNumber = (episode['episode_number'] as num?)?.toInt() ?? 1;
-        final taskId = "${widget.tvId}-S$_selectedSeasonNumber-E$episodeNumber";
         return _EpisodeCard(
           episode: episode,
           seasonNumber: _selectedSeasonNumber,
           onTap: () => _showEpisodePlayOptionsModal(episode, _selectedSeasonNumber),
-          isDownloading: _downloadStatus[taskId] == DownloadTaskStatus.running,
-          downloadProgress: _downloadProgress[taskId] ?? 0,
         );
       },
     );
@@ -1734,16 +1550,8 @@ class _EpisodeCard extends StatelessWidget {
   final Map<String, dynamic> episode;
   final int seasonNumber;
   final VoidCallback onTap;
-  final bool isDownloading;
-  final int downloadProgress;
 
-  const _EpisodeCard({
-    required this.episode,
-    required this.seasonNumber,
-    required this.onTap,
-    required this.isDownloading,
-    required this.downloadProgress,
-  });
+  const _EpisodeCard({required this.episode, required this.seasonNumber, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -1823,19 +1631,6 @@ class _EpisodeCard extends StatelessWidget {
                 ],
               ),
             ),
-            if (isDownloading)
-              Padding(
-                padding: const EdgeInsets.only(left: 8),
-                child: SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: CircularProgressIndicator(
-                    value: downloadProgress / 100.0,
-                    strokeWidth: 2,
-                    color: settings.accentColor,
-                  ),
-                ),
-              ),
           ],
         ),
       ),
@@ -1845,9 +1640,8 @@ class _EpisodeCard extends StatelessWidget {
 
 class _EpisodePlayOptionsModal extends StatefulWidget {
   final void Function(String, bool) onConfirm;
-  final VoidCallback onDownload;
 
-  const _EpisodePlayOptionsModal({required this.onConfirm, required this.onDownload});
+  const _EpisodePlayOptionsModal({required this.onConfirm});
 
   @override
   _EpisodePlayOptionsModalState createState() => _EpisodePlayOptionsModalState();
@@ -1898,24 +1692,12 @@ class _EpisodePlayOptionsModalState extends State<_EpisodePlayOptionsModal> {
             ],
           ),
           const Spacer(),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: settings.accentColor),
-                onPressed: () => widget.onConfirm(_resolution, _subtitles),
-                child: const Text("Play Now", style: TextStyle(color: Colors.black)),
-              ),
-              const SizedBox(width: 16),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: settings.accentColor),
-                onPressed: () {
-                  Navigator.pop(context);
-                  widget.onDownload();
-                },
-                child: const Text("Start Download", style: TextStyle(color: Colors.black)),
-              ),
-            ],
+          Center(
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: settings.accentColor),
+              onPressed: () => widget.onConfirm(_resolution, _subtitles),
+              child: const Text("Play Now", style: TextStyle(color: Colors.black)),
+            ),
           ),
           const SizedBox(height: 16),
         ],
