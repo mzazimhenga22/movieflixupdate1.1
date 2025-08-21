@@ -16,6 +16,10 @@
       ]
     }
   },
+  "containerEnv": {
+    "ANDROID_HOME": "/usr/local/android-sdk",
+    "PATH": "/usr/local/flutter/bin:/usr/local/android-sdk/cmdline-tools/latest/bin:/usr/local/android-sdk/platform-tools:/usr/local/android-sdk/emulator:${PATH}"
+  },
   "postCreateCommand": "bash .devcontainer/setup.sh",
   "remoteUser": "vscode",
   "forwardPorts": [6080],
@@ -26,4 +30,3 @@
     }
   }
 }
-
