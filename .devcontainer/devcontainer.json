@@ -1,5 +1,5 @@
 {
-  "name": "Flutter Android Dev",
+  "name": "Flutter Android Dev + Emulator",
   "build": {
     "dockerfile": "Dockerfile"
   },
@@ -17,6 +17,13 @@
     }
   },
   "postCreateCommand": "bash .devcontainer/setup.sh",
-  "remoteUser": "vscode"
+  "remoteUser": "vscode",
+  "forwardPorts": [6080],
+  "portsAttributes": {
+    "6080": {
+      "label": "Android Emulator (noVNC)",
+      "onAutoForward": "notify"
+    }
+  }
 }
 
