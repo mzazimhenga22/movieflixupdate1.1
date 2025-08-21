@@ -16,22 +16,22 @@ if [ ! -d "/usr/local/flutter" ]; then
   sudo mv flutter /usr/local/flutter
   rm flutter.tar.xz
 fi
-echo 'export PATH=/usr/local/flutter/bin:$PATH' >> ~/.bashrc
+echo 'export PATH=/usr/local/flutter/bin:$PATH' >> /home/vscode/.bashrc
 export PATH=/usr/local/flutter/bin:$PATH
 
 # Install Android SDK cmdline-tools
 if [ ! -d "/usr/local/android-sdk" ]; then
   echo "Installing Android SDK..."
-  mkdir -p /usr/local/android-sdk/cmdline-tools
+  sudo mkdir -p /usr/local/android-sdk/cmdline-tools
   curl -o sdk-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_SDK_VERSION}_latest.zip
-  unzip sdk-tools.zip -d /usr/local/android-sdk/cmdline-tools
-  mv /usr/local/android-sdk/cmdline-tools/cmdline-tools /usr/local/android-sdk/cmdline-tools/latest
+  sudo unzip sdk-tools.zip -d /usr/local/android-sdk/cmdline-tools
+  sudo mv /usr/local/android-sdk/cmdline-tools/cmdline-tools /usr/local/android-sdk/cmdline-tools/latest
   rm sdk-tools.zip
 fi
 
-# Set ANDROID env vars
-echo 'export ANDROID_HOME=/usr/local/android-sdk' >> ~/.bashrc
-echo 'export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH' >> ~/.bashrc
+# Set ANDROID env vars (persistent + immediate)
+echo 'export ANDROID_HOME=/usr/local/android-sdk' >> /home/vscode/.bashrc
+echo 'export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH' >> /home/vscode/.bashrc
 export ANDROID_HOME=/usr/local/android-sdk
 export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
 
