@@ -3,8 +3,10 @@ set -e
 
 # Versions
 FLUTTER_VERSION=3.24.3
-ANDROID_SDK_VERSION=10406996
-ANDROID_NDK_VERSION=26.1.10909125
+ANDROID_SDK_VERSION=11076708
+ANDROID_PLATFORM=android-36
+ANDROID_BUILD_TOOLS=36.0.0
+ANDROID_NDK_VERSION=27.0.12077973
 
 # Install Flutter
 if [ ! -d "/usr/local/flutter" ]; then
@@ -19,7 +21,7 @@ fi
 echo 'export PATH=/usr/local/flutter/bin:$PATH' >> ~/.bashrc
 export PATH=/usr/local/flutter/bin:$PATH
 
-# Install Android SDK commandline tools
+# Install Android SDK cmdline-tools
 if [ ! -d "/usr/local/android-sdk" ]; then
   echo "Installing Android SDK..."
   mkdir -p /usr/local/android-sdk/cmdline-tools
@@ -29,7 +31,7 @@ if [ ! -d "/usr/local/android-sdk" ]; then
   rm sdk-tools.zip
 fi
 
-# Set Android env vars
+# Set ANDROID env vars
 echo 'export ANDROID_HOME=/usr/local/android-sdk' >> ~/.bashrc
 echo 'export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH' >> ~/.bashrc
 export ANDROID_HOME=/usr/local/android-sdk
@@ -38,10 +40,14 @@ export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:
 # Accept licenses
 yes | sdkmanager --licenses
 
-# Install required SDK packages
-sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;$ANDROID_NDK_VERSION" "cmake;3.22.1"
+# Install SDK components
+sdkmanager "platform-tools" \
+           "platforms;${ANDROID_PLATFORM}" \
+           "build-tools;${ANDROID_BUILD_TOOLS}" \
+           "ndk;${ANDROID_NDK_VERSION}" \
+           "cmake;3.22.1"
 
-# Precache Flutter artifacts
+# Precache Flutter (includes Android engine artifacts)
 flutter precache
 flutter doctor -v
 
