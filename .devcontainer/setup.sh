@@ -16,8 +16,6 @@ if [ ! -d "/usr/local/flutter" ]; then
   sudo mv flutter /usr/local/flutter
   rm flutter.tar.xz
 fi
-
-# Add Flutter to PATH
 echo 'export PATH=/usr/local/flutter/bin:$PATH' >> ~/.bashrc
 export PATH=/usr/local/flutter/bin:$PATH
 
@@ -33,9 +31,9 @@ fi
 
 # Set ANDROID env vars
 echo 'export ANDROID_HOME=/usr/local/android-sdk' >> ~/.bashrc
-echo 'export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH' >> ~/.bashrc
+echo 'export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH' >> ~/.bashrc
 export ANDROID_HOME=/usr/local/android-sdk
-export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
+export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
 
 # Accept licenses
 yes | sdkmanager --licenses
@@ -44,11 +42,17 @@ yes | sdkmanager --licenses
 sdkmanager "platform-tools" \
            "platforms;${ANDROID_PLATFORM}" \
            "build-tools;${ANDROID_BUILD_TOOLS}" \
+           "system-images;${ANDROID_PLATFORM};google_apis;x86_64" \
+           "emulator" \
            "ndk;${ANDROID_NDK_VERSION}" \
            "cmake;3.22.1"
 
-# Precache Flutter (includes Android engine artifacts)
+# Create an AVD
+echo "no" | avdmanager create avd -n codespaces_emulator -k "system-images;${ANDROID_PLATFORM};google_apis;x86_64" --force
+
+# Precache Flutter
 flutter precache
 flutter doctor -v
 
-echo "✅ Setup complete. Run 'flutter doctor' to verify."
+echo "✅ Setup complete."
+echo "👉 Start emulator with: bash .devcontainer/start-emulator.sh"
