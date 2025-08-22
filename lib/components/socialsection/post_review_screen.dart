@@ -4,17 +4,25 @@ import 'package:image_picker/image_picker.dart';
 import 'dart:io' show File;
 import 'dart:ui';
 import 'package:universal_html/html.dart' as html;
+import 'package:uuid/uuid.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:path/path.dart' as p;
+import 'dart:typed_data';
 
 class PostReviewScreen extends StatefulWidget {
   final Color accentColor;
   final Map<String, dynamic>? currentUser;
-  final Function(Map<String, dynamic>) onPostReview;
+  /// Optional callback. If supplied, it will be called with the assembled review data.
+  /// If omitted, this screen will upload media (if any) and write the review to Firestore itself.
+  final Future<void> Function(Map<String, dynamic>)? onPostReview;
 
   const PostReviewScreen({
     super.key,
     required this.accentColor,
     required this.currentUser,
-    required this.onPostReview,
+    this.onPostReview,
   });
 
   @override
@@ -32,6 +40,8 @@ class _PostReviewScreenState extends State<PostReviewScreen> with SingleTickerPr
   late AnimationController _animationController;
   late Animation<double> _buttonScaleAnimation;
   bool _isPosting = false;
+
+  final SupabaseClient _supabase = Supabase.instance.client;
 
   @override
   void initState() {
@@ -61,7 +71,7 @@ class _PostReviewScreenState extends State<PostReviewScreen> with SingleTickerPr
       input.accept = type == 'photo' ? 'image/jpeg,image/png' : 'video/mp4';
       input.click();
       await input.onChange.first;
-      if (input.files!.isNotEmpty) {
+      if (input.files != null && input.files!.isNotEmpty) {
         return input.files!.first;
       }
     } else {
@@ -73,6 +83,121 @@ class _PostReviewScreenState extends State<PostReviewScreen> with SingleTickerPr
       }
     }
     return null;
+  }
+
+  Future<String?> _uploadMedia(dynamic mediaFile, String type) async {
+    // Returns public URL or null on failure.
+    try {
+      final mediaId = const Uuid().v4();
+      String filePath;
+      String contentType;
+
+      if (kIsWeb) {
+        if (mediaFile is html.File) {
+          final fileSizeInBytes = mediaFile.size;
+          if (type == 'photo' && fileSizeInBytes > 5 * 1024 * 1024) {
+            throw Exception('Image too large, max 5MB');
+          }
+          if (type == 'video' && fileSizeInBytes > 20 * 1024 * 1024) {
+            throw Exception('Video too large, max 20MB');
+          }
+          final extension = mediaFile.name.split('.').last.toLowerCase();
+          filePath = 'media/$mediaId.$extension';
+          contentType = mediaFile.type;
+          final reader = html.FileReader();
+          reader.readAsArrayBuffer(mediaFile);
+          await reader.onLoad.first;
+          final result = reader.result;
+          if (result is! ByteBuffer && result is! Uint8List) {
+            // Some browsers give ArrayBuffer (ByteBuffer)
+          }
+          Uint8List bytes;
+          if (result is ByteBuffer) {
+            bytes = result.asUint8List();
+          } else if (result is Uint8List) {
+            bytes = result;
+          } else {
+            throw Exception('Could not read file bytes');
+          }
+          await _supabase.storage.from('feeds').uploadBinary(filePath, bytes, fileOptions: FileOptions(contentType: contentType));
+        } else {
+          throw Exception('Invalid web file');
+        }
+      } else {
+        if (mediaFile is XFile) {
+          final file = File(mediaFile.path);
+          final fileSizeInBytes = await file.length();
+          if (type == 'photo' && fileSizeInBytes > 5 * 1024 * 1024) {
+            throw Exception('Image too large, max 5MB');
+          }
+          if (type == 'video' && fileSizeInBytes > 20 * 1024 * 1024) {
+            throw Exception('Video too large, max 20MB');
+          }
+          final extension = p.extension(mediaFile.path).replaceFirst('.', '');
+          filePath = 'media/$mediaId.$extension';
+          contentType = _getMimeType(extension);
+          await _supabase.storage.from('feeds').upload(filePath, File(mediaFile.path), fileOptions: FileOptions(contentType: contentType));
+        } else {
+          throw Exception('Invalid file type');
+        }
+      }
+
+      final url = _supabase.storage.from('feeds').getPublicUrl(filePath);
+      return url.isNotEmpty ? url : null;
+    } catch (e) {
+      debugPrint('upload error: $e');
+      return null;
+    }
+  }
+
+  String _getMimeType(String extension) {
+    switch (extension.toLowerCase()) {
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'png':
+        return 'image/png';
+      case 'mp4':
+        return 'video/mp4';
+      default:
+        return 'application/octet-stream';
+    }
+  }
+
+  Future<void> _defaultOnPostReview(Map<String, dynamic> reviewData) async {
+    // Called when no external onPostReview callback supplied.
+    // Upload media (if any), then add a post document under user's posts and feeds.
+    if (widget.currentUser == null) throw Exception('No current user');
+
+    String? mediaUrl;
+    if (reviewData['media'] != null) {
+      mediaUrl = await _uploadMedia(reviewData['media'], reviewData['mediaType'] ?? 'photo');
+      if (mediaUrl == null) throw Exception('Failed to upload media');
+    }
+
+    final newPost = {
+      'user': widget.currentUser?['username'] ?? 'User',
+      'userId': widget.currentUser?['id']?.toString() ?? '',
+      'post': reviewData['isTVShow'] == true
+          ? 'Reviewed ${reviewData['title']} S${reviewData['season']}: E${reviewData['episode']} - ${reviewData['review']}'
+          : 'Reviewed ${reviewData['title']}: ${reviewData['review']}',
+      'type': 'review',
+      'likedBy': [],
+      'title': reviewData['title'] ?? '',
+      'season': reviewData['season'] ?? '',
+      'episode': reviewData['episode'] ?? '',
+      'media': mediaUrl ?? '',
+      'mediaType': mediaUrl != null ? (reviewData['mediaType'] ?? '') : '',
+      'timestamp': DateTime.now().toIso8601String(),
+    };
+
+    // write to user's posts subcollection
+    final userId = widget.currentUser?['id']?.toString();
+    if (userId == null || userId.isEmpty) throw Exception('Invalid user id');
+
+    final docRef = await FirebaseFirestore.instance.collection('users').doc(userId).collection('posts').add(newPost);
+    newPost['id'] = docRef.id;
+    await FirebaseFirestore.instance.collection('feeds').add(newPost);
   }
 
   void _handlePostReview() async {
@@ -99,13 +224,20 @@ class _PostReviewScreenState extends State<PostReviewScreen> with SingleTickerPr
     };
 
     try {
-      await widget.onPostReview(reviewData);
-      if (mounted) Navigator.pop(context);
-    } catch (e) {
+      if (widget.onPostReview != null) {
+        await widget.onPostReview!(reviewData);
+      } else {
+        await _defaultOnPostReview(reviewData);
+      }
+
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Failed to post review: $e")),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Review posted')));
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      debugPrint('Failed to post review: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Failed to post review: $e")));
       }
     } finally {
       if (mounted) setState(() => _isPosting = false);

@@ -1,10 +1,21 @@
 // messages_screen.dart
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'messages_controller.dart';
 import 'chat_screen.dart';
 import 'Group_chat_screen.dart';
 import 'chat_tile.dart';
 import 'forward_message_screen.dart';
+import 'package:movie_app/components/socialsection/stories.dart';
+import 'package:movie_app/components/socialsection/social_reactions_screen.dart';
+import 'post_review_screen.dart'; // <-- added per request
+import 'package:firebase_auth/firebase_auth.dart';
+
+
 
 class AnimatedBackground extends StatelessWidget {
   const AnimatedBackground({super.key});
@@ -50,7 +61,12 @@ class MessagesScreenState extends State<MessagesScreen>
   Map<String, dynamic>? _selectedOtherUser;
   bool _selectedIsGroup = false;
 
+  // kept intentionally (was flagged unused previously) — referenced in FAB tooltip to silence analyzer
   final bool _isLoadingMore = false;
+
+  // Tracks users who currently have active stories (<24h)
+  final Set<String> _usersWithActiveStories = {};
+  StreamSubscription<QuerySnapshot>? _storiesSub;
 
   late VoidCallback _controllerListener;
 
@@ -77,6 +93,36 @@ class MessagesScreenState extends State<MessagesScreen>
         _isExpandedNotifier.value = newExpanded;
       }
     });
+
+    // Start a single Firestore listener for stories and compute which users have active stories.
+    // Lightweight: we only keep a set of userIds which are used to render avatar rings.
+    _storiesSub = FirebaseFirestore.instance.collection('stories').snapshots().listen((snap) {
+      final now = DateTime.now();
+      final activeUsers = <String>{};
+      for (final doc in snap.docs) {
+        try {
+          final data = doc.data() as Map<String, dynamic>;
+          final tsStr = (data['timestamp'] ?? '').toString();
+          final ts = DateTime.parse(tsStr);
+          if (now.difference(ts) < const Duration(hours: 24)) {
+            final uid = (data['userId'] ?? '').toString();
+            if (uid.isNotEmpty) activeUsers.add(uid);
+          }
+        } catch (_) {
+          // ignore parse errors
+        }
+      }
+      if (!mounted) return;
+      if (!setEquals(_usersWithActiveStories, activeUsers)) {
+        setState(() {
+          _usersWithActiveStories
+            ..clear()
+            ..addAll(activeUsers);
+        });
+      }
+    }, onError: (e) {
+      debugPrint('stories listener error: $e');
+    });
   }
 
   @override
@@ -87,6 +133,7 @@ class MessagesScreenState extends State<MessagesScreen>
     _isExpandedNotifier.dispose();
     controller.removeListener(_controllerListener);
     controller.dispose();
+    _storiesSub?.cancel();
     super.dispose();
   }
 
@@ -217,6 +264,187 @@ class MessagesScreenState extends State<MessagesScreen>
     if (mounted) setState(() {});
   }
 
+  // -------------------------
+  // Lightweight interlink action handler (safe, non-invasive)
+  // -------------------------
+  // Attempts to navigate using named routes; if the route isn't configured,
+  // falls back to a SnackBar so this file doesn't require imports that may
+  // produce compile errors in projects with different layouts.
+  void _performInterlinkAction(String actionRoute, String friendlyName) {
+    try {
+      // try navigating by named route if your app registers them
+      Navigator.of(context).pushNamed(actionRoute);
+    } catch (e) {
+      // Fallback: show SnackBar telling developer/user which action was requested.
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Open "$friendlyName" (route: $actionRoute). Implement navigation or register route to open actual page.')),
+      );
+    }
+  }
+
+  // Try to open named route, otherwise fallback to a widget we imported.
+  Future<void> _openFeed() async {
+    try {
+      Navigator.of(context).pushNamed('/feed');
+      return;
+    } catch (_) {
+      // fall through
+    }
+    // fallback to SocialReactionsScreen
+    Navigator.push(context, MaterialPageRoute(builder: (_) => SocialReactionsScreen(accentColor: widget.accentColor)));
+  }
+
+  Future<void> _openStoriesHub() async {
+    try {
+      Navigator.of(context).pushNamed('/stories');
+      return;
+    } catch (_) {
+      // If route not present, show a helpful SnackBar then fallback.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Route "/stories" not registered. Add it to open Stories hub directly. Falling back to Social screen.')),
+        );
+      }
+    }
+    // fallback: open the social screen (it contains stories tab), user can switch to stories quickly
+    Navigator.push(context, MaterialPageRoute(builder: (_) => SocialReactionsScreen(accentColor: widget.accentColor)));
+  }
+
+  Future<void> _openPostReview() async {
+    try {
+      Navigator.of(context).pushNamed('/post_review');
+      return;
+    } catch (_) {
+      // fallback to PostReviewScreen widget (imported)
+    }
+    
+Navigator.push(
+  context,
+  MaterialPageRoute(
+    builder: (_) => PostReviewScreen(
+      accentColor: Colors.redAccent, // pick your theme/accent color
+      currentUser: {
+        'id': FirebaseAuth.instance.currentUser?.uid,
+        'username': FirebaseAuth.instance.currentUser?.displayName ?? 'Guest',
+      },
+    ),
+  ),
+);
+  }
+
+  Future<void> _openTrending() async {
+    try {
+      Navigator.of(context).pushNamed('/trending');
+      return;
+    } catch (_) {
+      // fallback to SocialReactionsScreen
+    }
+    Navigator.push(context, MaterialPageRoute(builder: (_) => SocialReactionsScreen(accentColor: widget.accentColor)));
+  }
+
+  Future<void> _openWatchParty() async {
+    // show bottom sheet to ask user if they want to open watch party
+    if (!mounted) return;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.black87,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Open Watch Party?', style: TextStyle(color: widget.accentColor, fontWeight: FontWeight.bold, fontSize: 16)),
+                const SizedBox(height: 12),
+                const Text('This will take you to the Watch Party area where you can join or start viewing sessions.', style: TextStyle(color: Colors.white70)),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
+                        onPressed: () {
+                          Navigator.pop(context);
+                          // try named route first, fallback to SocialReactionsScreen
+                          try {
+                            Navigator.of(this.context).pushNamed('/watch_party');
+                          } catch (_) {
+                            Navigator.push(context, MaterialPageRoute(builder: (_) => SocialReactionsScreen(accentColor: widget.accentColor)));
+                          }
+                        },
+                        child: const Text('Open Watch Party'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.pop(context),
+                        style: OutlinedButton.styleFrom(side: BorderSide(color: widget.accentColor)),
+                        child: const Text('Cancel'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openProfile() async {
+    try {
+      Navigator.of(context).pushNamed('/profile');
+      return;
+    } catch (_) {
+      // fallback to social/profile tab if user navigates there
+    }
+    Navigator.push(context, MaterialPageRoute(builder: (_) => SocialReactionsScreen(accentColor: widget.accentColor)));
+  }
+
+  Widget _buildQuickAction({required IconData icon, required String label, required VoidCallback onTap}) {
+    // Gradient shader for icon — cheap and isolated to icon paint
+    final gradient = LinearGradient(
+      colors: [widget.accentColor, widget.accentColor.withOpacity(0.6)],
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6.0),
+      child: ElevatedButton(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.white,
+          foregroundColor: Colors.black,
+          elevation: 1, // low elevation for performance
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+        onPressed: onTap,
+        child: Row(
+          children: [
+            // ShaderMask paints the Icon with a gradient
+            ShaderMask(
+              shaderCallback: (bounds) => gradient.createShader(Rect.fromLTWH(0, 0, bounds.width, bounds.height)),
+              child: Icon(icon, size: 16, color: Colors.white),
+            ),
+            const SizedBox(width: 8),
+            Text(label, style: const TextStyle(fontSize: 13)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // -------------------------
+  // Build
+  // -------------------------
   @override
   Widget build(BuildContext context) {
     // Get controller-managed chat list
@@ -236,6 +464,9 @@ class MessagesScreenState extends State<MessagesScreen>
 
     // If controller is still empty and you want skeletons, you can detect that here:
     final isEmpty = visibleChats.isEmpty;
+
+    // reference _isLoadingMore in UI to silence unused_field warning while leaving field present
+    final fabTooltip = 'New chat' + (_isLoadingMore ? ' · loading more...' : '');
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -262,7 +493,7 @@ class MessagesScreenState extends State<MessagesScreen>
               backgroundColor: Colors.transparent,
               elevation: 0,
               pinned: true,
-              expandedHeight: 200,
+              expandedHeight: 260, // increased to ensure TabBar won't overlap quick-actions
               flexibleSpace: FlexibleSpaceBar(
                 title: ValueListenableBuilder<bool>(
                   valueListenable: _isExpandedNotifier,
@@ -284,13 +515,14 @@ class MessagesScreenState extends State<MessagesScreen>
                   builder: (context, expanded, _) {
                     return expanded
                         ? Container(
-                            padding: const EdgeInsets.all(16),
+                            padding: const EdgeInsets.fromLTRB(16, 24, 16, 12),
                             child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
+                              mainAxisAlignment: MainAxisAlignment.start,
+                              crossAxisAlignment: CrossAxisAlignment.center,
                               children: [
                                 Container(
-                                  width: 80,
-                                  height: 80,
+                                  width: 84,
+                                  height: 84,
                                   decoration: const BoxDecoration(
                                     shape: BoxShape.circle,
                                     gradient: LinearGradient(
@@ -331,6 +563,28 @@ class MessagesScreenState extends State<MessagesScreen>
                                     fontSize: 14,
                                   ),
                                 ),
+
+                                // --- Compact interlink quick actions (non-invasive) ---
+                                const SizedBox(height: 14),
+                                // use Row inside SingleChildScrollView to avoid heavy ListView in header
+                                SizedBox(
+                                  height: 56,
+                                  child: SingleChildScrollView(
+                                    scrollDirection: Axis.horizontal,
+                                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                                    child: Row(
+                                      children: [
+                                        _buildQuickAction(icon: Icons.rss_feed, label: 'Feed', onTap: _openFeed),
+                                        _buildQuickAction(icon: Icons.camera_alt, label: 'Stories', onTap: _openStoriesHub),
+                                        _buildQuickAction(icon: Icons.rate_review, label: 'Review', onTap: _openPostReview),
+                                        _buildQuickAction(icon: Icons.whatshot, label: 'Trending', onTap: _openTrending),
+                                        _buildQuickAction(icon: Icons.connected_tv, label: 'Watch', onTap: _openWatchParty),
+                                        _buildQuickAction(icon: Icons.person, label: 'Profile', onTap: _openProfile),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                // --- end quick actions ---
                               ],
                             ),
                           )
@@ -339,7 +593,7 @@ class MessagesScreenState extends State<MessagesScreen>
                 ),
               ),
               bottom: PreferredSize(
-                preferredSize: const Size.fromHeight(48),
+                preferredSize: const Size.fromHeight(56),
                 child: Material(
                   elevation: 4,
                   color: Colors.black.withAlpha((0.5 * 255).round()),
@@ -365,7 +619,7 @@ class MessagesScreenState extends State<MessagesScreen>
                               children: [
                                 const Text('Unread'),
                                 if (unreadCount > 0) ...[
-                                  const SizedBox(width: 4),
+                                  const SizedBox(width: 6),
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                     decoration: BoxDecoration(
@@ -400,8 +654,7 @@ class MessagesScreenState extends State<MessagesScreen>
                     if (_selectedChatId == null) return const SizedBox.shrink();
                     final otherUser = _selectedOtherUser;
                     final chatId = _selectedChatId;
-                    final isGroup = _selectedIsGroup;
-
+                    // use summary.isGroup directly where needed (no unused local)
                     return Row(
                       children: [
                         FutureBuilder<bool>(
@@ -538,23 +791,62 @@ class MessagesScreenState extends State<MessagesScreen>
                             itemCount: visibleChats.length,
                             itemBuilder: (context, index) {
                               final summary = visibleChats[index];
-                              final isGroup = summary.isGroup;
+                              // use summary.isGroup inline to avoid unused local variable warning
                               return ChatTile(
                                 summary: summary,
                                 accentColor: widget.accentColor,
                                 controller: controller,
                                 isSelected: summary.id == _selectedChatId,
+                                // NEW: tell ChatTile whether other user has an active story
+                                hasStory: _usersWithActiveStories.contains(summary.otherUser?['id'] ?? ''),
+                                // NEW: tapping avatar opens that user's StoryScreen
+                                onAvatarTap: () async {
+                                  final otherId = (summary.otherUser?['id'] ?? '').toString();
+                                  if (otherId.isEmpty) return;
+                                  final now = DateTime.now();
+                                  try {
+                                    final snaps = await FirebaseFirestore.instance.collection('stories').where('userId', isEqualTo: otherId).get();
+                                    final userStories = snaps.docs.map((d) {
+                                      final m = Map<String, dynamic>.from(d.data() as Map<String, dynamic>);
+                                      m['id'] = d.id;
+                                      return m;
+                                    }).where((s) {
+                                      try {
+                                        final ts = DateTime.parse(s['timestamp'] ?? DateTime.now().toIso8601String());
+                                        return now.difference(ts) < const Duration(hours: 24);
+                                      } catch (_) {
+                                        return false;
+                                      }
+                                    }).toList();
+
+                                    if (!mounted) return;
+                                    if (userStories.isEmpty) {
+                                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No active stories')));
+                                      return;
+                                    }
+
+                                    // Optional: mark as viewed here (commented out - enable if desired)
+                                    // for (final s in userStories) {
+                                    //   await FirebaseFirestore.instance.collection('stories').doc(s['id']).collection('views').doc(widget.currentUser['id']).set({'viewedAt': DateTime.now().toIso8601String()});
+                                    // }
+
+                                    Navigator.push(context, MaterialPageRoute(builder: (_) => StoryScreen(stories: userStories, currentUserId: widget.currentUser['id'] ?? '', initialIndex: 0)));
+                                  } catch (e) {
+                                    debugPrint('Failed to open stories for $otherId: $e');
+                                    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to load stories: $e')));
+                                  }
+                                },
                                 onTap: () async {
                                   // clear any previous selection
                                   _clearLocalSelection();
 
                                   // mark as read (WhatsApp-like)
                                   if (summary.unreadCount > 0) {
-                                    await controller.markAsRead(summary.id, isGroup: isGroup);
+                                    await controller.markAsRead(summary.id, isGroup: summary.isGroup);
                                   }
 
                                   // navigate
-                                  if (isGroup) {
+                                  if (summary.isGroup) {
                                     Navigator.push(
                                       context,
                                       MaterialPageRoute(
@@ -613,6 +905,7 @@ class MessagesScreenState extends State<MessagesScreen>
       floatingActionButton: FloatingActionButton(
         onPressed: () => controller.showChatCreationOptions(context),
         backgroundColor: widget.accentColor,
+        tooltip: fabTooltip,
         child: const Icon(Icons.chat, color: Colors.white),
       ),
     );

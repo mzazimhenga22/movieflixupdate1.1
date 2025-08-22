@@ -1,3 +1,15 @@
+// watch_party_screen.dart
+// Watch party UI + controller logic (accepts an optional `post` parameter)
+//
+// This file is a minimal, drop-in update to fix the "undefined_named_parameter: post"
+// error by allowing WatchPartyScreen to accept an optional `post` payload (Map).
+//
+// The rest of your watch-party helpers (showRoleSelection, fetchStreamingLinks, startControlsTimer,
+// buildCreatorSetupView, buildInviteeWaitingView, buildPartyView, etc.) are expected to live in the
+// other files you referenced (watch_party_components.dart, watch_party_utils.dart, watch_party_flow.dart).
+// Keep those helpers in place — this file just ensures the screen can receive a `post` argument
+// (so `Navigator.push(..., builder: (_) => WatchPartyScreen(post: post))` compiles).
+
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -8,7 +20,10 @@ import 'watch_party_utils.dart';
 import 'watch_party_flow.dart';
 
 class WatchPartyScreen extends StatefulWidget {
-  const WatchPartyScreen({super.key});
+  /// Optional post data that initiated the watch party (may contain title, media url, etc).
+  final Map<String, dynamic>? post;
+
+  const WatchPartyScreen({super.key, this.post});
 
   @override
   WatchPartyScreenState createState() => WatchPartyScreenState();
@@ -18,7 +33,7 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
     with TickerProviderStateMixin {
   final TextEditingController _chatController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
-  List<String> _messages = []; // Changed from final to non-final
+  List<String> _messages = []; // Changed from final to non-final so we can mutate
   String _videoPath = "";
   String _title = "Watch Party Video";
   String? _subtitleUrl;
@@ -93,9 +108,28 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
         AnimationController(vsync: this, duration: const Duration(seconds: 2));
     _doorsController =
         AnimationController(vsync: this, duration: const Duration(seconds: 2));
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => showRoleSelection(context, this));
+
+    // If a post was supplied, initialize some fields from it (title / video).
+    if (widget.post != null) {
+      final p = widget.post!;
+      // Safely extract title and video/media url if present
+      final suppliedTitle = (p['title'] as String?) ?? (p['movieTitle'] as String?);
+      final suppliedMedia = (p['media'] as String?) ?? (p['mediaUrl'] as String?) ?? (p['video'] as String?);
+      if (suppliedTitle != null && suppliedTitle.isNotEmpty) {
+        _title = suppliedTitle;
+      }
+      if (suppliedMedia != null && suppliedMedia.isNotEmpty) {
+        _videoPath = suppliedMedia;
+      }
+    }
+
+    // Show role selection after first frame (this helper expected in watch_party_components.dart)
+    WidgetsBinding.instance.addPostFrameCallback((_) => showRoleSelection(context, this));
+
+    // Start auto-hide controls timer (helper in watch_party_utils.dart)
     startControlsTimer(this);
+
+    // Start listening to playback/participant changes only once partyCode is set/created
     _listenToPlaybackState();
     _listenToParticipants();
   }
@@ -218,8 +252,10 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
     });
     Future.delayed(const Duration(seconds: 3), () {
       if (mounted) {
-        setState(() => _emojiReactions
-            .removeWhere((r) => r['time'] == _emojiReactions.first['time']));
+        // remove the oldest reaction (simple cleanup strategy)
+        if (_emojiReactions.isNotEmpty) {
+          setState(() => _emojiReactions.removeAt(0));
+        }
       }
     });
   }

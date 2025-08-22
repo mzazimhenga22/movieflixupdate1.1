@@ -9,6 +9,8 @@ class ChatTile extends StatelessWidget {
   final VoidCallback? onLongPress;
   final VoidCallback? onChatOpened;
   final MessagesController controller;
+  final bool hasStory;
+  final VoidCallback? onAvatarTap;
 
   const ChatTile({
     super.key,
@@ -19,6 +21,8 @@ class ChatTile extends StatelessWidget {
     this.onTap,
     this.onLongPress,
     this.onChatOpened,
+    this.hasStory = false,
+    this.onAvatarTap,
   });
 
   String _formatTimestamp(BuildContext context, DateTime ts) {

@@ -381,6 +381,7 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
                   String avatarUrl = avatarController.text.trim();
                   String backgroundUrl;
                   if (avatarUrl.isEmpty) {
+                    // Choose the first available default avatar (deterministic)
                     final usedAvatars = _profiles
                         .map((p) => p['avatar'] as String)
                         .where((a) => defaultAvatars.contains(a))
@@ -389,16 +390,13 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
                         .where((a) => !usedAvatars.contains(a))
                         .toList();
                     avatarUrl = availableAvatars.isNotEmpty
-                        ? availableAvatars[
-                            Random().nextInt(availableAvatars.length)]
-                        : defaultAvatars[
-                            Random().nextInt(defaultAvatars.length)];
-                    backgroundUrl = defaultBackgrounds[
-                        Random().nextInt(defaultBackgrounds.length)];
+                        ? availableAvatars.first
+                        : defaultAvatars.first;
+                    // Use first background deterministically
+                    backgroundUrl = defaultBackgrounds.first;
                   } else {
                     avatarUrl = _processUrl(avatarUrl);
-                    backgroundUrl = defaultBackgrounds[
-                        Random().nextInt(defaultBackgrounds.length)];
+                    backgroundUrl = defaultBackgrounds.first;
                   }
                   final newProfile = {
                     'id': DateTime.now().millisecondsSinceEpoch.toString(),
@@ -646,19 +644,31 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
     var background = profile['backgroundImage'] as String? ?? "";
     final locked = (profile['locked'] as int?) == 1;
 
-    if (avatar.isEmpty || !avatar.startsWith("http")) {
-      avatar = defaultAvatars[Random().nextInt(defaultAvatars.length)];
-    } else {
+    // --- Deterministic handling: only use defaults when avatar/background is empty.
+    // If avatar is already saved as an asset or an http url, keep it as-is.
+    if (avatar.isEmpty) {
+      avatar = defaultAvatars.first;
+    } else if (avatar.startsWith("http")) {
       avatar = _processUrl(avatar);
-    }
-
-    if (background.isEmpty || !background.startsWith("http")) {
-      background = defaultBackgrounds[Random().nextInt(defaultBackgrounds.length)];
+    } else if (avatar.startsWith("assets/")) {
+      // keep asset path as-is
     } else {
-      background = _processUrl(background);
+      // unknown format -> fallback to first default
+      avatar = defaultAvatars.first;
     }
 
-    debugPrint('🔍 Building profile tile for: $name');
+    // Background: similar deterministic fallback
+    if (background.isEmpty) {
+      background = defaultBackgrounds.first;
+    } else if (background.startsWith("http")) {
+      background = _processUrl(background);
+    } else if (background.startsWith("assets/")) {
+      // keep asset path
+    } else {
+      background = defaultBackgrounds.first;
+    }
+
+    debugPrint('🔍 Building profile tile for: $name (avatar: $avatar)');
 
     return GestureDetector(
       onTap: () => _onProfileTapped(profile),

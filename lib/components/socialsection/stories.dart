@@ -1,3 +1,4 @@
+// story_screen.dart
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -32,10 +33,15 @@ class _StoryScreenState extends State<StoryScreen>
   late List<Map<String, dynamic>> _activeStories;
   final FocusNode _replyFocusNode = FocusNode();
 
+  // If true, play through all stories from Firestore (global) rather than only widget.stories
+  bool _playAll = false;
+  bool _isPaused = false;
+  bool _isLoadingAll = false;
+
   @override
   void initState() {
     super.initState();
-    _activeStories = widget.stories;
+    _activeStories = List<Map<String, dynamic>>.from(widget.stories);
     _currentIndex = widget.initialIndex.clamp(0, _activeStories.length - 1);
     _pageController = PageController(initialPage: _currentIndex);
     _animationController = AnimationController(
@@ -44,82 +50,195 @@ class _StoryScreenState extends State<StoryScreen>
     )
       ..addListener(() => setState(() {}))
       ..addStatusListener((status) {
-        if (status == AnimationStatus.completed) _nextStory();
+        if (status == AnimationStatus.completed && !_isPaused) _nextStory();
       });
     _loadStory(_currentIndex);
 
     _replyFocusNode.addListener(() {
       if (_replyFocusNode.hasFocus) {
-        _animationController.stop();
-        if (_videoController != null && _videoController!.value.isPlaying) {
-          _videoController!.pause();
-        }
+        _pause();
       } else {
-        if (_videoController != null && _videoController!.value.isInitialized) {
-          _videoController!.play();
-        } else {
-          _animationController.forward();
-        }
+        _resume();
       }
     });
   }
 
+  Future<void> _fetchAllActiveStories() async {
+    // Fetches all stories from Firestore that are <24h old and sorts by timestamp asc
+    setState(() {
+      _isLoadingAll = true;
+    });
+    try {
+      final now = DateTime.now();
+      final snapshot = await FirebaseFirestore.instance.collection('stories').get();
+      final docs = snapshot.docs.map((d) {
+        final m = Map<String, dynamic>.from(d.data() as Map<String, dynamic>);
+        m['id'] = d.id;
+        return m;
+      }).where((m) {
+        try {
+          final ts = DateTime.parse(m['timestamp'] ?? DateTime.now().toIso8601String());
+          return now.difference(ts) < const Duration(hours: 24);
+        } catch (_) {
+          return false;
+        }
+      }).toList();
+
+      // sort by timestamp ascending for natural play order
+      docs.sort((a, b) {
+        try {
+          return DateTime.parse(a['timestamp']).compareTo(DateTime.parse(b['timestamp']));
+        } catch (_) {
+          return 0;
+        }
+      });
+
+      if (!mounted) return;
+      setState(() {
+        _activeStories = docs;
+        _currentIndex = 0;
+        _pageController.jumpToPage(0);
+      });
+      _loadStory(0);
+    } catch (e) {
+      debugPrint('Failed to fetch all stories: $e');
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to load all stories: $e')));
+    } finally {
+      if (mounted) setState(() { _isLoadingAll = false; });
+    }
+  }
+
   void _loadStory(int index) {
+    // dispose previous video
     _animationController.reset();
+    _videoController?.removeListener(_videoListenerSafe);
     _videoController?.dispose();
     _videoController = null;
+    _isPaused = false;
+
+    if (_activeStories.isEmpty) return;
     final story = _activeStories[index];
-    final DateTime storyTime = DateTime.parse(story['timestamp']);
+    DateTime? storyTime;
+    try {
+      storyTime = DateTime.parse(story['timestamp'] ?? DateTime.now().toIso8601String());
+    } catch (_) {
+      storyTime = DateTime.now();
+    }
+
+    // auto-delete expired story if it's ours
     if (DateTime.now().difference(storyTime) >= const Duration(hours: 24)) {
-      _deleteStory(index);
+      // delete only if it's the current user's story
+      if (story['userId'] == widget.currentUserId) {
+        FirebaseFirestore.instance.collection('stories').doc(story['id']).delete().catchError((e) {
+          debugPrint('Failed to delete expired story: $e');
+        });
+      }
+      // remove locally and try next story
+      if (mounted) {
+        setState(() {
+          _activeStories.removeAt(index);
+          if (_activeStories.isEmpty) {
+            Navigator.pop(context);
+            return;
+          }
+          _currentIndex = index.clamp(0, _activeStories.length - 1);
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _loadStory(_currentIndex);
+        });
+      }
       return;
     }
+
     if (story['type'] == 'video') {
-      _videoController = VideoPlayerController.network(story['media'])
-        ..initialize().then((_) {
-          if (mounted) {
-            setState(() {
-              _videoController!.play();
-              _animationController.duration = _videoController!.value.duration;
-              _animationController.forward();
-            });
-          }
-        }).catchError((error) {
-          debugPrint('Error initializing video: $error');
+      try {
+        _videoController = VideoPlayerController.network(story['media']);
+        _videoController!.initialize().then((_) {
+          if (!mounted) return;
+          _videoController!.addListener(_videoListenerSafe);
+          final dur = _videoController!.value.duration;
+          // guard against zero duration
+          _animationController.duration = dur.inMilliseconds > 0 ? dur : const Duration(seconds: 5);
+          _videoController!.play();
+          _animationController.forward(from: 0.0);
+          setState(() {});
+        }).catchError((err) {
+          debugPrint('Video init error: $err');
+          // fallback to image timing
+          _animationController.duration = const Duration(seconds: 5);
+          _animationController.forward();
         });
+      } catch (e) {
+        debugPrint('Video load error: $e');
+        _animationController.duration = const Duration(seconds: 5);
+        _animationController.forward();
+      }
     } else {
       _animationController.duration = const Duration(seconds: 5);
       _animationController.forward();
     }
   }
 
+  void _videoListenerSafe() {
+    // Keep UI updated for video changes (e.g., buffering)
+    if (!mounted) return;
+    setState(() {});
+  }
+
   void _nextStory() {
+    if (_activeStories.isEmpty) {
+      Navigator.pop(context);
+      return;
+    }
     if (_currentIndex < _activeStories.length - 1) {
-      _pageController.nextPage(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeIn,
-      );
+      _pageController.nextPage(duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
     } else {
+      // finished all stories in this session
       Navigator.pop(context);
     }
   }
 
   void _previousStory() {
     if (_currentIndex > 0) {
-      _pageController.previousPage(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeIn,
-      );
+      _pageController.previousPage(duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
+    } else {
+      // at start — do nothing or optionally loop
     }
+  }
+
+  void _pause() {
+    if (_isPaused) return;
+    _isPaused = true;
+    _animationController.stop();
+    if (_videoController != null && _videoController!.value.isPlaying) _videoController!.pause();
+    setState(() {});
+  }
+
+  void _resume() {
+    if (!_isPaused) return;
+    _isPaused = false;
+    if (_videoController != null && _videoController!.value.isInitialized) {
+      _videoController!.play();
+      // sync animation controller to video position
+      final pos = _videoController!.value.position;
+      final dur = _videoController!.value.duration;
+      if (dur.inMilliseconds > 0) {
+        _animationController.duration = dur;
+        final double value = pos.inMilliseconds / dur.inMilliseconds;
+        _animationController.forward(from: value.clamp(0.0, 1.0));
+      } else {
+        _animationController.forward();
+      }
+    } else {
+      _animationController.forward();
+    }
+    setState(() {});
   }
 
   void _deleteStory(int index) {
     final story = _activeStories[index];
     if (story['userId'] == widget.currentUserId) {
-      FirebaseFirestore.instance
-          .collection('stories')
-          .doc(story['id'])
-          .delete();
+      FirebaseFirestore.instance.collection('stories').doc(story['id']).delete();
       setState(() {
         _activeStories.removeAt(index);
         if (_activeStories.isEmpty) {
@@ -127,11 +246,11 @@ class _StoryScreenState extends State<StoryScreen>
           return;
         }
         _currentIndex = index.clamp(0, _activeStories.length - 1);
-        _loadStory(_currentIndex);
+        _pageController.jumpToPage(_currentIndex);
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Story deleted")),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Story deleted")));
+      // load next
+      _loadStory(_currentIndex);
     }
   }
 
@@ -142,8 +261,156 @@ class _StoryScreenState extends State<StoryScreen>
         'storyUserId': _activeStories[_currentIndex]['userId'],
         'content': data['content'],
         'timestamp': DateTime.now().toIso8601String(),
-        'storyId': _activeStories[_currentIndex]['id'], // Added storyId
+        'storyId': _activeStories[_currentIndex]['id'],
       });
+    }
+  }
+
+  Future<void> _openCommentsSheet() async {
+    if (_activeStories.isEmpty) return;
+    final story = _activeStories[_currentIndex];
+    final storyId = story['id'] as String? ?? '';
+    final caption = (story['caption'] ?? '').toString();
+
+    _pause();
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.black87,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(12))),
+      builder: (context) {
+        final commentController = TextEditingController();
+        return Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+          child: FractionallySizedBox(
+            heightFactor: 0.75,
+            child: Column(
+              children: [
+                Container(height: 6, width: 48, margin: const EdgeInsets.symmetric(vertical: 10), decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(4))),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                  child: Row(
+                    children: [
+                      Expanded(child: Text(caption.isEmpty ? 'No caption' : caption, style: const TextStyle(color: Colors.white70))),
+                      if (story['userId'] == widget.currentUserId)
+                        TextButton(onPressed: () {
+                          // simple inline caption edit: prompt then update Firestore and local state
+                          Navigator.of(context).pop();
+                          _showEditCaptionDialog(storyId, story);
+                        }, child: const Text('Edit', style: TextStyle(color: Colors.white70))),
+                    ],
+                  ),
+                ),
+                const Divider(color: Colors.white12),
+                Expanded(
+                  child: StreamBuilder<QuerySnapshot>(
+                    stream: (storyId.isNotEmpty)
+                        ? FirebaseFirestore.instance.collection('stories').doc(storyId).collection('comments').orderBy('timestamp', descending: true).snapshots()
+                        : const Stream.empty(),
+                    builder: (context, snap) {
+                      if (snap.hasError) return const Center(child: Text('Failed to load comments', style: TextStyle(color: Colors.white)));
+                      if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+                      final docs = snap.data!.docs;
+                      if (docs.isEmpty) return const Center(child: Text('No comments', style: TextStyle(color: Colors.white70)));
+                      return ListView.separated(
+                        itemCount: docs.length,
+                        separatorBuilder: (_, __) => const Divider(color: Colors.white10),
+                        itemBuilder: (context, i) {
+                          final d = docs[i].data() as Map<String, dynamic>;
+                          return ListTile(
+                            leading: CircleAvatar(backgroundImage: NetworkImage(d['userAvatar'] ?? 'https://via.placeholder.com/100')),
+                            title: Text(d['username'] ?? 'Unknown', style: const TextStyle(color: Colors.white)),
+                            subtitle: Text(d['text'] ?? '', style: const TextStyle(color: Colors.white70)),
+                            trailing: Text(
+                              (() {
+                                try {
+                                  final t = DateTime.parse(d['timestamp'] ?? DateTime.now().toIso8601String());
+                                  final diff = DateTime.now().difference(t);
+                                  if (diff.inHours < 1) return '${diff.inMinutes}m';
+                                  if (diff.inDays < 1) return '${diff.inHours}h';
+                                  return '${diff.inDays}d';
+                                } catch (_) {
+                                  return '';
+                                }
+                              })(),
+                              style: const TextStyle(color: Colors.white38, fontSize: 12),
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Row(children: [
+                    Expanded(
+                      child: TextField(
+                        controller: commentController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(hintText: 'Write a comment', hintStyle: const TextStyle(color: Colors.white54), filled: true, fillColor: Colors.white12, border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none)),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.send, color: Colors.white),
+                      onPressed: () async {
+                        final text = commentController.text.trim();
+                        if (text.isEmpty) return;
+                        if (storyId.isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to post comment')));
+                          return;
+                        }
+                        try {
+                          await FirebaseFirestore.instance.collection('stories').doc(storyId).collection('comments').add({
+                            'text': text,
+                            'username': widget.currentUserId, // you may want to store username instead
+                            'userAvatar': '', // optionally pass avatar url
+                            'timestamp': DateTime.now().toIso8601String(),
+                          });
+                          commentController.clear();
+                        } catch (e) {
+                          debugPrint('comment post error: $e');
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to post comment')));
+                        }
+                      },
+                    )
+                  ]),
+                )
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    // resume playback afterwards
+    _resume();
+  }
+
+  Future<void> _showEditCaptionDialog(String storyId, Map<String, dynamic> story) async {
+    final editController = TextEditingController(text: (story['caption'] ?? '').toString());
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Edit caption'),
+        content: TextField(controller: editController, decoration: const InputDecoration(hintText: 'Caption')),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(null), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.of(context).pop(editController.text.trim()), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (result != null) {
+      try {
+        await FirebaseFirestore.instance.collection('stories').doc(storyId).update({'caption': result});
+        // update local copy
+        setState(() {
+          final idx = _activeStories.indexWhere((s) => (s['id'] as String?) == storyId);
+          if (idx != -1) _activeStories[idx]['caption'] = result;
+        });
+      } catch (e) {
+        debugPrint('Failed to update caption: $e');
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to update caption')));
+      }
     }
   }
 
@@ -151,6 +418,7 @@ class _StoryScreenState extends State<StoryScreen>
   void dispose() {
     _pageController.dispose();
     _animationController.dispose();
+    _videoController?.removeListener(_videoListenerSafe);
     _videoController?.dispose();
     _replyController.dispose();
     _replyFocusNode.dispose();
@@ -162,29 +430,30 @@ class _StoryScreenState extends State<StoryScreen>
     if (_activeStories.isEmpty) {
       return const Scaffold(
         backgroundColor: Colors.black,
-        body: Center(
-            child: Text("No active stories",
-                style: TextStyle(color: Colors.white))),
+        body: Center(child: Text("No active stories", style: TextStyle(color: Colors.white))),
       );
     }
     final story = _activeStories[_currentIndex];
+    final isOwner = story['userId'] == widget.currentUserId;
+
     return Scaffold(
       resizeToAvoidBottomInset: true,
       backgroundColor: Colors.black,
       body: GestureDetector(
+        behavior: HitTestBehavior.opaque,
         onHorizontalDragEnd: (details) {
           if (details.primaryVelocity != null) {
             if (details.primaryVelocity! > 0) {
               _previousStory();
-            } else if (details.primaryVelocity! < 0) _nextStory();
+            } else if (details.primaryVelocity! < 0) {
+              _nextStory();
+            }
           }
         },
-        onTapUp: (details) {
-          final double screenWidth = MediaQuery.of(context).size.width;
-          if (details.globalPosition.dx < screenWidth / 3) {
-            _previousStory();
-          } else if (details.globalPosition.dx > 2 * screenWidth / 3) {
-            _nextStory();
+        onVerticalDragEnd: (details) {
+          if (details.primaryVelocity != null && details.primaryVelocity! < -200) {
+            // swipe up -> open comments & caption
+            _openCommentsSheet();
           }
         },
         child: Stack(
@@ -198,254 +467,241 @@ class _StoryScreenState extends State<StoryScreen>
                 _loadStory(index);
               },
               itemBuilder: (context, index) {
-                final story = _activeStories[index];
+                final s = _activeStories[index];
                 return Stack(
                   fit: StackFit.expand,
                   children: [
                     Center(
-                      child: story['type'] == 'video' &&
+                      child: s['type'] == 'video' &&
                               _videoController != null &&
-                              _videoController!.value.isInitialized
-                          ? AspectRatio(
-                              aspectRatio: _videoController!.value.aspectRatio,
-                              child: VideoPlayer(_videoController!),
-                            )
+                              _videoController!.value.isInitialized &&
+                              index == _currentIndex
+                          ? AspectRatio(aspectRatio: _videoController!.value.aspectRatio, child: VideoPlayer(_videoController!))
                           : CachedNetworkImage(
-                              imageUrl: story['media'],
+                              imageUrl: s['media'],
                               fit: BoxFit.cover,
-                              placeholder: (context, url) => const Center(
-                                  child: CircularProgressIndicator()),
-                              errorWidget: (context, url, error) =>
-                                  const Center(
-                                child: Icon(Icons.broken_image,
-                                    size: 40, color: Colors.white),
-                              ),
+                              placeholder: (context, url) => const Center(child: CircularProgressIndicator()),
+                              errorWidget: (context, url, error) => const Center(child: Icon(Icons.broken_image, size: 40, color: Colors.white)),
                             ),
                     ),
+
+                    // dark gradient top/bottom so captions are readable
                     Container(
                       decoration: BoxDecoration(
                         gradient: LinearGradient(
                           begin: Alignment.topCenter,
                           end: Alignment.bottomCenter,
-                          colors: [
-                            Colors.black.withOpacity(0.3),
-                            Colors.transparent,
-                            Colors.black.withOpacity(0.3),
-                          ],
-                          stops: const [0.0, 0.5, 1.0],
+                          colors: [Colors.black.withOpacity(0.35), Colors.transparent, Colors.black.withOpacity(0.45)],
+                          stops: const [0.0, 0.55, 1.0],
                         ),
                       ),
                     ),
-                    // Add caption display
-                    if (story['caption'] != null && story['caption'].isNotEmpty)
+
+                    // caption (compact) - tap to expand via comments sheet
+                    if ((s['caption'] ?? '').toString().isNotEmpty)
                       Positioned(
-                        bottom: 60,
+                        bottom: 90,
                         left: 16,
                         right: 16,
-                        child: Text(
-                          story['caption'],
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            shadows: [
-                              Shadow(
-                                color: Colors.black45,
-                                offset: Offset(1, 1),
-                                blurRadius: 2,
-                              ),
-                            ],
+                        child: GestureDetector(
+                          onTap: _openCommentsSheet,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(8)),
+                            child: Text(
+                              s['caption'],
+                              style: const TextStyle(color: Colors.white, fontSize: 15),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                            ),
                           ),
-                          textAlign: TextAlign.center,
                         ),
                       ),
                   ],
                 );
               },
             ),
+
+            // top controls + progress bars
             Positioned(
-              top: 48,
-              left: 16,
-              right: 16,
+              top: 40,
+              left: 12,
+              right: 12,
               child: Column(
                 children: [
-                  // Multiple progress bars for each story
+                  // progress indicators across the activeStories list
                   Row(
-                    children: List.generate(_activeStories.length, (index) {
+                    children: List.generate(_activeStories.length, (i) {
                       double progress;
-                      if (index < _currentIndex) {
+                      if (i < _currentIndex) {
                         progress = 1.0;
-                      } else if (index == _currentIndex) {
+                      } else if (i == _currentIndex) {
                         progress = _animationController.value;
                       } else {
                         progress = 0.0;
                       }
                       return Expanded(
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          padding: const EdgeInsets.symmetric(horizontal: 2.0),
                           child: LinearProgressIndicator(
                             value: progress,
-                            backgroundColor: Colors.white24,
-                            valueColor: const AlwaysStoppedAnimation<Color>(
-                                Colors.white),
+                            backgroundColor: Colors.white12,
+                            valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
                             minHeight: 3,
                           ),
                         ),
                       );
                     }),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
+                      CircleAvatar(
+                        radius: 18,
+                        backgroundImage: NetworkImage(story['userAvatar'] ?? 'https://via.placeholder.com/150'),
+                      ),
+                      const SizedBox(width: 8),
                       Expanded(
-                        child: Row(
-                          children: [
-                            CircleAvatar(
-                              radius: 16,
-                              backgroundImage: NetworkImage(
-                                  story['userAvatar'] ??
-                                      'https://via.placeholder.com/150'),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                story['user'],
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                  shadows: [
-                                    Shadow(
-                                        color: Colors.black45,
-                                        offset: Offset(1, 1),
-                                        blurRadius: 2),
-                                  ],
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
+                        child: Text(
+                          story['user'] ?? 'Unknown',
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      IconButton(
-                        icon: const Icon(Icons.close,
-                            color: Colors.white, size: 24),
-                        onPressed: () => Navigator.pop(context),
-                      ),
+                      // Play All toggle & loading indicator
+                      if (!_playAll)
+                        TextButton(
+                          onPressed: () async {
+                            // enable play-all and fetch all stories
+                            setState(() => _playAll = true);
+                            await _fetchAllActiveStories();
+                          },
+                          child: _isLoadingAll ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Play all', style: TextStyle(color: Colors.white70)),
+                        )
+                      else
+                        TextButton(
+                          onPressed: () {
+                            // stop play-all and restore initial set (if original is available)
+                            setState(() {
+                              _playAll = false;
+                              _activeStories = List<Map<String, dynamic>>.from(widget.stories);
+                              _currentIndex = 0;
+                              _pageController.jumpToPage(0);
+                              _loadStory(0);
+                            });
+                          },
+                          child: const Text('Stop all', style: TextStyle(color: Colors.white70)),
+                        ),
+                      IconButton(icon: const Icon(Icons.close, color: Colors.white), onPressed: () => Navigator.pop(context)),
                     ],
                   ),
                 ],
               ),
             ),
-            if (story['userId'] == widget.currentUserId)
+
+            // delete button for owner
+            if (isOwner)
               Positioned(
                 top: 48,
-                right: 16,
+                right: 12,
                 child: IconButton(
-                  icon: const Icon(Icons.delete,
-                      color: Colors.redAccent, size: 22),
+                  icon: const Icon(Icons.delete, color: Colors.redAccent),
                   onPressed: () => _deleteStory(_currentIndex),
                 ),
               ),
+
+            // bottom quick actions: like, comment, share OR reply input for non-owner
             Positioned(
               bottom: 24,
               left: 16,
               right: 16,
-              child: Padding(
-                padding: EdgeInsets.only(
-                    bottom: MediaQuery.of(context).viewInsets.bottom),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (story['userId'] != widget.currentUserId) ...[
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.favorite_border,
-                                color: Colors.white, size: 22),
-                            onPressed: () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                    content: Text(
-                                        "Liked story by ${story['user']}")),
-                              );
-                              _updateChatWithInteraction(
-                                  "like", {'content': ''});
-                            },
-                          ),
-                          const SizedBox(width: 16),
-                          IconButton(
-                            icon: const Icon(Icons.comment,
-                                color: Colors.white, size: 22),
-                            onPressed: () => FocusScope.of(context)
-                                .requestFocus(_replyFocusNode),
-                          ),
-                          const SizedBox(width: 16),
-                          IconButton(
-                            icon: const Icon(Icons.share,
-                                color: Colors.white, size: 22),
-                            onPressed: () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text("Shared story")),
-                              );
-                              _updateChatWithInteraction(
-                                  "share", {'content': ''});
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _replyController,
-                        focusNode: _replyFocusNode,
-                        style:
-                            const TextStyle(color: Colors.white, fontSize: 16),
-                        decoration: InputDecoration(
-                          hintText: "Reply to ${story['user']}...",
-                          hintStyle: const TextStyle(color: Colors.white70),
-                          filled: true,
-                          fillColor: Colors.black54,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide.none,
-                          ),
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 12),
-                          suffixIcon: IconButton(
-                            icon: const Icon(Icons.send,
-                                color: Colors.white70, size: 20),
-                            onPressed: () {
-                              if (_replyController.text.trim().isEmpty) return;
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                    content: Text(
-                                        "Replied: ${_replyController.text}")),
-                              );
-                              _updateChatWithInteraction("reply", {
-                                'content': _replyController.text,
-                              });
-                              _replyController.clear();
-                              FocusScope.of(context).unfocus();
-                            },
-                          ),
-                        ),
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (value) {
-                          if (value.trim().isEmpty) return;
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text("Replied: $value")),
-                          );
-                          _updateChatWithInteraction("reply", {
-                            'content': value,
-                          });
-                          _replyController.clear();
-                          FocusScope.of(context).unfocus();
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!isOwner) ...[
+                    Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      IconButton(
+                        icon: const Icon(Icons.favorite_border, color: Colors.white),
+                        onPressed: () {
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Liked story by ${story['user']}')));
+                          _updateChatWithInteraction('like', {'content': ''});
                         },
                       ),
-                    ],
-                  ],
-                ),
+                      const SizedBox(width: 16),
+                      IconButton(
+                        icon: const Icon(Icons.comment, color: Colors.white),
+                        onPressed: _openCommentsSheet,
+                      ),
+                      const SizedBox(width: 16),
+                      IconButton(
+                        icon: const Icon(Icons.share, color: Colors.white),
+                        onPressed: () {
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Shared story')));
+                          _updateChatWithInteraction('share', {'content': ''});
+                        },
+                      ),
+                    ]),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _replyController,
+                      focusNode: _replyFocusNode,
+                      style: const TextStyle(color: Colors.white, fontSize: 16),
+                      decoration: InputDecoration(
+                        hintText: 'Reply',
+                        hintStyle: const TextStyle(color: Colors.white70),
+                        filled: true,
+                        fillColor: Colors.black54,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        suffixIcon: IconButton(
+                          icon: const Icon(Icons.send, color: Colors.white70),
+                          onPressed: () {
+                            final text = _replyController.text.trim();
+                            if (text.isEmpty) return;
+                            _updateChatWithInteraction('reply', {'content': text});
+                            _replyController.clear();
+                            FocusScope.of(context).unfocus();
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Replied to ${story['user']}')));
+                          },
+                        ),
+                      ),
+                      textInputAction: TextInputAction.send,
+                      onSubmitted: (value) {
+                        final text = value.trim();
+                        if (text.isEmpty) return;
+                        _updateChatWithInteraction('reply', {'content': text});
+                        _replyController.clear();
+                        FocusScope.of(context).unfocus();
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Replied to ${story['user']}')));
+                      },
+                    ),
+                  ] else
+                    // owner sees a tappable hint to swipe up to view caption/comments + small spacer
+                    GestureDetector(
+                      onTap: _openCommentsSheet,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(color: Colors.white12, borderRadius: BorderRadius.circular(10)),
+                        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: const [
+                          Icon(Icons.info_outline, color: Colors.white70, size: 18),
+                          SizedBox(width: 8),
+                          Text('Tap to view comments & edit caption', style: TextStyle(color: Colors.white70)),
+                        ]),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+
+            // Long-press to pause overlay (visual feedback)
+            Positioned.fill(
+              child: GestureDetector(
+                onLongPress: () => _pause(),
+                onLongPressUp: () => _resume(),
+                onTapDown: (_) {
+                  // tap down doesn't pause by itself because taps are used to navigate left/right.
+                },
               ),
             ),
           ],
@@ -454,4 +710,3 @@ class _StoryScreenState extends State<StoryScreen>
     );
   }
 }
-
