@@ -28,6 +28,7 @@
         android:label="movieflix"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="true"
         tools:replace="android:icon,android:label">
 
         <!-- ✅ Firebase Messaging Foreground Service -->
@@ -35,7 +36,8 @@
             android:name="com.google.firebase.messaging.FirebaseMessagingService"
             android:exported="false">
             <intent-filter>
-                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </service>
 

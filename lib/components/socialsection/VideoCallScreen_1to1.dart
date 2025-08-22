@@ -29,8 +29,14 @@ class VideoCallScreen1to1 extends StatefulWidget {
 
 class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
     with SingleTickerProviderStateMixin {
+  // Renderers
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final Map<String, RTCVideoRenderer> _remoteRenderers = {};
+
+  // Renderer state tracking
+  final Map<RTCVideoRenderer, bool> _rendererInitialized = {};
+  final Map<RTCVideoRenderer, bool> _rendererDisposed = {};
+
   bool isMuted = false;
   bool isVideoOff = false;
   bool isSpeakerOn = false;
@@ -40,45 +46,93 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
   bool isRinging = false;
   bool isAnswered = false;
   String? _focusedParticipantId;
-  late StreamSubscription<DocumentSnapshot<Map<String, dynamic>>> _callStatusSubscription;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _callStatusSubscription;
+
+  bool _isDisposed = false;
 
   @override
   void initState() {
     super.initState();
-    _localRenderer.initialize();
+    // Create & initialize renderers asynchronously (non-blocking).
+    _createAndInitRenderer(_localRenderer);
 
-    // Prepare remote renderers
-    _remoteRenderers[widget.callerId] = RTCVideoRenderer()..initialize();
-    _remoteRenderers[widget.receiverId] = RTCVideoRenderer()..initialize();
+    // Prepare remote renderers for both participants (create now; init later if needed)
+    _remoteRenderers[widget.callerId] = RTCVideoRenderer();
+    _remoteRenderers[widget.receiverId] = RTCVideoRenderer();
+    _createAndInitRenderer(_remoteRenderers[widget.callerId]!);
+    _createAndInitRenderer(_remoteRenderers[widget.receiverId]!);
+
     _focusedParticipantId = widget.receiverId; // Default focus
 
+    // Start or prepare call state
     _startOrAnswerCall();
     _listenForCallStatus();
   }
 
-  Future<void> _startOrAnswerCall() async {
-    if (widget.currentUserId == widget.callerId) {
-      // Caller initializes local stream
-      final localStream = await RtcManager.getLocalStream(widget.callId);
-      
-      if (localStream != null) {
-        await _localRenderer.initialize(); // Initialize first
-        _localRenderer.srcObject = localStream;
+  /// Create and initialize renderer and track its state
+  Future<void> _createAndInitRenderer(RTCVideoRenderer renderer) async {
+    if (_rendererInitialized[renderer] == true) return;
+    try {
+      await renderer.initialize();
+      _rendererInitialized[renderer] = true;
+      _rendererDisposed[renderer] = false;
+      debugPrint('[VideoCall] Renderer initialized: $renderer');
+    } catch (e, st) {
+      debugPrint('[VideoCall] Renderer init error: $e\n$st');
+      _rendererInitialized[renderer] = false;
+    }
+  }
+
+  /// Safely set renderer.srcObject after ensuring the renderer is initialized and not disposed
+  Future<void> _setRendererSrcObject(RTCVideoRenderer renderer, MediaStream stream) async {
+    if (_isDisposed) return;
+    try {
+      // Ensure renderer initialized (will no-op if already handled)
+      if (_rendererInitialized[renderer] != true) {
+        await _createAndInitRenderer(renderer);
       }
 
+      // Check disposed flag again
+      if (_rendererDisposed[renderer] == true) {
+        debugPrint('[VideoCall] Trying to set srcObject on disposed renderer - skipping.');
+        return;
+      }
+
+      renderer.srcObject = stream;
+    } catch (e, st) {
+      // Guard against the "renderer disposed" exception or other race
+      debugPrint('[VideoCall] Failed to set srcObject: $e\n$st');
+    }
+  }
+
+  Future<void> _startOrAnswerCall() async {
+    // Caller: we may already have published local tracks via RtcManager.start*Call earlier.
+    if (widget.currentUserId == widget.callerId) {
+      final localStream = RtcManager.getLocalStream(widget.callId);
+      if (localStream != null) {
+        await _setRendererSrcObject(_localRenderer, localStream);
+      }
       _setupRemoteStreams();
       setState(() => isRinging = true);
-
     } else if (widget.currentUserId == widget.receiverId) {
-      // Receiver shows ringing UI
+      // Receiver sees ringing UI until answered
       setState(() => isRinging = true);
     }
   }
 
-  void _setupRemoteStreams() {
-    final remoteStream = RtcManager.getRemoteStream(widget.callId, widget.receiverId);
-    if (remoteStream != null) {
-      _remoteRenderers[widget.receiverId]?.srcObject = remoteStream;
+Future<void> _setupRemoteStreams() async {
+
+    if (_isDisposed) return;
+
+    // Setup remote stream for the focused participant (receiverId/callerId)
+    final remoteForReceiver = RtcManager.getRemoteStream(widget.callId, widget.receiverId);
+    if (remoteForReceiver != null && _remoteRenderers[widget.receiverId] != null) {
+      await _setRendererSrcObject(_remoteRenderers[widget.receiverId]!, remoteForReceiver);
+    }
+
+    final remoteForCaller = RtcManager.getRemoteStream(widget.callId, widget.callerId);
+    if (remoteForCaller != null && _remoteRenderers[widget.callerId] != null) {
+      await _setRendererSrcObject(_remoteRenderers[widget.callerId]!, remoteForCaller);
     }
   }
 
@@ -93,7 +147,7 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
 
       final status = data['status'] as String?;
       if (status == 'ended' || status == 'rejected') {
-        Navigator.of(context).pop();
+        if (mounted) Navigator.of(context).pop();
       } else if (status == 'answered' && !isAnswered) {
         setState(() {
           isAnswered = true;
@@ -102,16 +156,18 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
         _startTimer();
         _setupRemoteStreams();
       }
+    }, onError: (err) {
+      debugPrint('[VideoCall] call status listen error: $err');
     });
   }
 
   void _startTimer() {
+    _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (mounted) {
-        _callDuration++;
-        _formattedDuration = _formatDuration(_callDuration);
-        setState(() {});
-      }
+      if (!mounted) return;
+      _callDuration++;
+      _formattedDuration = _formatDuration(_callDuration);
+      setState(() {});
     });
   }
 
@@ -122,21 +178,43 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
   }
 
   Future<void> _answerCall() async {
-    await RtcManager.answerCall(callId: widget.callId, peerId: widget.currentUserId);
-    final localStream = RtcManager.getLocalStream(widget.callId);
-    if (localStream != null) {
-      _localRenderer.srcObject = localStream;
+    try {
+      await RtcManager.answerCall(callId: widget.callId, peerId: widget.currentUserId);
+
+      // get local stream AFTER answering (RtcManager creates/publishes it)
+      final localStream = RtcManager.getLocalStream(widget.callId);
+      if (localStream != null) {
+        await _setRendererSrcObject(_localRenderer, localStream);
+      }
+
+      // attach remote streams if any
+      await _setupRemoteStreams();
+
+      if (mounted) {
+        setState(() {
+          isRinging = false;
+          isAnswered = true;
+        });
+      }
+    } catch (e, st) {
+      debugPrint('[VideoCall] answer error: $e\n$st');
+      // show a soft error but don't crash
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to answer call')),
+        );
+      }
     }
-    _setupRemoteStreams();
-    setState(() {
-      isRinging = false;
-      isAnswered = true;
-    });
   }
 
   Future<void> _rejectCall() async {
-    await RtcManager.rejectCall(callId: widget.callId, peerId: widget.currentUserId);
-    if (mounted) Navigator.of(context).pop();
+    try {
+      await RtcManager.rejectCall(callId: widget.callId, peerId: widget.currentUserId);
+    } catch (e) {
+      debugPrint('[VideoCall] reject error: $e');
+    } finally {
+      if (mounted) Navigator.of(context).pop();
+    }
   }
 
   void _toggleFocusedParticipant() {
@@ -151,13 +229,39 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
 
   @override
   void dispose() {
-    _localRenderer.dispose();
-    _remoteRenderers.forEach((_, renderer) => renderer.dispose());
+    _isDisposed = true;
+
+    // Cancel timer and subscription first
     _timer?.cancel();
-    _callStatusSubscription.cancel();
+    _callStatusSubscription?.cancel();
+
+    // Hang up if call was answered (attempt cleanup on server)
     if (isAnswered) {
-      RtcManager.hangUp(widget.callId);
+      try {
+        RtcManager.hangUp(widget.callId);
+      } catch (e) {
+        debugPrint('[VideoCall] hangUp error during dispose: $e');
+      }
     }
+
+    // Dispose renderers and mark disposed
+    try {
+      _rendererDisposed[_localRenderer] = true;
+      _localRenderer.dispose();
+    } catch (e) {
+      debugPrint('[VideoCall] error disposing local renderer: $e');
+    }
+
+    for (final renderer in _remoteRenderers.values) {
+      try {
+        _rendererDisposed[renderer] = true;
+        renderer.dispose();
+      } catch (e) {
+        debugPrint('[VideoCall] error disposing remote renderer: $e');
+      }
+    }
+
+    _remoteRenderers.clear();
     super.dispose();
   }
 
@@ -185,8 +289,7 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
                       onTap: _toggleFocusedParticipant,
                       child: _buildCallScreen(isLandscape),
                     ),
-                  if (!isRinging)
-                    _buildControlButtons(isLandscape),
+                  if (!isRinging) _buildControlButtons(isLandscape),
                   Positioned(
                     top: 40,
                     right: 20,
@@ -221,17 +324,12 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
           children: [
             CircleAvatar(
               radius: 60,
-              backgroundImage:
-                  photoUrl != null ? NetworkImage(photoUrl) : null,
-              child: photoUrl == null
-                  ? const Icon(Icons.person, size: 60)
-                  : null,
+              backgroundImage: photoUrl != null ? NetworkImage(photoUrl) : null,
+              child: photoUrl == null ? const Icon(Icons.person, size: 60) : null,
             ),
             const SizedBox(height: 20),
             Text(
-              isCaller
-                  ? 'Calling $username...'
-                  : 'Incoming Video Call from $username',
+              isCaller ? 'Calling $username...' : 'Incoming Video Call from $username',
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 24,
@@ -284,9 +382,7 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
   }
 
   Widget _buildCallScreen(bool isLandscape) {
-    final renderer = _focusedParticipantId != null
-        ? _remoteRenderers[_focusedParticipantId]
-        : null;
+    final renderer = _focusedParticipantId != null ? _remoteRenderers[_focusedParticipantId] : null;
 
     return Stack(
       children: [
@@ -296,6 +392,10 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
               renderer,
               objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
             ),
+          )
+        else
+          Positioned.fill(
+            child: Container(color: Colors.black),
           ),
         Positioned(
           top: 16,
@@ -395,8 +495,7 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1>
                 RtcManager.hangUp(widget.callId);
                 if (mounted) Navigator.of(context).pop();
               },
-              child: const Icon(Icons.call_end,
-                  size: 32, color: Colors.white),
+              child: const Icon(Icons.call_end, size: 32, color: Colors.white),
             ),
           ],
         ),

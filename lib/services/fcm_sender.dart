@@ -1,14 +1,46 @@
+// services/fcmsender.dart
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+
+/// WARNING: This file demonstrates the FCM HTTP v1 flow and contains a service
+/// account. **Do not** embed service account credentials in a client app for
+/// production. Move this code to a secure server (Cloud Function, Cloud Run, etc.).
+///
+/// This helper supports:
+///  - sending data-only messages (recommended for background handling)
+///  - sending notification + data (for foreground/display behavior)
+///  - small convenience wrapper to send to multiple tokens
+///
+/// Usage:
+///   await sendFcmPush(
+///     fcmToken: token,
+///     projectId: 'your-project-id',
+///     title: 'New message',
+///     body: 'Hello!',
+///     extraData: {'chatId': 'abc'},
+///     notification: false, // default is data-only
+///   );
+///
+/// Or to multiple tokens:
+///   await sendFcmPushToTokens(tokens, ...);
+///
 
 Future<void> sendFcmPush({
   required String fcmToken,
   required String projectId,
   required String title,
   required String body,
+  Map<String, String>? extraData,
+  /// If true, FCM will include the "notification" block (may cause system UI to show).
+  /// If false (default), message is data-only (recommended for reliable background handling).
+  bool notification = false,
+  /// Optional Android channel id for notifications (used when notification == true)
+  String? androidChannelId,
+  /// Time-to-live in seconds (optional)
+  int? ttlSeconds,
 }) async {
-  // ⚠️ Don’t hardcode private keys in production. Store securely.
+  // --- WARNING: service account inside client is insecure. Use a server in production. ---
   const serviceAccountJson = {
     "type": "service_account",
     "project_id": "movieflix-53a51",
@@ -18,63 +50,147 @@ Future<void> sendFcmPush({
     "token_uri": "https://oauth2.googleapis.com/token",
   };
 
-  // Create JWT
-  final jwt = JWT(
-    {
+  try {
+    // Create JWT assertion for OAuth exchange
+    final jwt = JWT({
       'iss': serviceAccountJson['client_email'],
       'scope': 'https://www.googleapis.com/auth/firebase.messaging',
       'aud': serviceAccountJson['token_uri'],
       'iat': DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      'exp': DateTime.now().add(Duration(minutes: 60)).millisecondsSinceEpoch ~/ 1000,
-    },
-  );
+      'exp': DateTime.now().add(const Duration(minutes: 60)).millisecondsSinceEpoch ~/ 1000,
+    });
 
-  final privateKeyPem = serviceAccountJson['private_key']!;
-  final key = RSAPrivateKey(privateKeyPem);
+    final privateKeyPem = serviceAccountJson['private_key']!;
+    final key = RSAPrivateKey(privateKeyPem);
 
-  final signedJwt = jwt.sign(key, algorithm: JWTAlgorithm.RS256);
+    final signedJwt = jwt.sign(key, algorithm: JWTAlgorithm.RS256);
 
-  // Exchange JWT for OAuth2 access token
-  final oauthResponse = await http.post(
-    Uri.parse(serviceAccountJson['token_uri']!),
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: {
-      'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      'assertion': signedJwt,
-    },
-  );
-
-  if (oauthResponse.statusCode != 200) {
-    throw Exception('Failed to obtain access token: ${oauthResponse.body}');
-  }
-
-  final accessToken = jsonDecode(oauthResponse.body)['access_token'];
-
-  // Send FCM push
-  final response = await http.post(
-    Uri.parse('https://fcm.googleapis.com/v1/projects/$projectId/messages:send'),
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer $accessToken',
-    },
-    body: jsonEncode({
-      'message': {
-        'token': fcmToken,
-        'notification': {
-          'title': title,
-          'body': body,
-        },
-        'data': {
-          'click_action': 'FLUTTER_NOTIFICATION_CLICK',
-          'customKey': 'customValue',
-        },
+    // Exchange JWT for OAuth2 access token
+    final oauthResponse = await http.post(
+      Uri.parse(serviceAccountJson['token_uri']!),
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: {
+        'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        'assertion': signedJwt,
       },
-    }),
-  );
+    );
 
-  if (response.statusCode == 200) {
-    print('✅ Push sent: ${response.body}');
-  } else {
-    print('❌ Error: ${response.statusCode} ${response.body}');
+    if (oauthResponse.statusCode != 200) {
+      throw Exception('Failed to obtain access token: ${oauthResponse.body}');
+    }
+
+    final accessToken = jsonDecode(oauthResponse.body)['access_token'] as String;
+
+    // Build data map (string-string only)
+    final dataMap = <String, String>{
+      'click_action': 'FLUTTER_NOTIFICATION_CLICK',
+      'title': title,
+      'body': body,
+      if (extraData != null) ...extraData,
+    };
+
+    // Build message map
+    final message = <String, dynamic>{
+      'token': fcmToken,
+      // Always include dataMap so background handlers can read it
+      'data': dataMap,
+      'android': {
+        'priority': 'high',
+      },
+      'apns': {
+        'headers': {
+          // apns-priority 10 for immediate delivery
+          'apns-priority': '10',
+          // If notification payload is provided, 'alert' is appropriate. If data-only, use 'background'.
+          'apns-push-type': notification ? 'alert' : 'background',
+        },
+        'payload': notification
+            ? {
+                'aps': {
+                  'alert': {'title': title, 'body': body},
+                  'sound': 'default',
+                }
+              }
+            : {
+                'aps': {'content-available': 1}
+              },
+      },
+    };
+
+    // Include notification block if requested (this causes system UI)
+    if (notification) {
+      message['notification'] = {'title': title, 'body': body};
+      // Android notification options
+      message['android']['notification'] = {
+        if (androidChannelId != null) 'channel_id': androidChannelId,
+        'sound': 'default',
+        'click_action': 'FLUTTER_NOTIFICATION_CLICK',
+      };
+      // Optionally add ttl
+      if (ttlSeconds != null) {
+        message['android']['ttl'] = '${ttlSeconds}s';
+      }
+    }
+
+    final requestBody = jsonEncode({'message': message});
+
+    final response = await http.post(
+      Uri.parse('https://fcm.googleapis.com/v1/projects/$projectId/messages:send'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $accessToken',
+      },
+      body: requestBody,
+    );
+
+    if (response.statusCode == 200) {
+      // success
+      // ignore: avoid_print
+      print('✅ Push sent: ${response.body}');
+    } else {
+      // ignore: avoid_print
+      print('❌ Error sending push (${response.statusCode}): ${response.body}');
+      throw Exception('FCM send failed (${response.statusCode}): ${response.body}');
+    }
+  } catch (e) {
+    // Surface but don't rethrow to avoid breaking caller flow; callers can choose to await and handle errors.
+    // ignore: avoid_print
+    print('Error in sendFcmPush: $e');
+    rethrow;
+  }
+}
+
+/// Convenience helper: send same payload to multiple tokens.
+/// This simply iterates and sends per-token (keeps semantics of single-token send).
+/// In production you should batch on a server or use topics.
+Future<void> sendFcmPushToTokens({
+  required List<String> fcmTokens,
+  required String projectId,
+  required String title,
+  required String body,
+  Map<String, String>? extraData,
+  bool notification = false,
+  String? androidChannelId,
+  int? ttlSeconds,
+}) async {
+  // send serially to avoid overwhelming client networking; change to parallel if desired.
+  for (final token in fcmTokens) {
+    if (token.trim().isEmpty) continue;
+    try {
+      await sendFcmPush(
+        fcmToken: token,
+        projectId: projectId,
+        title: title,
+        body: body,
+        extraData: extraData,
+        notification: notification,
+        androidChannelId: androidChannelId,
+        ttlSeconds: ttlSeconds,
+      );
+    } catch (e) {
+      // ignore single-token errors but log
+      // ignore: avoid_print
+      print('sendFcmPushToTokens: failed token=$token -> $e');
+    }
   }
 }

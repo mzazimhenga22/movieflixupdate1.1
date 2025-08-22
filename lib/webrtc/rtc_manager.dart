@@ -19,9 +19,6 @@ extension IterableExt<T> on Iterable<T> {
 /// RtcManager: LiveKit + Firestore + FCM (HTTP v1) push sender.
 /// - Uses a service account JSON at assets/service-account.json to obtain OAuth2 access token for FCM HTTP v1.
 /// - Make sure to add that file to pubspec.yaml under flutter.assets.
-///
-/// NOTE: This implementation sends the "incoming_call" data payload to the receiver's FCM token.
-/// The client app should handle the incoming payload (show native call screen / overlay / flutter_callkit_incoming).
 class RtcManager {
   static final Map<String, lk.Room> _liveKitRooms = {};
   static final Map<String, lk.LocalParticipant?> _localParticipants = {};
@@ -32,8 +29,6 @@ class RtcManager {
   static const String _sfuUrl = 'wss://movieflix-cyn3yzmd.livekit.cloud';
   static const String _devToken =
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjM0MjYwNzAsImlzcyI6IkFQSTZhVHFkYmFZOWd1ViIsIm5iZiI6MTc1NDQyNjA3MCwic3ViIjoibWF4IiwidmlkZW8iOnsiY2FuUHVibGlzaCI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwicm9vbSI6Imdyb3VwY2FsbCxjaGF0Y2FsbCIsInJvb21Kb2luIjp0cnVlfX0.KAFwOwgRpSMPoZ4xCAN7wSwGBHTq-GBjm_sdMyBMJxU';
-
-  // NOTE: No legacy server key here. The FCM HTTP v1 call uses an OAuth2 access token created from the service account.
 
   static Future<bool> _requestPermissions({required bool video}) async {
     final permissions = <Permission>[
@@ -74,6 +69,7 @@ class RtcManager {
     Map<String, dynamic> receiver,
     String callType,
     String callerName,
+    Map<String, dynamic> caller, // added caller so we can pick correct callerId if needed
   ) async {
     final token = receiver['fcmToken'] as String?;
     if (token == null || token.isEmpty) {
@@ -92,38 +88,29 @@ class RtcManager {
       final accessToken = await _getAccessToken();
       final url = 'https://fcm.googleapis.com/v1/projects/$projectId/messages:send';
 
+      // Build data-only payload. IMPORTANT: omit top-level "notification" to force delivery to app handler.
       final payload = {
         'message': {
           'token': token,
           'data': {
             'callId': callId,
-            'callerId': receiver['id']?.toString() ?? '',
+            'callerId': caller['id']?.toString() ?? '',
             'callerName': callerName,
             'callType': callType.toLowerCase(),
             'type': 'incoming_call',
+            'receiverId': receiver['id']?.toString() ?? '',
           },
-          'notification': {
-            'title': 'Incoming ${callType[0].toUpperCase()}${callType.substring(1)} Call',
-            'body': 'Call from $callerName',
-          },
-          // Android/APNs configuration blocks are optional — include as needed
           'android': {
             'priority': 'high',
-            'notification': {
-              'channel_id': 'calls_channel',
-              'sound': 'default',
-              'priority': 'high',
-              // 'click_action', 'tag', etc. can be added here
-            },
+            // Do not include a top-level 'notification' object here — this is data-only.
           },
           'apns': {
             'headers': {
               'apns-priority': '10',
+              'apns-push-type': 'voip', // recommended for call-like pushes on iOS
             },
             'payload': {
               'aps': {
-                'sound': 'default',
-                'category': 'CALL',
                 'content-available': 1,
               },
             },
@@ -198,7 +185,7 @@ class RtcManager {
     }
 
     // Non-blocking push send (do not await to avoid slowing UX)
-    unawaited(_sendPushNotification(callId, receiver, 'voice', caller['username'] ?? 'Unknown'));
+    unawaited(_sendPushNotification(callId, receiver, 'voice', caller['username'] ?? 'Unknown', caller));
 
     _callTimers[callId] = Timer(const Duration(seconds: 30), () async {
       if (_liveKitRooms.containsKey(callId)) {
@@ -278,7 +265,7 @@ class RtcManager {
       throw Exception("Failed to initiate call");
     }
 
-    unawaited(_sendPushNotification(callId, receiver, 'video', caller['username'] ?? 'Unknown'));
+    unawaited(_sendPushNotification(callId, receiver, 'video', caller['username'] ?? 'Unknown', caller));
 
     _callTimers[callId] = Timer(const Duration(seconds: 30), () async {
       if (_liveKitRooms.containsKey(callId)) {

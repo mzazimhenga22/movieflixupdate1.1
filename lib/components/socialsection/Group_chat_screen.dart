@@ -10,6 +10,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:movie_app/webrtc/group_rtc_manager.dart';
 import 'package:movie_app/utils/read_status_utils.dart';
 
+// Make sure this path matches your project: update if your file name or path differs.
+import 'package:movie_app/services/fcm_sender.dart' show sendFcmPush;
+
 import 'Group_profile_screen.dart';
 import 'widgets/GroupChatAppBar.dart';
 import 'widgets/typing_area.dart';
@@ -62,6 +65,9 @@ class _GroupChatScreenState extends State<GroupChatScreen>
   String? _activeCallId;
 
   bool _isDisposed = false; // guard to prevent notifier updates after dispose
+
+  // Project ID matching your service-account.json used by sendFcmPush
+  static const String _fcmProjectId = 'movieflix-53a51';
 
   @override
   bool get wantKeepAlive => true;
@@ -249,6 +255,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
     });
   }
 
+  /// Send a text message to the group and notify members via FCM (non-blocking).
   void sendMessage(String text) async {
     if (text.trim().isEmpty) return;
 
@@ -272,18 +279,53 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       },
     };
 
-    await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).collection('messages').add(messageData);
+    try {
+      final msgRef = await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).collection('messages').add(messageData);
 
-    // update group-level lastMessage / unreadBy
-    await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).set({
-      'lastMessage': text,
-      'timestamp': FieldValue.serverTimestamp(),
-      'unreadBy': FieldValue.arrayUnion(
-        _groupMembersNotifier.value.map((m) => m['id']).where((id) => id != widget.currentUser['id']).toList(),
-      ),
-    }, SetOptions(merge: true));
+      // update group-level lastMessage / unreadBy
+      final recipientIds = _groupMembersNotifier.value
+          .map((m) => m['id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty && id != widget.currentUser['id'])
+          .toList();
 
-    if (!_isDisposed) _replyingToNotifier.value = null;
+      if (recipientIds.isNotEmpty) {
+        await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).set({
+          'lastMessage': text,
+          'timestamp': FieldValue.serverTimestamp(),
+          'unreadBy': FieldValue.arrayUnion(recipientIds),
+        }, SetOptions(merge: true));
+      } else {
+        await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).set({
+          'lastMessage': text,
+          'timestamp': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+
+      if (!_isDisposed) _replyingToNotifier.value = null;
+
+      // Fire-and-forget: push notify group members (exclude sender)
+      unawaited(_sendGroupPush(
+        chatId: widget.chatId,
+        senderId: widget.currentUser['id'],
+        senderName: widget.currentUser['username'] ?? 'Someone',
+        title: widget.currentUser['username'] ?? 'New message',
+        body: text.length <= 120 ? text : '${text.substring(0, 117)}...',
+        data: {
+          'type': 'group_message',
+          'groupId': widget.chatId,
+          'messageId': msgRef.id,
+          'senderId': widget.currentUser['id'],
+          'senderName': widget.currentUser['username'] ?? 'Someone',
+          'messageType': 'text',
+          'text': text,
+        },
+      ));
+    } catch (e, st) {
+      debugPrint('sendGroupMessage error: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to send message')));
+      }
+    }
   }
 
   void sendFile(File file) async {
@@ -293,7 +335,65 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       }
       return;
     }
-    debugPrint("Sending file: ${file.path}");
+
+    try {
+      // TODO: upload file to storage and retrieve URL; this is placeholder metadata
+      final messageData = {
+        'text': 'File',
+        'fileName': file.path.split('/').last,
+        'senderId': widget.currentUser['id'],
+        'senderName': widget.currentUser['username'] ?? 'You',
+        'timestamp': FieldValue.serverTimestamp(),
+        'type': 'file',
+        'reactions': [],
+        'deletedFor': [],
+        'readBy': [widget.currentUser['id']],
+      };
+
+      final msgRef = await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).collection('messages').add(messageData);
+
+      final recipientIds = _groupMembersNotifier.value
+          .map((m) => m['id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty && id != widget.currentUser['id'])
+          .toList();
+
+      if (recipientIds.isNotEmpty) {
+        await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).set({
+          'lastMessage': 'Sent a file',
+          'timestamp': FieldValue.serverTimestamp(),
+          'unreadBy': FieldValue.arrayUnion(recipientIds),
+        }, SetOptions(merge: true));
+      } else {
+        await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).set({
+          'lastMessage': 'Sent a file',
+          'timestamp': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+
+      unawaited(_sendGroupPush(
+        chatId: widget.chatId,
+        senderId: widget.currentUser['id'],
+        senderName: widget.currentUser['username'] ?? 'Someone',
+        title: widget.currentUser['username'] ?? 'Sent a file',
+        body: 'Sent a file',
+        data: {
+          'type': 'group_message',
+          'groupId': widget.chatId,
+          'messageId': msgRef.id,
+          'senderId': widget.currentUser['id'],
+          'senderName': widget.currentUser['username'] ?? 'Someone',
+          'messageType': 'file',
+          'text': 'Sent a file',
+        },
+      ));
+
+      debugPrint("Sending file: ${file.path}");
+    } catch (e, st) {
+      debugPrint('sendGroupFile error: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to send file')));
+      }
+    }
   }
 
   void sendAudio(File audio) async {
@@ -303,7 +403,147 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       }
       return;
     }
-    debugPrint("Sending audio: ${audio.path}");
+
+    try {
+      // TODO: upload audio to storage and attach URL
+      final messageData = {
+        'text': 'Voice message',
+        'fileName': audio.path.split('/').last,
+        'senderId': widget.currentUser['id'],
+        'senderName': widget.currentUser['username'] ?? 'You',
+        'timestamp': FieldValue.serverTimestamp(),
+        'type': 'audio',
+        'reactions': [],
+        'deletedFor': [],
+        'readBy': [widget.currentUser['id']],
+      };
+
+      final msgRef = await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).collection('messages').add(messageData);
+
+      final recipientIds = _groupMembersNotifier.value
+          .map((m) => m['id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty && id != widget.currentUser['id'])
+          .toList();
+
+      if (recipientIds.isNotEmpty) {
+        await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).set({
+          'lastMessage': 'Sent a voice message',
+          'timestamp': FieldValue.serverTimestamp(),
+          'unreadBy': FieldValue.arrayUnion(recipientIds),
+        }, SetOptions(merge: true));
+      } else {
+        await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).set({
+          'lastMessage': 'Sent a voice message',
+          'timestamp': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+
+      unawaited(_sendGroupPush(
+        chatId: widget.chatId,
+        senderId: widget.currentUser['id'],
+        senderName: widget.currentUser['username'] ?? 'Someone',
+        title: widget.currentUser['username'] ?? 'Sent a voice message',
+        body: 'Sent a voice message',
+        data: {
+          'type': 'group_message',
+          'groupId': widget.chatId,
+          'messageId': msgRef.id,
+          'senderId': widget.currentUser['id'],
+          'senderName': widget.currentUser['username'] ?? 'Someone',
+          'messageType': 'audio',
+          'text': 'Sent a voice message',
+        },
+      ));
+
+      debugPrint("Sending audio: ${audio.path}");
+    } catch (e, st) {
+      debugPrint('sendGroupAudio error: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to send audio')));
+      }
+    }
+  }
+
+  /// Send push notifications to all group members except sender.
+  /// Filters out users w/o fcmToken, users who've muted this chat (mutedChats), and users who've blocked the sender.
+  Future<void> _sendGroupPush({
+    required String chatId,
+    required String senderId,
+    required String senderName,
+    required String title,
+    required String body,
+    Map<String, String>? data,
+  }) async {
+    try {
+      // Read group doc to get the canonical member list (fallback to notifier if needed)
+      final groupDoc = await FirebaseFirestore.instance.collection('groups').doc(chatId).get();
+      final memberIds = groupDoc.exists
+          ? List<String>.from(groupDoc.data()?['userIds'] ?? [])
+          : _groupMembersNotifier.value.map((m) => (m['id'] as String?) ?? '').where((id) => id.isNotEmpty).toList();
+
+      final targetIds = memberIds.where((id) => id != senderId).toSet().toList();
+      if (targetIds.isEmpty) {
+        debugPrint('[push] no recipients for group $chatId');
+        return;
+      }
+
+      // Fetch tokens in parallel (limit concurrency in production)
+      final tokenFutures = targetIds.map((uid) async {
+        try {
+          final udoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+          if (!udoc.exists) return null;
+          final udata = udoc.data()!;
+          final fcmToken = (udata['fcmToken'] as String?) ?? '';
+          final mutedChats = List<String>.from(udata['mutedChats'] ?? []);
+          final blockedUsers = List<String>.from(udata['blockedUsers'] ?? []);
+
+          // Skip if no token or if user muted this chat or user blocked the sender
+          if (fcmToken.isEmpty) return null;
+          if (mutedChats.contains(chatId)) {
+            debugPrint('[push] user $uid muted chat $chatId - skip');
+            return null;
+          }
+          if (blockedUsers.contains(senderId)) {
+            debugPrint('[push] user $uid blocked sender $senderId - skip');
+            return null;
+          }
+          return fcmToken;
+        } catch (e) {
+          debugPrint('[push] failed to fetch user doc for $uid: $e');
+          return null;
+        }
+      }).toList();
+
+      final tokensWithNulls = await Future.wait(tokenFutures);
+      final tokens = tokensWithNulls.whereType<String>().toSet().toList(); // deduplicate
+
+      if (tokens.isEmpty) {
+        debugPrint('[push] no valid tokens after filtering for group $chatId');
+        return;
+      }
+
+      // Send to each token (fire-and-forget)
+      for (final token in tokens) {
+        try {
+          final extraData = <String, String>{};
+          if (data != null) extraData.addAll(data);
+          // sendFcmPush signature used in chat_screen: fcmToken, projectId, title, body, extraData
+          unawaited(sendFcmPush(
+            fcmToken: token,
+            projectId: _fcmProjectId,
+            title: title,
+            body: body,
+            extraData: extraData,
+          ));
+        } catch (e) {
+          debugPrint('[push] failed to call sendFcmPush for token: $e');
+        }
+      }
+
+      debugPrint('[push] group push queued for ${tokens.length} tokens (group $chatId)');
+    } catch (e, st) {
+      debugPrint('[push] error preparing group push: $e\n$st');
+    }
   }
 
   Future<void> startGroupCall(bool isVideo) async {
@@ -631,6 +871,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
         appBar: PreferredSize(
           preferredSize: const Size.fromHeight(kToolbarHeight),
           child: ValueListenableBuilder<Map<String, dynamic>?>(
+
             valueListenable: _groupDataNotifier,
             builder: (context, groupData, _) {
               return GroupChatAppBar(
@@ -933,6 +1174,7 @@ class _GroupMembersBar extends StatelessWidget {
         color: Colors.transparent,
         child: RepaintBoundary(
           child: ValueListenableBuilder<List<Map<String, dynamic>>>(
+
             valueListenable: groupMembersNotifier,
             builder: (context, members, _) {
               final showMembers = members.isNotEmpty;
@@ -1121,3 +1363,4 @@ class _GroupTypingAreaWrapper extends StatelessWidget {
     );
   }
 }
+

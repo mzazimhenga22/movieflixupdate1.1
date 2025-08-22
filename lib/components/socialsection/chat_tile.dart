@@ -2,16 +2,9 @@ import 'package:flutter/material.dart';
 import 'messages_controller.dart';
 
 class ChatTile extends StatelessWidget {
-  final bool isGroup;
-  final String chatId;
-  final String title;
-  final String lastMessage;
-  final DateTime? timestamp;
-  final int unreadCount;
-  final String photoUrl;
+  final ChatSummary summary;
   final Color accentColor;
   final bool isSelected;
-  final bool isBlocked;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
   final VoidCallback? onChatOpened;
@@ -19,127 +12,213 @@ class ChatTile extends StatelessWidget {
 
   const ChatTile({
     super.key,
-    required this.isGroup,
-    required this.chatId,
-    required this.title,
-    required this.lastMessage,
-    this.timestamp,
-    required this.unreadCount,
-    this.photoUrl = '',
+    required this.summary,
     required this.accentColor,
-    required this.isSelected,
-    this.isBlocked = false,
+    required this.controller,
+    this.isSelected = false,
     this.onTap,
     this.onLongPress,
     this.onChatOpened,
-    required this.controller,
   });
+
+  String _formatTimestamp(BuildContext context, DateTime ts) {
+    if (ts.millisecondsSinceEpoch == 0) return '';
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final msgDay = DateTime(ts.year, ts.month, ts.day);
+    if (msgDay == today) {
+      // show time
+      return TimeOfDay.fromDateTime(ts).format(context);
+    } else {
+      // show short date like "12 Aug"
+      return '${ts.day} ${_monthShort(ts.month)}';
+    }
+  }
+
+  String _monthShort(int month) {
+    const months = [
+      '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    return months[month];
+  }
 
   @override
   Widget build(BuildContext context) {
-    final isPinned = controller.isChatPinned(chatId);
-    final isMuted = controller.isUserMuted(chatId);
+    final isPinned = summary.isPinned || controller.isChatPinned(summary.id);
+    final isMuted = summary.isMuted || controller.isUserMuted(summary.id);
+    final isBlocked = summary.isBlocked; // controller.block list is reflected into summary
+    final unread = (summary.unreadCount > 0);
+
+    final titleStyle = TextStyle(
+      color: accentColor,
+      fontWeight: unread ? FontWeight.bold : FontWeight.w600,
+      fontSize: 16,
+    );
+
+    final subtitleStyle = TextStyle(
+      color: isBlocked ? Colors.grey : Colors.white70,
+      fontWeight: unread ? FontWeight.bold : FontWeight.normal,
+      fontSize: 13,
+    );
+
+    // avatar
+    Widget avatar;
+    final other = summary.otherUser;
+    final photoUrl = other != null ? (other['photoUrl'] ?? '') as String : '';
+    final initials = summary.isGroup
+        ? 'G'
+        : (summary.title.isNotEmpty ? summary.title[0].toUpperCase() : 'U');
+
+    if (photoUrl.isNotEmpty) {
+      avatar = CircleAvatar(
+        backgroundImage: NetworkImage(photoUrl),
+        radius: 24,
+        backgroundColor: Colors.transparent,
+      );
+    } else {
+      avatar = CircleAvatar(
+        radius: 24,
+        backgroundColor: accentColor,
+        child: Text(
+          initials,
+          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+      );
+    }
+
+    final formattedTime =
+        summary.timestamp.millisecondsSinceEpoch == 0 ? '' : _formatTimestamp(context, summary.timestamp);
 
     return Opacity(
       opacity: isBlocked ? 0.5 : 1.0,
       child: Card(
-        elevation: 4,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        elevation: isSelected ? 6 : 3,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         margin: const EdgeInsets.symmetric(vertical: 8),
         child: Container(
           decoration: BoxDecoration(
             gradient: LinearGradient(
-              colors: [
-                accentColor.withOpacity(0.1),
-                accentColor.withOpacity(0.3),
-              ],
+              colors: [accentColor.withOpacity(0.03), Colors.black.withOpacity(0.2)],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: accentColor.withOpacity(0.3),
-            ),
+            border: Border.all(color: accentColor.withOpacity(0.08)),
           ),
           child: ListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             selected: isSelected,
-            selectedTileColor: accentColor.withOpacity(0.1),
-            leading: CircleAvatar(
-              backgroundImage: photoUrl.isNotEmpty ? NetworkImage(photoUrl) : null,
-              child: photoUrl.isEmpty
-                  ? Text(
-                      isGroup ? 'G' : title.isNotEmpty ? title[0].toUpperCase() : 'U',
-                      style: const TextStyle(color: Colors.white),
-                    )
-                  : null,
+            selectedTileColor: accentColor.withOpacity(0.06),
+            leading: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                avatar,
+                if (summary.isGroup)
+                  Positioned(
+                    right: -4,
+                    bottom: -4,
+                    child: Container(
+                      padding: const EdgeInsets.all(2),
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.black87,
+                      ),
+                      child: const Icon(Icons.group, size: 12, color: Colors.white70),
+                    ),
+                  ),
+              ],
             ),
             title: Row(
-              mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  title,
-                  style: TextStyle(
-                    color: accentColor,
-                    fontWeight: FontWeight.bold,
+                Expanded(
+                  child: Text(
+                    summary.title.isNotEmpty ? summary.title : (summary.otherUser?['username'] ?? 'Unknown'),
+                    style: titleStyle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                if (unreadCount > 0) ...[
-                  const SizedBox(width: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: accentColor,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
+                if (isPinned)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Icon(Icons.push_pin, size: 16, color: accentColor.withOpacity(0.9)),
+                  ),
+              ],
+            ),
+            subtitle: Padding(
+              padding: const EdgeInsets.only(top: 6.0),
+              child: Row(
+                children: [
+                  Expanded(
                     child: Text(
-                      '$unreadCount',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      summary.lastMessageText.isNotEmpty ? summary.lastMessageText : 'No messages yet',
+                      style: subtitleStyle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ],
-              ],
-            ),
-            subtitle: Text(
-              lastMessage,
-              style: TextStyle(
-                color: isBlocked ? Colors.grey : Colors.white,
               ),
-              overflow: TextOverflow.ellipsis,
             ),
-            trailing: Row(
+            trailing: Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                if (isMuted)
-                  Icon(
-                    Icons.volume_off,
-                    size: 20,
-                    color: accentColor.withOpacity(0.7),
-                  ),
-                if (isPinned)
-                  Icon(
-                    Icons.push_pin,
-                    size: 20,
-                    color: accentColor,
-                  ),
-                if (!isPinned && !isMuted && timestamp != null)
+                if (formattedTime.isNotEmpty)
                   Text(
-                    TimeOfDay.fromDateTime(timestamp!).format(context),
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: accentColor,
-                    ),
+                    formattedTime,
+                    style: TextStyle(fontSize: 12, color: accentColor.withOpacity(0.95)),
                   ),
+                const SizedBox(height: 6),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (isMuted)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 6.0),
+                        child: Icon(Icons.volume_off, size: 18, color: accentColor.withOpacity(0.85)),
+                      ),
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 250),
+                      transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: child),
+                      child: unread
+                          ? Container(
+                              key: ValueKey('badge_${summary.id}_${summary.unreadCount}'),
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: accentColor,
+                                borderRadius: BorderRadius.circular(12),
+                                boxShadow: [BoxShadow(color: accentColor.withOpacity(0.2), blurRadius: 4, offset: const Offset(0,2))],
+                              ),
+                              child: Text(
+                                '${summary.unreadCount}',
+                                style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                              ),
+                            )
+                          : SizedBox(
+                              key: ValueKey('badge_empty_${summary.id}'),
+                              width: 8,
+                              height: 8,
+                              child: const SizedBox.shrink(),
+                            ),
+                    ),
+                  ],
+                ),
               ],
             ),
-            onTap: () {
-              onTap?.call();
-              onChatOpened?.call();
+            onTap: () async {
+              try {
+                // mark as read if needed (WhatsApp like behaviour)
+                if (summary.unreadCount > 0) {
+                  await controller.markAsRead(summary.id, isGroup: summary.isGroup);
+                }
+              } catch (e) {
+                debugPrint('ChatTile markAsRead error: $e');
+              } finally {
+                onTap?.call(); // parent navigation
+                onChatOpened?.call();
+              }
             },
             onLongPress: onLongPress,
           ),

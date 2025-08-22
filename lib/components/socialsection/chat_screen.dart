@@ -10,6 +10,10 @@ import 'package:movie_app/utils/read_status_utils.dart';
 import 'package:flutter/foundation.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
+// <-- Make sure this import matches the actual file name in your project.
+// If your file is `services/fcm_sender.dart` use that path; if it's `services/fcmsender.dart` change accordingly.
+import 'package:movie_app/services/fcm_sender.dart' show sendFcmPush;
+
 import 'VideoCallScreen_1to1.dart';
 import 'VoiceCallScreen_1to1.dart';
 import 'widgets/chat_app_bar.dart';
@@ -113,6 +117,7 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
     return blockedUsers.contains(userId);
   }
 
+  /// Sends a message and triggers a data-only FCM push to the other user (fire-and-forget).
   void sendMessage(String text) async {
     if (text.trim().isEmpty) return;
 
@@ -143,17 +148,45 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
       },
     };
 
-    await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).collection('messages').add(messageData);
+    try {
+      // add message to messages subcollection
+      final msgRef = await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(widget.chatId)
+          .collection('messages')
+          .add(messageData);
 
-    await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).set({
-      'lastMessage': text,
-      'timestamp': FieldValue.serverTimestamp(),
-      'userIds': [widget.currentUser['id'], widget.otherUser['id']],
-    }, SetOptions(merge: true));
+      // Update chat doc: lastMessage + timestamp + ensure userIds exist + add unreadBy receiver
+      await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).set({
+        'lastMessage': text,
+        'timestamp': FieldValue.serverTimestamp(),
+        'userIds': [widget.currentUser['id'], widget.otherUser['id']],
+        'unreadBy': FieldValue.arrayUnion([widget.otherUser['id']]),
+      }, SetOptions(merge: true));
 
-    if (!_isDisposed) _replyingToNotifier.value = null;
+      // Reset reply UI
+      if (!_isDisposed) _replyingToNotifier.value = null;
+
+      // Fire-and-forget: send FCM push to receiver
+      unawaited(_sendMessagePush(
+        receiverId: widget.otherUser['id'],
+        senderId: widget.currentUser['id'],
+        senderName: widget.currentUser['username'] ?? 'Someone',
+        text: text,
+        chatId: widget.chatId,
+        messageId: msgRef.id,
+      ));
+    } catch (e, st) {
+      debugPrint('sendMessage error: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to send message')),
+        );
+      }
+    }
   }
 
+  /// Sends file message and push (file message currently only writes metadata here).
   void sendFile(File file) async {
     if (await _isUserBlocked(widget.otherUser['id'])) {
       if (mounted) {
@@ -163,9 +196,55 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
       }
       return;
     }
-    debugPrint("Sending file: ${file.path}");
+    try {
+      // TODO: actually upload file to storage and retrieve URL; here we store placeholder
+      final messageData = {
+        'text': 'File',
+        'fileName': file.path.split('/').last,
+        'senderId': widget.currentUser['id'],
+        'senderName': widget.currentUser['username'] ?? 'You',
+        'receiverId': widget.otherUser['id'],
+        'timestamp': FieldValue.serverTimestamp(),
+        'type': 'file',
+        'reactions': [],
+        'deletedFor': [],
+      };
+
+      final msgRef = await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(widget.chatId)
+          .collection('messages')
+          .add(messageData);
+
+      await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).set({
+        'lastMessage': 'Sent a file',
+        'timestamp': FieldValue.serverTimestamp(),
+        'userIds': [widget.currentUser['id'], widget.otherUser['id']],
+        'unreadBy': FieldValue.arrayUnion([widget.otherUser['id']]),
+      }, SetOptions(merge: true));
+
+      unawaited(_sendMessagePush(
+        receiverId: widget.otherUser['id'],
+        senderId: widget.currentUser['id'],
+        senderName: widget.currentUser['username'] ?? 'Someone',
+        text: 'Sent a file',
+        chatId: widget.chatId,
+        messageId: msgRef.id,
+        messageType: 'file',
+      ));
+
+      debugPrint("Sending file: ${file.path}");
+    } catch (e, st) {
+      debugPrint('sendFile error: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to send file')),
+        );
+      }
+    }
   }
 
+  /// Sends audio message and push (placeholder implementation)
   void sendAudio(File audio) async {
     if (await _isUserBlocked(widget.otherUser['id'])) {
       if (mounted) {
@@ -175,7 +254,120 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
       }
       return;
     }
-    debugPrint("Sending audio: ${audio.path}");
+    try {
+      // TODO: upload audio to storage and attach URL
+      final messageData = {
+        'text': 'Voice message',
+        'fileName': audio.path.split('/').last,
+        'senderId': widget.currentUser['id'],
+        'senderName': widget.currentUser['username'] ?? 'You',
+        'receiverId': widget.otherUser['id'],
+        'timestamp': FieldValue.serverTimestamp(),
+        'type': 'audio',
+        'reactions': [],
+        'deletedFor': [],
+      };
+
+      final msgRef = await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(widget.chatId)
+          .collection('messages')
+          .add(messageData);
+
+      await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).set({
+        'lastMessage': 'Sent a voice message',
+        'timestamp': FieldValue.serverTimestamp(),
+        'userIds': [widget.currentUser['id'], widget.otherUser['id']],
+        'unreadBy': FieldValue.arrayUnion([widget.otherUser['id']]),
+      }, SetOptions(merge: true));
+
+      unawaited(_sendMessagePush(
+        receiverId: widget.otherUser['id'],
+        senderId: widget.currentUser['id'],
+        senderName: widget.currentUser['username'] ?? 'Someone',
+        text: 'Sent a voice message',
+        chatId: widget.chatId,
+        messageId: msgRef.id,
+        messageType: 'audio',
+      ));
+
+      debugPrint("Sending audio: ${audio.path}");
+    } catch (e, st) {
+      debugPrint('sendAudio error: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to send audio')),
+        );
+      }
+    }
+  }
+
+  /// Helper: fetch receiver FCM token and send data-only push via sendFcmPush().
+  Future<void> _sendMessagePush({
+    required String receiverId,
+    required String senderId,
+    required String senderName,
+    required String text,
+    required String chatId,
+    required String messageId,
+    String messageType = 'text',
+  }) async {
+    try {
+      // read receiver user doc
+      final userDoc = await FirebaseFirestore.instance.collection('users').doc(receiverId).get();
+      if (!userDoc.exists) {
+        debugPrint('[push] receiver user doc not found: $receiverId');
+        return;
+      }
+      final userData = userDoc.data()!;
+      final fcmToken = userData['fcmToken'] as String?;
+      final isMuted = (userData['mutedChats'] as List<dynamic>?)?.contains(chatId) == true;
+      final blockedByReceiver = (userData['blockedUsers'] as List<dynamic>?)?.contains(senderId) == true;
+
+      // do not send push if token not present, receiver muted this chat, or receiver blocked the sender
+      if (fcmToken == null || fcmToken.isEmpty) {
+        debugPrint('[push] no token for receiver $receiverId - skipping push');
+        return;
+      }
+      if (isMuted) {
+        debugPrint('[push] receiver $receiverId muted chat $chatId - skipping push');
+        return;
+      }
+      if (blockedByReceiver) {
+        debugPrint('[push] receiver $receiverId has blocked sender $senderId - skipping push');
+        return;
+      }
+
+      // Choose projectId used by your FCM service account (match your service-account.json)
+      const projectId = 'movieflix-53a51';
+
+      // Compose title/body - keep them short
+      final title = senderName;
+      final body = (messageType == 'text') ? (text.length <= 120 ? text : '${text.substring(0, 117)}...') : (messageType == 'file' ? 'Sent a file' : 'Sent a voice message');
+
+      // Extra data delivered to app (background handler should inspect these keys)
+      final extraData = <String, String>{
+        'type': 'message',
+        'chatId': chatId,
+        'messageId': messageId,
+        'senderId': senderId,
+        'senderName': senderName,
+        'messageType': messageType,
+        'text': messageType == 'text' ? text : body,
+      };
+
+      // Send data-only push (non-blocking)
+      unawaited(sendFcmPush(
+        fcmToken: fcmToken,
+        projectId: projectId,
+        title: title,
+        body: body,
+        extraData: extraData,
+      ));
+      debugPrint('[push] pushed message to $receiverId');
+    } catch (e, st) {
+      debugPrint('[push] failed to send push: $e\n$st');
+    }
   }
 
   void startVoiceCall() async {

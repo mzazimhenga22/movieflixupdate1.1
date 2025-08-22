@@ -1,807 +1,832 @@
 // messages_controller.dart
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'Group_chat_screen.dart';
 import 'create_group_screen.dart';
 import 'chat_screen.dart';
 
-String getChatId(String userId1, String userId2) {
-  return userId1.compareTo(userId2) < 0 ? '${userId1}_$userId2' : '${userId2}_$userId1';
+String getChatId(String userId1, String userId2) =>
+    userId1.compareTo(userId2) < 0 ? '${userId1}_$userId2' : '${userId2}_$userId1';
+
+/// Lightweight summary for the chat list UI (like WhatsApp conversation row).
+class ChatSummary {
+  final String id;
+  bool isGroup;
+  String title;
+  Map<String, dynamic>? otherUser;
+  String lastMessageText;
+  DateTime timestamp;
+  int unreadCount; // 0 or >0, kept simple (WhatsApp-like badge)
+  bool isPinned;
+  bool isMuted;
+  bool isBlocked;
+
+  ChatSummary({
+    required this.id,
+    this.isGroup = false,
+    this.title = '',
+    this.otherUser,
+    this.lastMessageText = '',
+    DateTime? timestamp,
+    this.unreadCount = 0,
+    this.isPinned = false,
+    this.isMuted = false,
+    this.isBlocked = false,
+  }) : timestamp = timestamp ?? DateTime.fromMillisecondsSinceEpoch(0);
+
+  Map<String, dynamic> toCache() => {
+        'id': id,
+        'isGroup': isGroup,
+        'title': title,
+        'otherUser': otherUser,
+        'lastMessageText': lastMessageText,
+        'timestamp': timestamp.millisecondsSinceEpoch,
+        'unreadCount': unreadCount,
+        'isPinned': isPinned,
+        'isMuted': isMuted,
+        'isBlocked': isBlocked,
+      };
+
+  factory ChatSummary.fromCache(Map<String, dynamic> map) {
+    return ChatSummary(
+      id: map['id'] ?? '',
+      isGroup: map['isGroup'] ?? false,
+      title: map['title'] ?? '',
+      otherUser:
+          map['otherUser'] != null ? Map<String, dynamic>.from(map['otherUser']) : null,
+      lastMessageText: map['lastMessageText'] ?? '',
+      timestamp: map['timestamp'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(map['timestamp'])
+          : DateTime.fromMillisecondsSinceEpoch(0),
+      unreadCount: map['unreadCount'] ?? 0,
+      isPinned: map['isPinned'] ?? false,
+      isMuted: map['isMuted'] ?? false,
+      isBlocked: map['isBlocked'] ?? false,
+    );
+  }
 }
 
 class MessagesController extends ChangeNotifier {
   final Map<String, dynamic> currentUser;
   final BuildContext context;
 
-  String? selectedChatId;
-  Map<String, dynamic>? selectedOtherUser;
-  bool isGroup = false;
-  String groupName = '';
+  // Publicly consumable list (UI should read this)
+  final List<ChatSummary> chatSummaries = [];
 
+  // Public simple unread badge total (UI can show on app icon or tab)
+  int totalUnread = 0;
+
+  // Local caches for quick checks (persisted)
   final List<String> _blockedUsers = [];
   final List<String> _mutedUsers = [];
   final List<String> _pinnedChats = [];
 
+  // small in-memory user cache to avoid repeated lookups
+  final Map<String, Map<String, dynamic>> _userCache = {};
+
+  // Firestore listeners/subscriptions
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _chatsSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _groupsSub;
+
+  // to avoid duplicate last-message fetches on many rapid doc changes
+  final Set<String> _pendingLastMessageFetches = {};
+
+  // SharedPrefs key prefix
+  String get _prefsPrefix => 'msgs_${currentUser['id'] ?? 'unknown'}';
+
   MessagesController(this.currentUser, this.context) {
-    _loadCachedData();
+    _loadCachedLists().whenComplete(() {
+      _startRealtimeListeners();
+    });
   }
 
-  // Helper: safe decode of a JSON string expected to be a List<String>
-  List<String> _safeDecodeStringList(String? raw) {
-    if (raw == null) return [];
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is List) {
-        return decoded.map((e) => e?.toString() ?? '').where((s) => s.isNotEmpty).cast<String>().toList();
-      }
-      debugPrint('[MessagesController] expected list but got: ${decoded.runtimeType}');
-      return [];
-    } catch (e, st) {
-      debugPrint('[MessagesController] failed to decode cached list: $e\n$st');
-      return [];
-    }
-  }
-
-  Future<void> _loadCachedData() async {
+  // ---------------------
+  // Caching helpers
+  // ---------------------
+  Future<void> _loadCachedLists() async {
     try {
       final uid = currentUser['id'] as String?;
-      if (uid == null || uid.isEmpty) {
-        debugPrint('[MessagesController] _loadCachedData: currentUser id missing, skipping cache load');
-        return;
-      }
-
+      if (uid == null || uid.isEmpty) return;
       final prefs = await SharedPreferences.getInstance();
       final blockedRaw = prefs.getString('blockedUsers_$uid');
       final mutedRaw = prefs.getString('mutedUsers_$uid');
       final pinnedRaw = prefs.getString('pinnedChats_$uid');
 
-      final blockedList = _safeDecodeStringList(blockedRaw);
-      final mutedList = _safeDecodeStringList(mutedRaw);
-      final pinnedList = _safeDecodeStringList(pinnedRaw);
-
       _blockedUsers
         ..clear()
-        ..addAll(blockedList);
+        ..addAll(_safeDecodeStringList(blockedRaw));
       _mutedUsers
         ..clear()
-        ..addAll(mutedList);
+        ..addAll(_safeDecodeStringList(mutedRaw));
       _pinnedChats
         ..clear()
-        ..addAll(pinnedList);
+        ..addAll(_safeDecodeStringList(pinnedRaw));
 
-      notifyListeners();
-      debugPrint('[MessagesController] loaded cached lists: blocked=${_blockedUsers.length}, muted=${_mutedUsers.length}, pinned=${_pinnedChats.length}');
+      // load cached chats if present (so UI is instant)
+      final chatsRaw = prefs.getString('${_prefsPrefix}_chatSummaries');
+      if (chatsRaw != null) {
+        final decoded = jsonDecode(chatsRaw);
+        if (decoded is List) {
+          chatSummaries.clear();
+          for (var item in decoded) {
+            if (item is Map) {
+              chatSummaries.add(ChatSummary.fromCache(Map<String, dynamic>.from(item)));
+            }
+          }
+          _recomputeTotalUnread();
+          notifyListeners();
+        }
+      }
     } catch (e, st) {
-      debugPrint('Failed to load cached messages controller data: $e\n$st');
+      debugPrint('[MessagesController] _loadCachedLists error: $e\n$st');
     }
   }
 
-  Future<void> _saveCachedData() async {
+  List<String> _safeDecodeStringList(String? raw) {
+    if (raw == null) return [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded
+            .map((e) => e?.toString() ?? '')
+            .where((s) => s.isNotEmpty)
+            .cast<String>()
+            .toList();
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  Future<void> _saveCachedLists() async {
     try {
       final uid = currentUser['id'] as String?;
-      if (uid == null || uid.isEmpty) {
-        debugPrint('[MessagesController] _saveCachedData: currentUser id missing, skipping cache save');
-        return;
-      }
+      if (uid == null || uid.isEmpty) return;
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('blockedUsers_$uid', jsonEncode(_blockedUsers));
       await prefs.setString('mutedUsers_$uid', jsonEncode(_mutedUsers));
       await prefs.setString('pinnedChats_$uid', jsonEncode(_pinnedChats));
-      debugPrint('[MessagesController] saved cache for user $uid (blocked=${_blockedUsers.length}, muted=${_mutedUsers.length}, pinned=${_pinnedChats.length})');
+      // cache chat summaries
+      final cached = chatSummaries.map((c) => c.toCache()).toList();
+      await prefs.setString('${_prefsPrefix}_chatSummaries', jsonEncode(cached));
     } catch (e, st) {
-      debugPrint('Failed to save cached messages controller data: $e\n$st');
+      debugPrint('[MessagesController] _saveCachedLists error: $e\n$st');
     }
   }
 
-  void clearSelection() {
-    selectedChatId = null;
-    selectedOtherUser = null;
-    isGroup = false;
+  // ---------------------
+  // Real-time listeners
+  // ---------------------
+  void _startRealtimeListeners() {
+    final uid = currentUser['id'] as String?;
+    if (uid == null || uid.isEmpty) return;
+
+    // Listen to top-level chat docs for the current user.
+    _chatsSub = FirebaseFirestore.instance
+        .collection('chats')
+        .where('userIds', arrayContains: uid)
+        .snapshots()
+        .listen((snap) {
+      _handleDocsChanged(snap.docs, isGroup: false);
+    }, onError: (e) {
+      debugPrint('[MessagesController] chats snapshot error: $e');
+    });
+
+    // Listen to groups as well
+    _groupsSub = FirebaseFirestore.instance
+        .collection('groups')
+        .where('userIds', arrayContains: uid)
+        .snapshots()
+        .listen((snap) {
+      _handleDocsChanged(snap.docs, isGroup: true);
+    }, onError: (e) {
+      debugPrint('[MessagesController] groups snapshot error: $e');
+    });
+  }
+
+  void _handleDocsChanged(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+      {required bool isGroup}) {
+    // Build map so we can merge remote order/pins/etc into local in-memory list.
+    final Map<String, QueryDocumentSnapshot<Map<String, dynamic>>> docsById = {
+      for (var d in docs) d.id: d
+    };
+
+    // Update or add chat summaries based on remote docs
+    for (var doc in docs) {
+      _updateOrInsertChatFromDoc(doc, isGroup: isGroup);
+    }
+
+    // Remove local summaries that no longer exist in remote (deleted)
+    final remoteIds = docsById.keys.toSet();
+    chatSummaries.removeWhere((c) => c.isGroup == isGroup && !remoteIds.contains(c.id));
+
+    // Sort pinned first, then by timestamp desc
+    chatSummaries.sort((a, b) {
+      final aPinned = _pinnedChats.contains(a.id);
+      final bPinned = _pinnedChats.contains(b.id);
+      if (aPinned && !bPinned) return -1;
+      if (!aPinned && bPinned) return 1;
+      return b.timestamp.compareTo(a.timestamp);
+    });
+
+    _recomputeTotalUnread();
+    _saveCachedLists();
     notifyListeners();
   }
 
-  // synchronous check (fast, uses local cache)
-  bool isUserBlocked(String userId) {
-    return _blockedUsers.contains(userId);
-  }
+  /// Called whenever a chat/group doc is added/modified/exists in the snapshot.
+  /// We prefer using doc fields (lastMessage, timestamp, unreadBy) but will fetch
+  /// the latest message from subcollection if needed (or to get accurate readBy).
+  void _updateOrInsertChatFromDoc(
+      QueryDocumentSnapshot<Map<String, dynamic>> doc,
+      {required bool isGroup}) {
+    final id = doc.id;
+    final data = doc.data();
+    final uid = currentUser['id'] as String?;
 
-  // async version (suitable for FutureBuilder): prefer cache, but refresh from server if missing
-  Future<bool> isUserBlockedAsync(String userId) async {
-    if (_blockedUsers.contains(userId)) return true;
-    return await _fetchUserBlocked(userId);
-  }
+    // find existing
+    final idx = chatSummaries.indexWhere((c) => c.id == id && c.isGroup == isGroup);
 
-  // async wrapper for muted check
-  Future<bool> isUserMutedAsync(String userId) async {
-    if (_mutedUsers.contains(userId)) return true;
-    return await _fetchUserMuted(userId);
-  }
-
-  Future<bool> isChatPinnedAsync(String chatId) async {
-    if (_pinnedChats.contains(chatId)) return true;
-    return await _fetchChatPinned(chatId);
-  }
-
-  bool isUserMuted(String userId) {
-    return _mutedUsers.contains(userId);
-  }
-
-  bool isChatPinned(String chatId) {
-    return _pinnedChats.contains(chatId);
-  }
-
-  // server-backed refresh helpers (used by the async wrappers)
-  Future<bool> _fetchUserBlocked(String userId) async {
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) return false;
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      final blockedUsers = List<String>.from(userDoc.data()?['blockedUsers'] ?? []);
-      _blockedUsers
-        ..clear()
-        ..addAll(blockedUsers);
-      await _saveCachedData();
-      notifyListeners();
-      return blockedUsers.contains(userId);
-    } catch (e) {
-      debugPrint('_fetchUserBlocked error: $e');
-      return _blockedUsers.contains(userId);
-    }
-  }
-
-  Future<bool> _fetchUserMuted(String userId) async {
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) return false;
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      final mutedUsers = List<String>.from(userDoc.data()?['mutedUsers'] ?? []);
-      _mutedUsers
-        ..clear()
-        ..addAll(mutedUsers);
-      await _saveCachedData();
-      notifyListeners();
-      return mutedUsers.contains(userId);
-    } catch (e) {
-      debugPrint('_fetchUserMuted error: $e');
-      return _mutedUsers.contains(userId);
-    }
-  }
-
-  Future<bool> _fetchChatPinned(String chatId) async {
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) return false;
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      final pinnedChats = List<String>.from(userDoc.data()?['pinnedChats'] ?? []);
-      _pinnedChats
-        ..clear()
-        ..addAll(pinnedChats);
-      await _saveCachedData();
-      notifyListeners();
-      return pinnedChats.contains(chatId);
-    } catch (e) {
-      debugPrint('_fetchChatPinned error: $e');
-      return _pinnedChats.contains(chatId);
-    }
-  }
-
-  /// Get approximate unread count across chats + groups.
-  /// Prefer chat/doc metadata (unreadCount or unreadBy) to avoid heavy counting queries.
-  Future<int> getUnreadCount(String userId) async {
-    try {
-      final chatsSnapshot = await FirebaseFirestore.instance.collection('chats').where('userIds', arrayContains: userId).get();
-      final groupsSnapshot = await FirebaseFirestore.instance.collection('groups').where('userIds', arrayContains: userId).get();
-
-      int unreadCount = 0;
-
-      // For docs that don't have doc-level unread metadata, we'll gather queries in parallel
-      final List<Future<QuerySnapshot<Map<String, dynamic>>>> pendingLatestMsgFutures = [];
-      final Map<int, String> futureIndexToDocId = {};
-
-      final allDocs = [...chatsSnapshot.docs, ...groupsSnapshot.docs];
-      for (int i = 0; i < allDocs.length; i++) {
-        final doc = allDocs[i];
-        final data = doc.data();
-        // Prefer doc-level fields:
-        if (data.containsKey('unreadCount')) {
-          unreadCount += (data['unreadCount'] as int?) ?? 0;
-          continue;
-        }
-        if (data.containsKey('unreadBy')) {
-          final list = List<dynamic>.from(data['unreadBy'] ?? []);
-          if (list.contains(userId)) unreadCount++;
-          continue;
-        }
-
-        // fallback: queue latest-message fetch for parallel execution
-        final isGroup = data['isGroup'] ?? false;
-        final future = FirebaseFirestore.instance
-            .collection(isGroup ? 'groups' : 'chats')
-            .doc(doc.id)
-            .collection('messages')
-            .orderBy('timestamp', descending: true)
-            .limit(1)
-            .get();
-        futureIndexToDocId[pendingLatestMsgFutures.length] = doc.id;
-        pendingLatestMsgFutures.add(future);
+    // Base values from the chat doc
+    final title = (isGroup ? (data['name'] ?? 'Group') : '') as String;
+    final docTimestamp = _parseTimestamp(data['timestamp']);
+    String docLastMessage = '';
+    if (data.containsKey('lastMessage')) {
+      final lm = data['lastMessage'];
+      if (lm is String) {
+        docLastMessage = lm;
+      } else if (lm is Map && lm['text'] != null) {
+        docLastMessage = lm['text'];
       }
+    }
 
-      if (pendingLatestMsgFutures.isNotEmpty) {
-        final results = await Future.wait(pendingLatestMsgFutures);
-        for (final snap in results) {
-          if (snap.docs.isNotEmpty) {
-            final latest = snap.docs.first.data();
-            final readBy = List<dynamic>.from(latest['readBy'] ?? []);
-            if (!readBy.contains(userId)) unreadCount++;
+    // Determine unread from doc-level fields if present
+    bool unreadForUser = false;
+    int unreadCountForUI = 0;
+    try {
+      if (data.containsKey('unreadBy')) {
+        final unreadBy = List<dynamic>.from(data['unreadBy'] ?? []);
+        unreadForUser = unreadBy.contains(uid);
+      } else if (data.containsKey('readStatus')) {
+        final readStatus = data['readStatus'] as Map<dynamic, dynamic>? ?? {};
+        unreadForUser = readStatus[uid] != true;
+      } else {
+        // unknown - we'll fetch last message and inspect readBy
+        unreadForUser = false;
+      }
+      unreadCountForUI = unreadForUser ? 1 : 0;
+    } catch (_) {
+      unreadForUser = false;
+      unreadCountForUI = 0;
+    }
+
+    // Determine otherUser for 1:1 chats if available (client may store in doc)
+    Map<String, dynamic>? otherUser;
+    String? otherId;
+    if (!isGroup) {
+      try {
+        final userIds = List<dynamic>.from(data['userIds'] ?? []);
+        otherId = userIds.firstWhere((e) => e != uid, orElse: () => null) as String?;
+        if (otherId != null) {
+          // try to read cached user info inside doc if present
+          if (data.containsKey('otherUser')) {
+            otherUser = Map<String, dynamic>.from(data['otherUser']);
+            otherUser['id'] = otherId;
+          } else {
+            // lazy: set minimal map (UI will show username later by fetching users collection as needed)
+            otherUser = {'id': otherId};
           }
         }
-      }
+      } catch (_) {}
+    }
 
-      return unreadCount;
-    } catch (e) {
-      debugPrint('getUnreadCount error: $e');
-      return 0;
+    // If doc lacks lastMessage or read metadata, fetch the latest message once
+    final needsFetch = (docLastMessage.isEmpty && (data['timestamp'] != null)) ||
+        (!data.containsKey('unreadBy') && !data.containsKey('readStatus'));
+
+    // Upsert summary (timestamp might be 0 if missing)
+    if (idx >= 0) {
+      final existing = chatSummaries[idx];
+      existing.isGroup = isGroup;
+      existing.title = isGroup
+          ? (data['name'] ?? existing.title)
+          : (existing.title.isNotEmpty
+              ? existing.title
+              : (otherUser != null ? (otherUser['username'] ?? existing.title) : existing.title));
+      existing.otherUser = otherUser ?? existing.otherUser;
+      existing.lastMessageText =
+          docLastMessage.isNotEmpty ? docLastMessage : existing.lastMessageText;
+      existing.timestamp = docTimestamp.isAfter(existing.timestamp) ? docTimestamp : existing.timestamp;
+      existing.unreadCount = unreadCountForUI;
+      existing.isPinned = _pinnedChats.contains(existing.id);
+      existing.isMuted = _mutedUsers.contains(existing.id) ||
+          (existing.otherUser != null && _mutedUsers.contains(existing.otherUser?['id']));
+      existing.isBlocked = existing.otherUser != null && _blockedUsers.contains(existing.otherUser?['id']);
+      // If we don't have username/photo for the other user, fetch it in background.
+      if (!isGroup && existing.otherUser != null && (existing.otherUser?['username'] == null || (existing.otherUser?['username'] as String).isEmpty)) {
+        final oid = existing.otherUser?['id'] as String?;
+        if (oid != null) {
+          _fetchAndApplyProfile(oid, id, isGroup);
+        }
+      }
+    } else {
+      final summary = ChatSummary(
+        id: id,
+        isGroup: isGroup,
+        title: isGroup ? (data['name'] ?? 'Group') : (otherUser != null ? (otherUser['username'] ?? '') : ''),
+        otherUser: otherUser,
+        lastMessageText: docLastMessage,
+        timestamp: docTimestamp,
+        unreadCount: unreadCountForUI,
+        isPinned: _pinnedChats.contains(id),
+        isMuted: _mutedUsers.contains(id) || (otherUser != null && _mutedUsers.contains(otherUser['id'])),
+        isBlocked: otherUser != null && _blockedUsers.contains(otherUser['id']),
+      );
+      chatSummaries.add(summary);
+
+      // If we added a summary for a direct chat but the summary lacks username, fetch it.
+      if (!isGroup && otherUser != null && (otherUser['username'] == null || (otherUser['username'] as String).isEmpty)) {
+        final oid = otherUser['id'] as String?;
+        if (oid != null) {
+          _fetchAndApplyProfile(oid, id, isGroup);
+        }
+      }
+    }
+
+    // If necessary, queue a fetch of latest message for more accurate lastMessage/readBy info
+    if (needsFetch && !_pendingLastMessageFetches.contains(id)) {
+      _pendingLastMessageFetches.add(id);
+      _fetchLastMessageAndUpdate(id, isGroup: isGroup).whenComplete(() {
+        _pendingLastMessageFetches.remove(id);
+        _saveCachedLists();
+        notifyListeners();
+      });
     }
   }
 
-  /// Mark chat as read for the user.
-  /// We update the chat doc's unreadBy field (remove user), and patch the last N messages to include the reader.
-  Future<void> markAsRead(String chatId, String userId, bool isGroup) async {
+  /// Fetch a user profile and apply to the in-memory chat summary (if present).
+  Future<void> _fetchAndApplyProfile(String userId, String chatId, bool isGroup) async {
     try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) return;
+      final profile = await _fetchUserProfile(userId);
+      if (profile == null) return;
+      final idx = chatSummaries.indexWhere((c) => c.id == chatId && c.isGroup == isGroup);
+      if (idx >= 0) {
+        final s = chatSummaries[idx];
+        s.otherUser = {
+          ...?s.otherUser,
+          'id': profile['id'],
+          if (profile['username'] != null) 'username': profile['username'],
+          if (profile['photoUrl'] != null) 'photoUrl': profile['photoUrl'],
+        };
+        // If title is empty and username available, set title for display
+        if ((s.title.isEmpty) && (profile['username'] as String?)?.isNotEmpty == true) {
+          s.title = profile['username'];
+        }
+        _saveCachedLists();
+        notifyListeners();
+      }
+    } catch (e, st) {
+      debugPrint('[MessagesController] _fetchAndApplyProfile error: $e\n$st');
+    }
+  }
 
-      // Remove user from chat's unreadBy array (cheap)
-      await FirebaseFirestore.instance.collection(isGroup ? 'groups' : 'chats').doc(chatId).update({
-        'unreadBy': FieldValue.arrayRemove([userId]),
-      });
+  /// Fetch user document from Firestore (small in-memory cache to reduce reads).
+  Future<Map<String, dynamic>?> _fetchUserProfile(String userId) async {
+    if (userId.isEmpty) return null;
+    // return cached copy when present
+    if (_userCache.containsKey(userId)) return _userCache[userId];
+    try {
+      final doc = await FirebaseFirestore.instance.collection('users').doc(userId).get();
+      if (!doc.exists) return null;
+      final data = Map<String, dynamic>.from(doc.data() ?? {});
+      data['id'] = doc.id;
+      _userCache[userId] = data;
+      return data;
+    } catch (e, st) {
+      debugPrint('[MessagesController] _fetchUserProfile error: $e\n$st');
+      return null;
+    }
+  }
 
-      // Update a small recent batch of messages (last 50) to include userId in readBy if missing.
-      final msgsSnapshot = await FirebaseFirestore.instance
+  Future<void> _fetchLastMessageAndUpdate(String chatId, {required bool isGroup}) async {
+    try {
+      final ref = FirebaseFirestore.instance
           .collection(isGroup ? 'groups' : 'chats')
           .doc(chatId)
           .collection('messages')
           .orderBy('timestamp', descending: true)
-          .limit(50)
-          .get();
+          .limit(1);
 
-      if (msgsSnapshot.docs.isEmpty) return;
-
-      final batch = FirebaseFirestore.instance.batch();
-      for (final m in msgsSnapshot.docs) {
-        final data = m.data();
-        final readBy = List<dynamic>.from(data['readBy'] ?? []);
-        if (!readBy.contains(userId)) {
-          batch.update(m.reference, {'readBy': FieldValue.arrayUnion([userId])});
-        }
+      final snap = await ref.get();
+      if (snap.docs.isEmpty) return;
+      final m = snap.docs.first.data();
+      final senderId = m['senderId'] as String?;
+      final text = (m['text'] as String?) ?? (m['type'] == 'media' ? 'Media' : '');
+      final timestamp = _parseTimestamp(m['timestamp']);
+      final readBy = List<dynamic>.from(m['readBy'] ?? []);
+      final unreadForUser = !(readBy.contains(currentUser['id']));
+      final idx = chatSummaries.indexWhere((c) => c.id == chatId && c.isGroup == isGroup);
+      if (idx >= 0) {
+        final s = chatSummaries[idx];
+        s.lastMessageText = text;
+        s.timestamp = timestamp.isAfter(s.timestamp) ? timestamp : s.timestamp;
+        s.unreadCount = unreadForUser ? 1 : 0;
+      } else {
+        // create a new summary if it didn't exist yet
+        final summary = ChatSummary(
+          id: chatId,
+          isGroup: isGroup,
+          title: isGroup ? 'Group' : '',
+          otherUser: null,
+          lastMessageText: text,
+          timestamp: timestamp,
+          unreadCount: unreadForUser ? 1 : 0,
+          isPinned: _pinnedChats.contains(chatId),
+          isMuted: _mutedUsers.contains(chatId),
+        );
+        chatSummaries.add(summary);
       }
-      await batch.commit();
-    } catch (e) {
-      debugPrint('markAsRead error: $e');
+    } catch (e, st) {
+      debugPrint('[MessagesController] _fetchLastMessageAndUpdate error: $e\n$st');
     }
   }
 
-  Future<void> blockUser() async {
-    if (selectedOtherUser == null || isGroup) return;
-    final userId = selectedOtherUser!['id'] as String?;
-    if (userId == null) return;
+  // ---------------------
+  // Public helpers
+  // ---------------------
 
-    if (!_blockedUsers.contains(userId)) {
-      _blockedUsers.add(userId);
-      notifyListeners(); // immediate UI update
-    }
-    await _saveCachedData();
-
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) throw Exception('Current user id missing');
-
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
-        'blockedUsers': FieldValue.arrayUnion([userId]),
-      });
-
-      final chatId = getChatId(uid, userId);
-      await _deleteChatDocument(chatId);
-
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${selectedOtherUser!['username']} blocked')));
-      }
-    } catch (e) {
-      // rollback local change
-      _blockedUsers.remove(userId);
-      await _saveCachedData();
-      notifyListeners();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to block user: $e')));
-      }
-    } finally {
-      clearSelection();
-    }
+  /// Convenience compatibility method expected by some UI widgets.
+  /// Returns the total unread count (simple badge count).
+  Future<int> getUnreadCount(String? userId) async {
+    _recomputeTotalUnread();
+    return totalUnread;
   }
 
-  Future<void> unblockUser() async {
-    if (selectedOtherUser == null || isGroup) return;
-    final userId = selectedOtherUser!['id'] as String?;
-    if (userId == null) return;
-
-    if (_blockedUsers.contains(userId)) {
-      _blockedUsers.remove(userId);
-      notifyListeners();
-    }
-    await _saveCachedData();
-
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) throw Exception('Current user id missing');
-
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
-        'blockedUsers': FieldValue.arrayRemove([userId]),
-      });
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${selectedOtherUser!['username']} unblocked')));
-      }
-    } catch (e) {
-      // rollback
-      if (!_blockedUsers.contains(userId)) _blockedUsers.add(userId);
-      await _saveCachedData();
-      notifyListeners();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to unblock user: $e')));
-      }
-    } finally {
-      clearSelection();
-    }
+  /// Quick local check used by UI to know if a chat is pinned.
+  bool isChatPinned(String chatId) {
+    return _pinnedChats.contains(chatId);
   }
 
-  Future<void> muteUser() async {
-    if (selectedOtherUser == null || isGroup) return;
-    final userId = selectedOtherUser!['id'] as String?;
-    if (userId == null) return;
-
-    if (!_mutedUsers.contains(userId)) {
-      _mutedUsers.add(userId);
-      notifyListeners();
-    }
-    await _saveCachedData();
-
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) throw Exception('Current user id missing');
-
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
-        'mutedUsers': FieldValue.arrayUnion([userId]),
-      });
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${selectedOtherUser!['username']} muted')));
-      }
-    } catch (e) {
-      _mutedUsers.remove(userId);
-      await _saveCachedData();
-      notifyListeners();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to mute user: $e')));
-      }
-    } finally {
-      clearSelection();
-    }
+  /// Quick local check used by UI to know if a user/chat id is muted.
+  bool isUserMuted(String id) {
+    return _mutedUsers.contains(id);
   }
 
-  Future<void> unmuteUser() async {
-    if (selectedOtherUser == null || isGroup) return;
-    final userId = selectedOtherUser!['id'] as String?;
-    if (userId == null) return;
-
-    if (_mutedUsers.contains(userId)) {
-      _mutedUsers.remove(userId);
-      notifyListeners();
-    }
-    await _saveCachedData();
-
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) throw Exception('Current user id missing');
-
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
-        'mutedUsers': FieldValue.arrayRemove([userId]),
-      });
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${selectedOtherUser!['username']} unmuted')));
-      }
-    } catch (e) {
-      if (!_mutedUsers.contains(userId)) _mutedUsers.add(userId);
-      await _saveCachedData();
-      notifyListeners();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to unmute user: $e')));
-      }
-    } finally {
-      clearSelection();
-    }
+  /// Quick local check used by UI to know if a user is blocked.
+  bool isUserBlocked(String userId) {
+    return _blockedUsers.contains(userId);
   }
 
-  Future<void> muteGroup() async {
-    if (selectedChatId == null || !isGroup) return;
-    final id = selectedChatId!;
-    if (!_mutedUsers.contains(id)) {
-      _mutedUsers.add(id);
-      notifyListeners();
-    }
-    await _saveCachedData();
-
+  /// Call to mark a chat as read (WhatsApp-like behaviour).
+  /// This updates the chat doc's unreadBy and also patches recent messages' readBy in a small batch.
+  Future<void> markAsRead(String chatId, {required bool isGroup}) async {
     try {
       final uid = currentUser['id'] as String?;
-      if (uid == null) throw Exception('Current user id missing');
+      if (uid == null) return;
 
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
-        'mutedUsers': FieldValue.arrayUnion([id]),
-      });
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Group muted')));
-      }
-    } catch (e) {
-      _mutedUsers.remove(id);
-      await _saveCachedData();
-      notifyListeners();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to mute group: $e')));
-      }
-    } finally {
-      clearSelection();
-    }
-  }
+      final chatRef = FirebaseFirestore.instance.collection(isGroup ? 'groups' : 'chats').doc(chatId);
 
-  Future<void> unmuteGroup() async {
-    if (selectedChatId == null || !isGroup) return;
-    final id = selectedChatId!;
-    if (_mutedUsers.contains(id)) {
-      _mutedUsers.remove(id);
-      notifyListeners();
-    }
-    await _saveCachedData();
+      // Remove user from chat-level unreadBy if present
+      await chatRef.update({'unreadBy': FieldValue.arrayRemove([uid])});
 
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) throw Exception('Current user id missing');
-
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
-        'mutedUsers': FieldValue.arrayRemove([id]),
-      });
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Group unmuted')));
-      }
-    } catch (e) {
-      if (!_mutedUsers.contains(id)) _mutedUsers.add(id);
-      await _saveCachedData();
-      notifyListeners();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to unmute group: $e')));
-      }
-    } finally {
-      clearSelection();
-    }
-  }
-
-  Future<void> pinConversation() async {
-    if (selectedChatId == null) return;
-    final id = selectedChatId!;
-    if (!_pinnedChats.contains(id)) {
-      _pinnedChats.add(id);
-      notifyListeners();
-    }
-    await _saveCachedData();
-
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) throw Exception('Current user id missing');
-
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
-        'pinnedChats': FieldValue.arrayUnion([id]),
-      });
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Conversation pinned')));
-      }
-    } catch (e) {
-      _pinnedChats.remove(id);
-      await _saveCachedData();
-      notifyListeners();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to pin conversation: $e')));
-      }
-    } finally {
-      clearSelection();
-    }
-  }
-
-  Future<void> unpinConversation() async {
-    if (selectedChatId == null) return;
-    final id = selectedChatId!;
-    if (_pinnedChats.contains(id)) {
-      _pinnedChats.remove(id);
-      notifyListeners();
-    }
-    await _saveCachedData();
-
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) throw Exception('Current user id missing');
-
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({
-        'pinnedChats': FieldValue.arrayRemove([id]),
-      });
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Conversation unpinned')));
-      }
-    } catch (e) {
-      if (!_pinnedChats.contains(id)) _pinnedChats.add(id);
-      await _saveCachedData();
-      notifyListeners();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to unpin conversation: $e')));
-      }
-    } finally {
-      clearSelection();
-    }
-  }
-
-  /// Safely mark messages as deletedFor current user using pagination/chunking.
-  /// This avoids reading huge collections into memory and respects Firestore batch limits.
-  Future<void> _deleteChatDocument(String chatId) async {
-    try {
-      final uid = currentUser['id'] as String?;
-      if (uid == null) throw Exception('Current user id missing');
-
-      final chatRef = FirebaseFirestore.instance.collection('chats').doc(chatId);
-      const int pageSize = 200; // safe chunk size (well under 500 batch operations limit)
-      Query<Map<String, dynamic>> messagesQuery = chatRef.collection('messages').orderBy('timestamp').limit(pageSize);
-
-      bool more = true;
-      bool firstBatch = true;
-      while (more) {
-        final snap = await messagesQuery.get();
-        if (snap.docs.isEmpty) break;
-
+      // Update recent messages readBy to include this user (last 50)
+      final msgsSnap = await chatRef.collection('messages').orderBy('timestamp', descending: true).limit(50).get();
+      if (msgsSnap.docs.isNotEmpty) {
         final batch = FirebaseFirestore.instance.batch();
-        for (var m in snap.docs) {
+        for (final m in msgsSnap.docs) {
           final data = m.data();
-          final deletedFor = List<String>.from(data['deletedFor'] ?? []);
-          if (!deletedFor.contains(uid)) {
-            batch.update(m.reference, {'deletedFor': FieldValue.arrayUnion([uid])});
+          final readBy = List<dynamic>.from(data['readBy'] ?? []);
+          if (!readBy.contains(uid)) {
+            batch.update(m.reference, {'readBy': FieldValue.arrayUnion([uid])});
           }
         }
-
-        // ensure chat doc records deletedBy (use set with merge to be safe even if doc doesn't exist)
-        // only need to add once, but doing in each batch is harmless (idempotent).
-        batch.set(chatRef, {'deletedBy': FieldValue.arrayUnion([uid])}, SetOptions(merge: true));
-
         await batch.commit();
+      }
 
-        // if fewer than pageSize docs, done
+      // Update in-memory
+      final idx = chatSummaries.indexWhere((c) => c.id == chatId && c.isGroup == isGroup);
+      if (idx >= 0) {
+        chatSummaries[idx].unreadCount = 0;
+        _recomputeTotalUnread();
+        _saveCachedLists();
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('[MessagesController] markAsRead error: $e');
+    }
+  }
+
+  /// Delete conversation for current user (marks messages deletedFor current user)
+  Future<void> deleteConversation(String chatId, {required bool isGroup}) async {
+    try {
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return;
+
+      final chatRef = FirebaseFirestore.instance.collection(isGroup ? 'groups' : 'chats').doc(chatId);
+
+      // mark deletedBy on chat doc
+      await chatRef.set({'deletedBy': FieldValue.arrayUnion([uid])}, SetOptions(merge: true));
+
+      // mark each message 'deletedFor' for this user in chunks
+      const pageSize = 200;
+      Query<Map<String, dynamic>> q = chatRef.collection('messages').orderBy('timestamp').limit(pageSize);
+      bool more = true;
+      while (more) {
+        final snap = await q.get();
+        if (snap.docs.isEmpty) break;
+        final batch = FirebaseFirestore.instance.batch();
+        for (final d in snap.docs) {
+          final deletedFor = List<String>.from(d.data()['deletedFor'] ?? []);
+          if (!deletedFor.contains(uid)) {
+            batch.update(d.reference, {'deletedFor': FieldValue.arrayUnion([uid])});
+          }
+        }
+        await batch.commit();
         more = snap.docs.length == pageSize;
         if (more) {
-          messagesQuery = chatRef.collection('messages').orderBy('timestamp').startAfterDocument(snap.docs.last).limit(pageSize);
+          q = chatRef.collection('messages').orderBy('timestamp').startAfterDocument(snap.docs.last).limit(pageSize);
         }
-        firstBatch = false;
       }
+
+      // remove from in-memory list
+      chatSummaries.removeWhere((c) => c.id == chatId && c.isGroup == isGroup);
+      _recomputeTotalUnread();
+      _saveCachedLists();
+      notifyListeners();
     } catch (e) {
-      debugPrint('Error deleting chat: $e');
+      debugPrint('[MessagesController] deleteConversation error: $e');
     }
   }
 
-  Future<void> deleteConversation() async {
-    if (selectedChatId == null) return;
+  // ---------------------
+  // Pin / Mute / Block
+  // ---------------------
+  Future<void> pinConversation(String chatId) async {
+    if (!_pinnedChats.contains(chatId)) _pinnedChats.add(chatId);
+    await _saveCachedLists();
+    // persist to server user doc
     try {
-      if (isGroup) {
-        final groupDocRef = FirebaseFirestore.instance.collection('groups').doc(selectedChatId);
-        final groupDoc = await groupDocRef.get();
-        if (!groupDoc.exists) {
-          throw Exception('Group not found');
-        }
-        // Remove user from group and mark as deleted
-        await groupDocRef.update({
-          'userIds': FieldValue.arrayRemove([currentUser['id']]),
-          'deletedBy': FieldValue.arrayUnion([currentUser['id']]),
-        });
-
-        // Mark messages' deletedFor for this user in paginated fashion
-        const int pageSize = 200;
-        Query<Map<String, dynamic>> messagesQuery = groupDocRef.collection('messages').orderBy('timestamp').limit(pageSize);
-        bool more = true;
-        final uid = currentUser['id'] as String?;
-        if (uid == null) throw Exception('Current user id missing');
-
-        while (more) {
-          final snap = await messagesQuery.get();
-          if (snap.docs.isEmpty) break;
-
-          final batch = FirebaseFirestore.instance.batch();
-          for (var m in snap.docs) {
-            final data = m.data();
-            final deletedFor = List<String>.from(data['deletedFor'] ?? []);
-            if (!deletedFor.contains(uid)) {
-              batch.update(m.reference, {'deletedFor': FieldValue.arrayUnion([uid])});
-            }
-          }
-          // mark group doc deletedBy as well (merge)
-          batch.set(groupDocRef, {'deletedBy': FieldValue.arrayUnion([uid])}, SetOptions(merge: true));
-          await batch.commit();
-
-          more = snap.docs.length == pageSize;
-          if (more) {
-            messagesQuery = groupDocRef.collection('messages').orderBy('timestamp').startAfterDocument(snap.docs.last).limit(pageSize);
-          }
-        }
-
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Left group')));
-        }
-      } else {
-        await _deleteChatDocument(selectedChatId!);
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Conversation deleted')));
-        }
-      }
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return;
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
+        'pinnedChats': FieldValue.arrayUnion([chatId])
+      });
     } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to delete conversation: $e')));
-      }
-    } finally {
-      clearSelection();
+      debugPrint('[MessagesController] pinConversation error: $e');
+    }
+    // update local view
+    final idx = chatSummaries.indexWhere((c) => c.id == chatId);
+    if (idx >= 0) {
+      chatSummaries[idx].isPinned = true;
+      chatSummaries.sort((a, b) {
+        final aPinned = _pinnedChats.contains(a.id);
+        final bPinned = _pinnedChats.contains(b.id);
+        if (aPinned && !bPinned) return -1;
+        if (!aPinned && bPinned) return 1;
+        return b.timestamp.compareTo(a.timestamp);
+      });
+      _saveCachedLists();
+      notifyListeners();
     }
   }
 
-  Future<void> showChatCreationOptions() async {
+  Future<void> unpinConversation(String chatId) async {
+    if (_pinnedChats.contains(chatId)) _pinnedChats.remove(chatId);
+    await _saveCachedLists();
     try {
-      final snapshot = await FirebaseFirestore.instance.collection('users').get();
-      final allUsers = snapshot.docs
-          .where((doc) => doc.exists && doc.id != currentUser['id'] && !_blockedUsers.contains(doc.id))
-          .map((doc) {
-        final data = Map<String, dynamic>.from(doc.data() ?? {});
-        data['id'] = doc.id;
-        return data;
-      }).toList();
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return;
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
+        'pinnedChats': FieldValue.arrayRemove([chatId])
+      });
+    } catch (e) {
+      debugPrint('[MessagesController] unpinConversation error: $e');
+    }
+    final idx = chatSummaries.indexWhere((c) => c.id == chatId);
+    if (idx >= 0) {
+      chatSummaries[idx].isPinned = false;
+      chatSummaries.sort((a, b) {
+        final aPinned = _pinnedChats.contains(a.id);
+        final bPinned = _pinnedChats.contains(b.id);
+        if (aPinned && !bPinned) return -1;
+        if (!aPinned && bPinned) return 1;
+        return b.timestamp.compareTo(a.timestamp);
+      });
+      _saveCachedLists();
+      notifyListeners();
+    }
+  }
 
-      if (!context.mounted) return;
+  Future<void> mute(String id) async {
+    if (!_mutedUsers.contains(id)) _mutedUsers.add(id);
+    await _saveCachedLists();
+    try {
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return;
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
+        'mutedUsers': FieldValue.arrayUnion([id])
+      });
+    } catch (e) {
+      debugPrint('[MessagesController] mute error: $e');
+    }
+    final idx = chatSummaries.indexWhere((c) => c.id == id);
+    if (idx >= 0) {
+      chatSummaries[idx].isMuted = true;
+      _saveCachedLists();
+      notifyListeners();
+    }
+  }
 
-      showModalBottomSheet(
-        context: context,
-        backgroundColor: Colors.transparent,
-        builder: (sheetCtx) => Container(
-          decoration: BoxDecoration(
-            color: Colors.black.withAlpha((0.3 * 255).round()),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white.withAlpha((0.1 * 255).round())),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.group_add, color: Colors.white),
-                title: Text(
-                  'New Group Chat',
-                  style: TextStyle(
-                    color: currentUser['accentColor'] ?? Colors.white,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                onTap: () {
-                  Navigator.pop(sheetCtx);
-                  navigateToNewGroupChat();
-                },
-              ),
-              const Divider(color: Colors.white12),
-              Flexible(
-                child: ListView(
-                  shrinkWrap: true,
-                  children: allUsers.map((user) {
-                    final userId = user['id'] as String?;
-                    if (userId == null) return const SizedBox.shrink();
-                    return ListTile(
-                      leading: CircleAvatar(
-                        backgroundImage: user['photoUrl'] != null ? NetworkImage(user['photoUrl']) as ImageProvider : null,
-                        child: user['photoUrl'] == null
-                            ? Text(user['username'] != null && (user['username'] as String).isNotEmpty ? (user['username'] as String)[0].toUpperCase() : 'M', style: const TextStyle(color: Colors.white))
-                            : null,
-                      ),
-                      title: Text(
-                        user['username'] ?? 'Unknown',
-                        style: TextStyle(color: currentUser['accentColor'] ?? Colors.white, fontWeight: FontWeight.bold),
-                      ),
-                      onTap: () async {
-                        final isBlocked = isUserBlocked(userId);
-                        if (isBlocked) {
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${user['username']} is blocked. Unblock to start a chat.')));
-                          }
-                          return;
-                        }
+  Future<void> unmute(String id) async {
+    if (_mutedUsers.contains(id)) _mutedUsers.remove(id);
+    await _saveCachedLists();
+    try {
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return;
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
+        'mutedUsers': FieldValue.arrayRemove([id])
+      });
+    } catch (e) {
+      debugPrint('[MessagesController] unmute error: $e');
+    }
+    final idx = chatSummaries.indexWhere((c) => c.id == id);
+    if (idx >= 0) {
+      chatSummaries[idx].isMuted = false;
+      _saveCachedLists();
+      notifyListeners();
+    }
+  }
 
-                        final uid = currentUser['id'] as String?;
-                        if (uid == null) return;
+  Future<void> blockUser(String userId, {String? chatId}) async {
+    if (!_blockedUsers.contains(userId)) _blockedUsers.add(userId);
+    await _saveCachedLists();
+    try {
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return;
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
+        'blockedUsers': FieldValue.arrayUnion([userId])
+      });
+      // optionally delete/mark chat as deleted
+      if (chatId != null) {
+        await deleteConversation(chatId, isGroup: false);
+      }
+    } catch (e) {
+      debugPrint('[MessagesController] blockUser error: $e');
+    }
+    // update in-memory
+    for (final s in chatSummaries) {
+      if (s.otherUser != null && s.otherUser?['id'] == userId) {
+        s.isBlocked = true;
+      }
+    }
+    _saveCachedLists();
+    notifyListeners();
+  }
 
-                        final chatId = getChatId(uid, userId);
-                        await FirebaseFirestore.instance.collection('chats').doc(chatId).set({
-                          'userIds': [uid, user['id']],
-                          'lastMessage': '',
-                          'timestamp': FieldValue.serverTimestamp(),
-                          'unreadBy': [],
-                          'deletedBy': [],
-                          'isGroup': false,
-                        }, SetOptions(merge: true));
+  Future<void> unblockUser(String userId) async {
+    if (_blockedUsers.contains(userId)) _blockedUsers.remove(userId);
+    await _saveCachedLists();
+    try {
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return;
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
+        'blockedUsers': FieldValue.arrayRemove([userId])
+      });
+    } catch (e) {
+      debugPrint('[MessagesController] unblockUser error: $e');
+    }
+    for (final s in chatSummaries) {
+      if (s.otherUser != null && s.otherUser?['id'] == userId) {
+        s.isBlocked = false;
+      }
+    }
+    _saveCachedLists();
+    notifyListeners();
+  }
 
-                        if (context.mounted) {
-                          Navigator.pop(sheetCtx);
-                          Navigator.push(context, MaterialPageRoute(builder: (_) => ChangeNotifierProvider.value(value: this, child: ChatScreen(
-                            chatId: chatId,
-                            currentUser: currentUser,
-                            otherUser: user,
-                            authenticatedUser: currentUser,
-                            storyInteractions: const [],
-                            accentColor: currentUser['accentColor'] ?? Colors.blueAccent,
-                          ))));
-                        }
-                      },
-                    );
-                  }).toList(),
-                ),
-              ),
-            ],
+  // ---------------------
+  // Utility / housekeeping
+  // ---------------------
+  DateTime _parseTimestamp(dynamic ts) {
+    if (ts == null) return DateTime.fromMillisecondsSinceEpoch(0);
+    try {
+      if (ts is Timestamp) return ts.toDate();
+      if (ts is int) return DateTime.fromMillisecondsSinceEpoch(ts);
+      if (ts is String) return DateTime.parse(ts);
+    } catch (_) {}
+    return DateTime.fromMillisecondsSinceEpoch(0);
+  }
+
+  void _recomputeTotalUnread() {
+    totalUnread = chatSummaries.fold(0, (p, c) => p + (c.unreadCount > 0 ? 1 : 0));
+  }
+
+  /// Should be called when your app is going away to cancel subscriptions.
+  @override
+  void dispose() {
+    _chatsSub?.cancel();
+    _groupsSub?.cancel();
+    super.dispose();
+  }
+
+  // ---------------------
+  // Convenience / Creation helpers
+  // ---------------------
+
+  /// Create or open a 1:1 chat then navigate to ChatScreen
+  /// NOTE: to avoid using BuildContext across async gaps the method captures NavigatorState.
+  Future<void> openOrCreateDirectChat(BuildContext ctx, Map<String, dynamic> otherUser) async {
+    final navigator = Navigator.of(ctx);
+    try {
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return;
+      final otherId = otherUser['id'] as String;
+      final chatId = getChatId(uid, otherId);
+
+      await FirebaseFirestore.instance.collection('chats').doc(chatId).set({
+        'userIds': [uid, otherId],
+        'lastMessage': '',
+        'timestamp': FieldValue.serverTimestamp(),
+        'unreadBy': [],
+        'deletedBy': [],
+        'isGroup': false,
+        // optionally include small cached otherUser info for list UI
+        'otherUser': {
+          'username': otherUser['username'] ?? '',
+          'photoUrl': otherUser['photoUrl'] ?? '',
+        },
+      }, SetOptions(merge: true));
+
+      // navigate (use captured navigator)
+      if (!navigator.mounted) return;
+      navigator.push(
+        MaterialPageRoute(
+          builder: (_) => ChatScreen(
+            chatId: chatId,
+            currentUser: currentUser,
+            otherUser: otherUser,
+            authenticatedUser: currentUser,
+            storyInteractions: const [],
+            accentColor: currentUser['accentColor'] ?? Colors.blueAccent,
           ),
         ),
       );
     } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to fetch users: $e')));
-      }
+      debugPrint('[MessagesController] openOrCreateDirectChat error: $e');
     }
   }
 
-  Future<void> navigateToNewGroupChat() async {
-    final name = await showGroupNameInput(context);
+  /// Create group flow
+  Future<void> navigateToNewGroupChat(BuildContext ctx) async {
+    // capture navigator for later navigation
+    final navigator = Navigator.of(ctx);
+    final name = await showGroupNameInput(ctx);
     if (name == null || name.trim().isEmpty) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Group name is required')));
+      // We can't safely show a SnackBar via ctx after await, so use ScaffoldMessenger with navigator.context
+      if (navigator.mounted) {
+        ScaffoldMessenger.of(navigator.context)
+            .showSnackBar(const SnackBar(content: Text('Group name is required')));
       }
       return;
     }
-
-    groupName = name.trim();
-
+    final groupName = name.trim();
     try {
       final snapshot = await FirebaseFirestore.instance.collection('users').get();
-      // ensure user map includes id property (CreateGroupScreen may expect it)
-      final users = snapshot.docs
-          .where((doc) => doc.exists && doc.id != currentUser['id'] && !_blockedUsers.contains(doc.id))
-          .map((doc) {
-        final Map<String, dynamic> d = Map<String, dynamic>.from(doc.data() ?? {});
-        d['id'] = doc.id;
-        return d;
-      }).toList();
+      final users = snapshot.docs.map((d) {
+        final m = Map<String, dynamic>.from(d.data() ?? {});
+        m['id'] = d.id;
+        return m;
+      }).where((u) => u['id'] != currentUser['id']).toList();
 
-      if (context.mounted) {
-        Navigator.push(context, MaterialPageRoute(
-          builder: (_) => ChangeNotifierProvider.value(value: this, child: CreateGroupScreen(
-            initialGroupName: groupName,
-            availableUsers: users,
-            currentUser: currentUser,
-            onGroupCreated: (chatId) {
-              Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => ChangeNotifierProvider.value(value: this, child: GroupChatScreen(
+      if (!navigator.mounted) return;
+      navigator.push(MaterialPageRoute(
+        builder: (_) => CreateGroupScreen(
+          initialGroupName: groupName,
+          availableUsers: users,
+          currentUser: currentUser,
+          onGroupCreated: (chatId) {
+            // push replacement into navigator (use navigator directly)
+            if (navigator.mounted) {
+              navigator.pushReplacement(MaterialPageRoute(builder: (_) => GroupChatScreen(
                 chatId: chatId,
                 currentUser: currentUser,
                 authenticatedUser: currentUser,
                 accentColor: currentUser['accentColor'] ?? Colors.blueAccent,
-              ))));
-            },
-          )),
-        ));
-      }
+              )));
+            }
+          },
+        ),
+      ));
     } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to fetch users: $e')));
+      debugPrint('[MessagesController] navigateToNewGroupChat error: $e');
+      if (navigator.mounted) {
+        ScaffoldMessenger.of(navigator.context).showSnackBar(SnackBar(content: Text('Failed to fetch users: $e')));
       }
     }
   }
@@ -832,6 +857,99 @@ class MessagesController extends ChangeNotifier {
             child: const Text('Next'),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Shows the "start new chat / new group" bottom sheet.
+  /// This is the method your UI expects: call controller.showChatCreationOptions(context).
+  Future<void> showChatCreationOptions(BuildContext ctx) async {
+    final navigator = Navigator.of(ctx);
+
+    // fetch users before showing the sheet (so the UI inside the sheet is immediate)
+    List<Map<String, dynamic>> allUsers = [];
+    try {
+      final snapshot = await FirebaseFirestore.instance.collection('users').get();
+      allUsers = snapshot.docs
+          .where((doc) => doc.exists && doc.id != currentUser['id'] && !_blockedUsers.contains(doc.id))
+          .map((doc) {
+        final data = Map<String, dynamic>.from(doc.data() ?? {});
+        data['id'] = doc.id;
+        return data;
+      }).toList();
+    } catch (e) {
+      debugPrint('[MessagesController] showChatCreationOptions: failed to fetch users: $e');
+      if (navigator.mounted) {
+        ScaffoldMessenger.of(navigator.context).showSnackBar(SnackBar(content: Text('Failed to fetch users: $e')));
+      }
+      return;
+    }
+
+    // show modal bottom sheet using navigator.context (so we don't use ctx after async gap)
+    if (!navigator.mounted) return;
+    await showModalBottomSheet(
+      context: navigator.context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) => Container(
+        decoration: BoxDecoration(
+          color: Colors.black.withAlpha((0.3 * 255).round()),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white.withAlpha((0.1 * 255).round())),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.group_add, color: Colors.white),
+              title: Text(
+                'New Group Chat',
+                style: TextStyle(
+                  color: currentUser['accentColor'] ?? Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                // use navigator to push group flow
+                if (navigator.mounted) {
+                  navigateToNewGroupChat(navigator.context);
+                }
+              },
+            ),
+            const Divider(color: Colors.white12),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: allUsers.map((user) {
+                  final userId = user['id'] as String?;
+                  if (userId == null) return const SizedBox.shrink();
+                  return ListTile(
+                    leading: CircleAvatar(
+                      backgroundImage: user['photoUrl'] != null ? NetworkImage(user['photoUrl']) as ImageProvider : null,
+                      child: user['photoUrl'] == null
+                          ? Text(
+                              user['username'] != null && (user['username'] as String).isNotEmpty
+                                  ? (user['username'] as String)[0].toUpperCase()
+                                  : 'M',
+                              style: const TextStyle(color: Colors.white),
+                            )
+                          : null,
+                    ),
+                    title: Text(
+                      user['username'] ?? 'Unknown',
+                      style: TextStyle(color: currentUser['accentColor'] ?? Colors.white, fontWeight: FontWeight.bold),
+                    ),
+                    onTap: () async {
+                      Navigator.pop(sheetCtx);
+                      // open or create direct chat using the captured navigator/context
+                      await openOrCreateDirectChat(navigator.context, user);
+                    },
+                  );
+                }).toList(),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
