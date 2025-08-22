@@ -247,51 +247,52 @@ if (widget.onGroupCreated != null) {
                                                   ),
                                                 ),
                                                 child: CheckboxListTile(
-                                                  value: isSelected,
-                                                  title: Text(
-                                                    user['username'],
-                                                    style: TextStyle(
-                                                      color: accentColor,
-                                                      fontWeight: FontWeight.bold,
-                                                    ),
-                                                  ),
-                                                  subtitle: Text(
-                                                    user['email'] ?? 'No email',
-                                                    style: TextStyle(
-                                                      color: accentColor.withOpacity(0.7),
-                                                    ),
-                                                  ),
-                                                  secondary: CircleAvatar(
-                                                    backgroundColor: Colors.grey[300],
-                                                    backgroundImage: (user['photoUrl'] != null &&
-                                                            user['photoUrl'].toString().isNotEmpty)
-                                                        ? NetworkImage(user['photoUrl'])
-                                                        : null,
-                                                    child: (user['photoUrl'] == null ||
-                                                            user['photoUrl'].toString().isEmpty)
-                                                        ? Text(
-                                                            user['username']?.isNotEmpty == true
-                                                                ? user['username'][0].toUpperCase()
-                                                                : '?',
-                                                            style: const TextStyle(
-                                                              fontWeight: FontWeight.bold,
-                                                              color: Colors.black87,
-                                                            ),
-                                                          )
-                                                        : null,
-                                                  ),
-                                                  onChanged: (selected) {
-                                                    setState(() {
-                                                      if (selected == true && !isSelected) {
-                                                        selectedUsers.add(user);
-                                                      } else if (selected == false) {
-                                                        selectedUsers.removeWhere((u) => u['id'] == user['id']);
-                                                      }
-                                                    });
-                                                  },
-                                                  activeColor: accentColor,
-                                                  checkColor: Colors.white,
-                                                ),
+  value: isSelected,
+  title: Text(
+    (user['username'] ?? 'Unknown User').toString(),
+    style: TextStyle(
+      color: accentColor,
+      fontWeight: FontWeight.bold,
+    ),
+  ),
+  subtitle: Text(
+    (user['email'] ?? 'No email').toString(),
+    style: TextStyle(
+      color: accentColor.withOpacity(0.7),
+    ),
+  ),
+  secondary: CircleAvatar(
+    backgroundColor: Colors.grey[300],
+    backgroundImage: (user['photoUrl'] != null &&
+            user['photoUrl'].toString().isNotEmpty)
+        ? NetworkImage(user['photoUrl'])
+        : null,
+    child: (user['photoUrl'] == null ||
+            user['photoUrl'].toString().isEmpty)
+        ? Text(
+            (user['username'] ?? '?').toString().isNotEmpty
+                ? (user['username'] ?? '?')[0].toUpperCase()
+                : '?',
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              color: Colors.black87,
+            ),
+          )
+        : null,
+  ),
+  onChanged: (selected) {
+    setState(() {
+      if (selected == true && !isSelected) {
+        selectedUsers.add(user);
+      } else if (selected == false) {
+        selectedUsers.removeWhere((u) => u['id'] == user['id']);
+      }
+    });
+  },
+  activeColor: accentColor,
+  checkColor: Colors.white,
+),
+
                                               ),
                                             );
                                           },

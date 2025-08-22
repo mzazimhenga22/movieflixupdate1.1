@@ -311,7 +311,11 @@ Future<void> _initializeVideo() async {
           mixWithOthers: false,
         ),
       );
-      _streamingInfo = await streamingFuture ?? {'creditsStartTime': null};
+      try {
+  _streamingInfo = await streamingFuture;
+} catch (_) {
+  _streamingInfo = {'creditsStartTime': null};
+}
       final actualUrl = _streamingInfo!['url'] as String? ?? _currentVideoPath;
       if (actualUrl.isEmpty) {
         if (mounted) {
@@ -1203,47 +1207,62 @@ Future<void> _initializeVideo() async {
     }
   }
 
-  Future<void> _switchVideo(String videoPath, String title,
-      {String? newSubtitleUrl, bool isHls = false}) async {
-    if (!mounted) return;
-    setState(() {
-      _currentVideoPath = videoPath;
-      _title = title;
-      _showRecommendationsBar = false;
-      _recommendationData = null;
-      _isInitialized = false;
-      _resumePosition = null;
-    });
-    await _controller.pause();
-    await _controller.dispose();
-    final newWidget = MainVideoPlayer(
-      videoPath: videoPath,
-      title: title,
-      releaseYear: widget.releaseYear,
-      isFullSeason: widget.isFullSeason,
-      episodeFiles: widget.episodeFiles,
-      similarMovies: widget.similarMovies,
-      subtitleUrl: newSubtitleUrl ?? widget.subtitleUrl,
-      localSubtitlePath: widget.localSubtitlePath,
-      isHls: isHls,
-      isLocal: widget.isLocal,
-      seasons: widget.seasons,
-      initialSeasonNumber: _currentSeasonNumber,
-      initialEpisodeNumber: _currentEpisodeNumber,
-      enableSkipIntro: widget.enableSkipIntro,
-      chapters: widget.chapters,
-      enablePiP: widget.enablePiP,
-      enableOffline: widget.enableOffline,
-      audioTracks: widget.audioTracks,
-      subtitleTracks: widget.subtitleTracks,
-    );
-    setState(() {
-      _currentVideoPath = newWidget.videoPath;
-      _title = newWidget.title;
-    });
-    await _initializeVideo();
-    await _loadSubtitles();
+Future<void> _switchVideo(String videoPath, String title,
+    {String? newSubtitleUrl, bool isHls = false}) async {
+  if (!mounted) return;
+  setState(() {
+    _currentVideoPath = videoPath;
+    _title = title;
+    _showRecommendationsBar = false;
+    _recommendationData = null;
+    _isInitialized = false;
+    _resumePosition = null;
+    _errorMessage = null;
+  });
+
+try {
+  await _controller.pause();
+  await _controller.dispose();
+} catch (_) {}
+
+  // update subtitle url if provided
+  if (newSubtitleUrl != null) {
+    // if you want to use it later in _loadSubtitles, store in a field:
+    // e.g. _currentSubtitleUrl = newSubtitleUrl;
   }
+
+  // create new controller and re-init
+  _controller = VideoPlayerController.networkUrl(
+    Uri.parse(videoPath),
+    formatHint: isHls ? VideoFormat.hls : VideoFormat.other,
+    httpHeaders: {
+      'Accept': '*/*',
+      'User-Agent': 'Mozilla/5.0 ...',
+    },
+    videoPlayerOptions: VideoPlayerOptions(
+      allowBackgroundPlayback: false,
+      mixWithOthers: false,
+    ),
+  );
+
+  await _controller.initialize();
+  _controller.addListener(_videoListener);
+  setState(() {
+    _isInitialized = true;
+    _volume = _controller.value.volume;
+  });
+
+  if (kIsWeb) {
+    await _controller.setVolume(0.0);
+    await _controller.play();
+    setState(() { _isMuted = true; _volume = 0.0; });
+  } else {
+    await _controller.play();
+  }
+
+  await _loadSubtitles();
+}
+
 
   Future<void> _switchToEpisode(int seasonNumber, int episodeNumber) async {
     try {
@@ -2145,16 +2164,16 @@ Widget _buildLoadingScreen() {
                   child: Stack(
                     children: [
                       Container(color: Colors.black),
-                      SizedBox.expand(
-                        child: FittedBox(
-                          fit: BoxFit.contain,
-                          child: SizedBox(
-                            width: _controller.value.size.width,
-                            height: _controller.value.size.height,
-                            child: VideoPlayer(_controller),
-                          ),
-                        ),
-                      ),
+                      if (_controller.value.isInitialized)
+  Center(
+    child: AspectRatio(
+      aspectRatio: _controller.value.aspectRatio,
+      child: VideoPlayer(_controller),
+    ),
+  )
+else
+  const SizedBox.shrink(),
+
                       if (_isLocked)
                         Center(
                           child: Focus(

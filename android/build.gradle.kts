@@ -9,7 +9,7 @@ buildscript {
     }
 
     dependencies {
-        classpath("com.android.tools.build:gradle:8.3.0") // required AGP for Gradle 8.9+
+        classpath("com.android.tools.build:gradle:8.6.0") // required AGP for Gradle 8.9+
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version")
         classpath("com.google.gms:google-services:4.4.2")
     }

@@ -7,15 +7,18 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <!-- Android 13+ Scoped Media (if you later read images/videos/audio individually) -->
+    <!-- Media Permissions -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGE" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
-    <!-- Android 11+ “All files access” -->
+    <!-- For Android 11+ All files access (optional if using Scoped Storage) -->
     <uses-permission
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
+
+    <!-- ✅ Android 13+ Notification Permission -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Features -->
     <uses-feature android:name="android.software.picture_in_picture" android:required="false" />
@@ -26,6 +29,20 @@
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"
         tools:replace="android:icon,android:label">
+
+        <!-- ✅ Firebase Messaging Foreground Service -->
+        <service
+            android:name="com.google.firebase.messaging.FirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Optional: Handle background tasks -->
+        <service
+            android:name="com.google.firebase.components.ComponentDiscoveryService"
+            android:exported="false" />
 
         <!-- Flutter Main Activity -->
         <activity
@@ -64,6 +81,7 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
     </application>
 
     <!-- For sharing via PROCESS_TEXT -->

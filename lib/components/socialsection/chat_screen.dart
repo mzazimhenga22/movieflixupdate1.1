@@ -1,5 +1,7 @@
+// chat_screen.dart
 import 'dart:io';
-import 'dart:ui';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -7,6 +9,7 @@ import 'package:movie_app/webrtc/rtc_manager.dart';
 import 'package:movie_app/utils/read_status_utils.dart';
 import 'package:flutter/foundation.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+
 import 'VideoCallScreen_1to1.dart';
 import 'VoiceCallScreen_1to1.dart';
 import 'widgets/chat_app_bar.dart';
@@ -40,18 +43,20 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen>
-    with AutomaticKeepAliveClientMixin {
+class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMixin {
   String? backgroundUrl;
   QueryDocumentSnapshot<Object?>? replyingTo;
   bool isActionOverlayVisible = false;
   late SharedPreferences prefs;
 
-  // Notifiers used to avoid unnecessary rebuilds of the whole screen:
-  final ValueNotifier<String?> _backgroundUrlNotifier =
-      ValueNotifier<String?>(null);
-  final ValueNotifier<QueryDocumentSnapshot<Object?>?> _replyingToNotifier =
-      ValueNotifier<QueryDocumentSnapshot<Object?>?>(null);
+  // Notifiers used to avoid unnecessary rebuilds:
+  final ValueNotifier<String?> _backgroundUrlNotifier = ValueNotifier<String?>(null);
+  final ValueNotifier<QueryDocumentSnapshot<Object?>?> _replyingToNotifier = ValueNotifier<QueryDocumentSnapshot<Object?>?>(null);
+
+  // Manage streams so we cancel them on dispose (prevents ValueNotifier-after-dispose bugs)
+  StreamSubscription<QuerySnapshot<Object?>>? _incomingCallsSub;
+
+  bool _isDisposed = false;
 
   @override
   bool get wantKeepAlive => true;
@@ -61,7 +66,7 @@ class _ChatScreenState extends State<ChatScreen>
     super.initState();
 
     SharedPreferences.getInstance().then((p) {
-      prefs = p;
+      if (mounted) prefs = p;
       _loadChatBackground();
       markChatAsRead(widget.chatId, widget.currentUser['id']);
       _listenForIncomingCalls();
@@ -70,29 +75,40 @@ class _ChatScreenState extends State<ChatScreen>
 
   @override
   void dispose() {
+    // Cancel subscriptions & timers BEFORE disposing notifiers
+    _incomingCallsSub?.cancel();
+
+    _isDisposed = true;
+
     _backgroundUrlNotifier.dispose();
     _replyingToNotifier.dispose();
+
     super.dispose();
   }
 
   Future<void> _loadChatBackground() async {
-    // load from prefs and notify listeners only if changed
-    final stored = prefs.getString('chat_background_${widget.chatId}');
-    if (_backgroundUrlNotifier.value != stored) {
-      _backgroundUrlNotifier.value = stored;
+    try {
+      final stored = prefs.getString('chat_background_${widget.chatId}');
+      if (_isDisposed) return;
+      if (_backgroundUrlNotifier.value != stored) {
+        _backgroundUrlNotifier.value = stored;
+      }
+    } catch (e) {
+      debugPrint('Failed to load background: $e');
     }
   }
 
   Future<void> _setChatBackground(String url) async {
-    await prefs.setString('chat_background_${widget.chatId}', url);
-    _backgroundUrlNotifier.value = url;
+    try {
+      await prefs.setString('chat_background_${widget.chatId}', url);
+      if (!_isDisposed) _backgroundUrlNotifier.value = url;
+    } catch (e) {
+      debugPrint('Failed to set background: $e');
+    }
   }
 
   Future<bool> _isUserBlocked(String userId) async {
-    final userDoc = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(widget.currentUser['id'])
-        .get();
+    final userDoc = await FirebaseFirestore.instance.collection('users').doc(widget.currentUser['id']).get();
     final blockedUsers = List<String>.from(userDoc.data()?['blockedUsers'] ?? []);
     return blockedUsers.contains(userId);
   }
@@ -121,18 +137,13 @@ class _ChatScreenState extends State<ChatScreen>
         'replyToId': _replyingToNotifier.value!.id,
         'replyToText': _replyingToNotifier.value!['text'],
         'replyToSenderId': _replyingToNotifier.value!['senderId'],
-        'replyToSenderName': _replyingToNotifier.value!['senderId'] ==
-                widget.currentUser['id']
+        'replyToSenderName': _replyingToNotifier.value!.id == widget.currentUser['id']
             ? widget.currentUser['username'] ?? 'You'
             : widget.otherUser['username'] ?? 'Unknown',
       },
     };
 
-    await FirebaseFirestore.instance
-        .collection('chats')
-        .doc(widget.chatId)
-        .collection('messages')
-        .add(messageData);
+    await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).collection('messages').add(messageData);
 
     await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).set({
       'lastMessage': text,
@@ -140,8 +151,7 @@ class _ChatScreenState extends State<ChatScreen>
       'userIds': [widget.currentUser['id'], widget.otherUser['id']],
     }, SetOptions(merge: true));
 
-    // clear reply state only
-    _replyingToNotifier.value = null;
+    if (!_isDisposed) _replyingToNotifier.value = null;
   }
 
   void sendFile(File file) async {
@@ -265,17 +275,15 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   void _onReplyToMessage(QueryDocumentSnapshot<Object?> message) {
-    _replyingToNotifier.value = message;
+    if (!_isDisposed) _replyingToNotifier.value = message;
   }
 
   void _onCancelReply() {
-    _replyingToNotifier.value = null;
+    if (!_isDisposed) _replyingToNotifier.value = null;
   }
 
-  void _showMessageActions(
-      QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey messageKey) {
+  void _showMessageActions(QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey messageKey) {
     if (isActionOverlayVisible) return;
-
     isActionOverlayVisible = true;
 
     showMessageActions(
@@ -284,14 +292,11 @@ class _ChatScreenState extends State<ChatScreen>
       isMe: isMe,
       messageKey: messageKey,
       onReply: () {
-        _replyingToNotifier.value = message;
+        if (!_isDisposed) _replyingToNotifier.value = message;
         isActionOverlayVisible = false;
       },
       onPin: () async {
-        await FirebaseFirestore.instance
-            .collection('chats')
-            .doc(widget.chatId)
-            .set({
+        await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).set({
           'pinnedMessageId': message.id,
           'pinnedMessageText': message['text'],
           'pinnedMessageSenderId': message['senderId'],
@@ -320,23 +325,11 @@ class _ChatScreenState extends State<ChatScreen>
         final deletedFor = List<String>.from(data['deletedFor'] ?? []);
         deletedFor.add(widget.currentUser['id']);
 
-        await FirebaseFirestore.instance
-            .collection('chats')
-            .doc(widget.chatId)
-            .collection('messages')
-            .doc(message.id)
-            .update({'deletedFor': deletedFor});
+        await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).collection('messages').doc(message.id).update({'deletedFor': deletedFor});
 
-        final chatDoc = await FirebaseFirestore.instance
-            .collection('chats')
-            .doc(widget.chatId)
-            .get();
-
+        final chatDoc = await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).get();
         if (chatDoc.exists && chatDoc['pinnedMessageId'] == message.id) {
-          await FirebaseFirestore.instance
-              .collection('chats')
-              .doc(widget.chatId)
-              .update({'pinnedMessageId': null});
+          await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).update({'pinnedMessageId': null});
         }
 
         if (mounted) {
@@ -345,10 +338,7 @@ class _ChatScreenState extends State<ChatScreen>
         }
       },
       onBlock: () async {
-        await FirebaseFirestore.instance
-            .collection('users')
-            .doc(widget.currentUser['id'])
-            .update({
+        await FirebaseFirestore.instance.collection('users').doc(widget.currentUser['id']).update({
           'blockedUsers': FieldValue.arrayUnion([widget.otherUser['id']])
         });
         if (mounted) {
@@ -361,13 +351,7 @@ class _ChatScreenState extends State<ChatScreen>
           context,
           MaterialPageRoute(
             builder: (context) => ForwardMessageScreen(),
-            settings: RouteSettings(
-              arguments: {
-                'message': message,
-                'currentUser': widget.currentUser,
-                'isForwarded': true,
-              },
-            ),
+            settings: RouteSettings(arguments: {'message': message, 'currentUser': widget.currentUser, 'isForwarded': true}),
           ),
         );
         if (mounted) {
@@ -380,10 +364,7 @@ class _ChatScreenState extends State<ChatScreen>
       },
       onEdit: () async {
         if (isMe) {
-          await Navigator.pushNamed(context, '/editMessage', arguments: {
-            'message': message,
-            'chatId': widget.chatId,
-          });
+          await Navigator.pushNamed(context, '/editMessage', arguments: {'message': message, 'chatId': widget.chatId});
         } else if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Cannot edit others\' messages')),
@@ -399,21 +380,11 @@ class _ChatScreenState extends State<ChatScreen>
         final currentReactions = List<String>.from(data['reactions'] ?? []);
 
         if (currentReactions.contains(emoji)) {
-          await FirebaseFirestore.instance
-              .collection('chats')
-              .doc(widget.chatId)
-              .collection('messages')
-              .doc(message.id)
-              .update({
+          await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).collection('messages').doc(message.id).update({
             'reactions': FieldValue.arrayRemove([emoji])
           });
         } else {
-          await FirebaseFirestore.instance
-              .collection('chats')
-              .doc(widget.chatId)
-              .collection('messages')
-              .doc(message.id)
-              .update({
+          await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).collection('messages').doc(message.id).update({
             'reactions': FieldValue.arrayUnion([emoji])
           });
         }
@@ -426,15 +397,19 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   void _listenForIncomingCalls() {
-    FirebaseFirestore.instance
+    // cancel previous if any
+    _incomingCallsSub?.cancel();
+
+    _incomingCallsSub = FirebaseFirestore.instance
         .collection('calls')
         .where('receiverId', isEqualTo: widget.currentUser['id'])
         .where('status', isEqualTo: 'ringing')
         .snapshots()
         .listen((snapshot) {
+      if (_isDisposed) return;
+
       for (final change in snapshot.docChanges) {
-        if (change.type == DocumentChangeType.added ||
-            change.type == DocumentChangeType.modified) {
+        if (change.type == DocumentChangeType.added || change.type == DocumentChangeType.modified) {
           final data = change.doc.data()! as Map<String, dynamic>;
 
           if (data['callerId'] == widget.otherUser['id'] && mounted) {
@@ -458,25 +433,102 @@ class _ChatScreenState extends State<ChatScreen>
                     receiver: widget.currentUser,
                   );
 
-            Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => route),
-            );
+            Navigator.push(context, MaterialPageRoute(builder: (_) => route));
           }
         }
       }
+    }, onError: (err) {
+      debugPrint('Incoming calls listen error: $err');
     });
+  }
+
+  // Reusable bottom sheet for quick actions (was previously a FAB menu)
+  void _showQuickActionsBottomSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Container(
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.85),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+            border: Border.all(color: widget.accentColor.withOpacity(0.08)),
+          ),
+          padding: const EdgeInsets.all(12),
+          child: Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            children: [
+              ListTile(
+                leading: CircleAvatar(
+                  backgroundImage: widget.otherUser['avatarUrl'] != null
+                      ? CachedNetworkImageProvider(widget.otherUser['avatarUrl'])
+                      : null,
+                  backgroundColor: widget.accentColor.withOpacity(0.2),
+                  child: widget.otherUser['avatarUrl'] == null ? const Icon(Icons.person) : null,
+                ),
+                title: Text(widget.otherUser['username'] ?? 'Contact'),
+                subtitle: Text(widget.otherUser['status'] ?? ''),
+                trailing: IconButton(
+                  icon: const Icon(Icons.info_outline),
+                  color: widget.accentColor,
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    Navigator.pushNamed(context, '/profile', arguments: {
+                      ...widget.otherUser,
+                      'onBackgroundSet': _setChatBackground,
+                    });
+                  },
+                ),
+              ),
+              const Divider(),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      startVoiceCall();
+                    },
+                    icon: const Icon(Icons.call),
+                    label: const Text('Voice'),
+                  ),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      startVideoCall();
+                    },
+                    icon: const Icon(Icons.videocam),
+                    label: const Text('Video'),
+                  ),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(side: BorderSide(color: widget.accentColor)),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      // future: open media picker
+                    },
+                    icon: const Icon(Icons.image),
+                    label: const Text('Media'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
     return PresenceWrapper(
       userId: widget.currentUser['id'],
       groupIds: [widget.chatId],
       child: Scaffold(
+        resizeToAvoidBottomInset: true,
         extendBodyBehindAppBar: false,
         backgroundColor: Colors.transparent,
         appBar: PreferredSize(
@@ -498,61 +550,81 @@ class _ChatScreenState extends State<ChatScreen>
             hasStory: widget.storyInteractions.contains(widget.otherUser['id']),
           ),
         ),
+        // NOTE: removed floatingActionButton to avoid overlapping typing area
         body: Stack(
           children: [
-            // Background (isolated so it doesn't rebuild with the chat list)
-            ValueListenableBuilder<String?>(              // <-- kept as before
+            // Background
+            ValueListenableBuilder<String?>(
               valueListenable: _backgroundUrlNotifier,
               builder: (context, backgroundUrl, _) {
-                return _ChatBackground(backgroundUrl: backgroundUrl);
+                return _ChatBackground(backgroundUrl: backgroundUrl, accentColor: widget.accentColor);
               },
             ),
 
-            // Foreground chat column
+            // Foreground column with compact features bar + messages + typing area
             Column(
               children: [
-                SizedBox(
-                    height: kToolbarHeight + MediaQuery.of(context).padding.top),
-                Expanded(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        border: Border.all(
-                          color: widget.accentColor.withOpacity(0.1),
-                        ),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: Column(
-                        children: [
-                          // Messages (independent widget so background doesn't rebuild)
-                          Expanded(
-                            child: _ChatMessagesWrapper(
-                              chatId: widget.chatId,
-                              currentUser: widget.currentUser,
-                              otherUser: widget.otherUser,
-                              replyingToNotifier: _replyingToNotifier,
-                              onMessageLongPressed: _showMessageActions,
-                              onReplyToMessage: _onReplyToMessage,
-                            ),
-                          ),
+                // Compact contact features bar (replaces the old 'intro' which acted like another navbar)
+                SafeArea(
+                  top: false,
+                  child: ContactFeaturesBar(
+                    otherUser: widget.otherUser,
+                    accentColor: widget.accentColor,
+                    onProfileTap: () {
+                      Navigator.pushNamed(context, '/profile', arguments: {
+                        ...widget.otherUser,
+                        'onBackgroundSet': _setChatBackground,
+                      });
+                    },
+                    onVoiceCall: startVoiceCall,
+                    onVideoCall: startVideoCall,
+                    onActions: _showQuickActionsBottomSheet, // moved Actions here
+                  ),
+                ),
 
-                          // Typing area (let Flutter handle keyboard insets)
-                          Container(
-                            color: Colors.black.withOpacity(0.5),
-                            child: _TypingAreaWrapper(
-                              replyingToNotifier: _replyingToNotifier,
-                              bottomInset: bottomInset,
-                              onSendMessage: sendMessage,
-                              onSendFile: sendFile,
-                              onSendAudio: sendAudio,
-                              onCancelReply: _onCancelReply,
-                              accentColor: widget.accentColor,
-                              currentUser: widget.currentUser,
-                              otherUser: widget.otherUser,
+                // Main content container
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 8.0),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          border: Border.all(color: widget.accentColor.withOpacity(0.12)),
+                          color: Colors.black.withOpacity(0.45),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Column(
+                          children: [
+                            // Messages
+                            Expanded(
+                              child: _ChatMessagesWrapper(
+                                chatId: widget.chatId,
+                                currentUser: widget.currentUser,
+                                otherUser: widget.otherUser,
+                                replyingToNotifier: _replyingToNotifier,
+                                onMessageLongPressed: _showMessageActions,
+                                onReplyToMessage: _onReplyToMessage,
+                              ),
                             ),
-                          ),
-                        ],
+
+                            // Typing area
+                            // ensure there is no overlap by not using FAB and by giving some padding
+                            Container(
+                              color: Colors.black.withOpacity(0.55),
+                              child: _TypingAreaWrapper(
+                                replyingToNotifier: _replyingToNotifier,
+                                onSendMessage: sendMessage,
+                                onSendFile: sendFile,
+                                onSendAudio: sendAudio,
+                                onCancelReply: _onCancelReply,
+                                accentColor: widget.accentColor,
+                                currentUser: widget.currentUser,
+                                otherUser: widget.otherUser,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -572,11 +644,11 @@ class _ChatScreenState extends State<ChatScreen>
 
 class _ChatBackground extends StatelessWidget {
   final String? backgroundUrl;
-  const _ChatBackground({this.backgroundUrl});
+  final Color accentColor;
+  const _ChatBackground({this.backgroundUrl, required this.accentColor});
 
   @override
   Widget build(BuildContext context) {
-    // Keep in a RepaintBoundary so it doesn't repaint on unrelated rebuilds.
     return RepaintBoundary(
       child: Stack(
         children: [
@@ -590,18 +662,22 @@ class _ChatBackground extends StatelessWidget {
               ),
             )
           else
-            // Optional: a fallback background so there is something visible
             Positioned.fill(
-              child: Container(color: Colors.black),
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [accentColor.withOpacity(0.06), Colors.black],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                ),
+              ),
             ),
 
-          // Blur overlay (BackdropFilter is expensive, but kept inside RepaintBoundary)
+          // Lightweight overlay
           Positioned.fill(
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
-              child: Container(
-                color: Colors.black.withOpacity(0.2),
-              ),
+            child: Container(
+              color: Colors.black.withOpacity(0.24),
             ),
           ),
         ],
@@ -629,9 +705,8 @@ class _ChatMessagesWrapper extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // RepaintBoundary prevents expensive background repaints from affecting the list
     return RepaintBoundary(
-      child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>( 
+      child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
         valueListenable: replyingToNotifier,
         builder: (context, replyingTo, _) {
           return AdvancedChatList(
@@ -653,7 +728,6 @@ class _ChatMessagesWrapper extends StatelessWidget {
 
 class _TypingAreaWrapper extends StatelessWidget {
   final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
-  final double bottomInset;
   final void Function(String) onSendMessage;
   final void Function(File) onSendFile;
   final void Function(File) onSendAudio;
@@ -664,7 +738,6 @@ class _TypingAreaWrapper extends StatelessWidget {
 
   const _TypingAreaWrapper({
     required this.replyingToNotifier,
-    required this.bottomInset,
     required this.onSendMessage,
     required this.onSendFile,
     required this.onSendAudio,
@@ -676,29 +749,113 @@ class _TypingAreaWrapper extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Nest ValueListenableBuilders so only typing area and necessary small parts rebuild
     return ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
       valueListenable: replyingToNotifier,
       builder: (context, replyingTo, _) {
-        // We use bottom padding equal to MediaQuery.viewInsetsOf(context).bottom so typing area can react to keyboard open,
-        // but this only rebuilds the TypingArea section.
-        return Padding(
-          padding: EdgeInsets.only(bottom: bottomInset),
-          child: RepaintBoundary(
-            child: TypingArea(
-              onSendMessage: onSendMessage,
-              onSendFile: onSendFile,
-              onSendAudio: onSendAudio,
-              accentColor: accentColor,
-              replyingTo: replyingTo,
-              isGroup: false,
-              currentUser: currentUser,
-              otherUser: otherUser,
-              onCancelReply: onCancelReply,
+        return RepaintBoundary(
+          child: SafeArea(
+            top: false,
+            bottom: true,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 6.0),
+              child: TypingArea(
+                onSendMessage: onSendMessage,
+                onSendFile: onSendFile,
+                onSendAudio: onSendAudio,
+                accentColor: accentColor,
+                replyingTo: replyingTo,
+                isGroup: false,
+                currentUser: currentUser,
+                otherUser: otherUser,
+                onCancelReply: onCancelReply,
+              ),
             ),
           ),
         );
       },
+    );
+  }
+}
+
+/// Compact contact features bar that replaced the old "intro" (no second navbar)
+class ContactFeaturesBar extends StatelessWidget {
+  final Map<String, dynamic> otherUser;
+  final Color accentColor;
+  final VoidCallback onProfileTap;
+  final VoidCallback onVoiceCall;
+  final VoidCallback onVideoCall;
+  final VoidCallback onActions;
+
+  const ContactFeaturesBar({
+    required this.otherUser,
+    required this.accentColor,
+    required this.onProfileTap,
+    required this.onVoiceCall,
+    required this.onVideoCall,
+    required this.onActions,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final avatarUrl = otherUser['avatarUrl'] as String?;
+    final name = otherUser['username'] ?? 'Contact';
+    final status = otherUser['status'] ?? (otherUser['isOnline'] == true ? 'Online' : 'Last seen recently');
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onProfileTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: Colors.black.withOpacity(0.18),
+              border: Border.all(color: accentColor.withOpacity(0.04)),
+            ),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 20,
+                  backgroundColor: accentColor.withOpacity(0.12),
+                  backgroundImage: avatarUrl != null ? CachedNetworkImageProvider(avatarUrl) : null,
+                  child: avatarUrl == null ? const Icon(Icons.person) : null,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(name, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.white)),
+                      const SizedBox(height: 2),
+                      Text(status, style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.75))),
+                    ],
+                  ),
+                ),
+                // quick icons (voice/video)
+                IconButton(
+                  onPressed: onVoiceCall,
+                  icon: Icon(Icons.call, color: accentColor),
+                  tooltip: 'Voice call',
+                ),
+                IconButton(
+                  onPressed: onVideoCall,
+                  icon: Icon(Icons.videocam, color: accentColor),
+                  tooltip: 'Video call',
+                ),
+                // moved actions (three dots) here - opens bottom sheet
+                IconButton(
+                  onPressed: onActions,
+                  icon: Icon(Icons.more_vert, color: accentColor),
+                  tooltip: 'More',
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

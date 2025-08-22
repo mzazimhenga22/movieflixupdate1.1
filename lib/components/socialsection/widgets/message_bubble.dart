@@ -250,7 +250,7 @@ class _MessageContent extends StatelessWidget {
                 CustomPaint(
                   painter: BubbleTailPainter(isMe: isMe, accentColor: accentColor, avatarRadius: 16, isTopTail: true),
                   child: ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.72),
+                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.32),
                     child: Container(
                       padding: const EdgeInsets.all(8),
                       margin: const EdgeInsets.symmetric(vertical: 4),

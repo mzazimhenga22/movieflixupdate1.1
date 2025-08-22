@@ -1,11 +1,13 @@
-// messages_controller.dart (fixed: balanced braces and minor cleanup)
+// messages_controller.dart
+import 'dart:convert';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
-import 'dart:convert';
-import 'create_group_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import 'Group_chat_screen.dart';
+import 'create_group_screen.dart';
 import 'chat_screen.dart';
 
 String getChatId(String userId1, String userId2) {
@@ -196,7 +198,14 @@ class MessagesController extends ChangeNotifier {
       final groupsSnapshot = await FirebaseFirestore.instance.collection('groups').where('userIds', arrayContains: userId).get();
 
       int unreadCount = 0;
-      for (var doc in [...chatsSnapshot.docs, ...groupsSnapshot.docs]) {
+
+      // For docs that don't have doc-level unread metadata, we'll gather queries in parallel
+      final List<Future<QuerySnapshot<Map<String, dynamic>>>> pendingLatestMsgFutures = [];
+      final Map<int, String> futureIndexToDocId = {};
+
+      final allDocs = [...chatsSnapshot.docs, ...groupsSnapshot.docs];
+      for (int i = 0; i < allDocs.length; i++) {
+        final doc = allDocs[i];
         final data = doc.data();
         // Prefer doc-level fields:
         if (data.containsKey('unreadCount')) {
@@ -209,19 +218,27 @@ class MessagesController extends ChangeNotifier {
           continue;
         }
 
-        // Fallback: check latest message only (cheap)
+        // fallback: queue latest-message fetch for parallel execution
         final isGroup = data['isGroup'] ?? false;
-        final msgsSnap = await FirebaseFirestore.instance
+        final future = FirebaseFirestore.instance
             .collection(isGroup ? 'groups' : 'chats')
             .doc(doc.id)
             .collection('messages')
             .orderBy('timestamp', descending: true)
             .limit(1)
             .get();
-        if (msgsSnap.docs.isNotEmpty) {
-          final latest = msgsSnap.docs.first.data();
-          final readBy = List<dynamic>.from(latest['readBy'] ?? []);
-          if (!readBy.contains(userId)) unreadCount++;
+        futureIndexToDocId[pendingLatestMsgFutures.length] = doc.id;
+        pendingLatestMsgFutures.add(future);
+      }
+
+      if (pendingLatestMsgFutures.isNotEmpty) {
+        final results = await Future.wait(pendingLatestMsgFutures);
+        for (final snap in results) {
+          if (snap.docs.isNotEmpty) {
+            final latest = snap.docs.first.data();
+            final readBy = List<dynamic>.from(latest['readBy'] ?? []);
+            if (!readBy.contains(userId)) unreadCount++;
+          }
         }
       }
 
@@ -236,6 +253,9 @@ class MessagesController extends ChangeNotifier {
   /// We update the chat doc's unreadBy field (remove user), and patch the last N messages to include the reader.
   Future<void> markAsRead(String chatId, String userId, bool isGroup) async {
     try {
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return;
+
       // Remove user from chat's unreadBy array (cheap)
       await FirebaseFirestore.instance.collection(isGroup ? 'groups' : 'chats').doc(chatId).update({
         'unreadBy': FieldValue.arrayRemove([userId]),
@@ -249,6 +269,8 @@ class MessagesController extends ChangeNotifier {
           .orderBy('timestamp', descending: true)
           .limit(50)
           .get();
+
+      if (msgsSnapshot.docs.isEmpty) return;
 
       final batch = FirebaseFirestore.instance.batch();
       for (final m in msgsSnapshot.docs) {
@@ -266,24 +288,34 @@ class MessagesController extends ChangeNotifier {
 
   Future<void> blockUser() async {
     if (selectedOtherUser == null || isGroup) return;
-    final userId = selectedOtherUser!['id'] as String;
-    if (!_blockedUsers.contains(userId)) _blockedUsers.add(userId);
+    final userId = selectedOtherUser!['id'] as String?;
+    if (userId == null) return;
+
+    if (!_blockedUsers.contains(userId)) {
+      _blockedUsers.add(userId);
+      notifyListeners(); // immediate UI update
+    }
     await _saveCachedData();
 
     try {
-      await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).update({
+      final uid = currentUser['id'] as String?;
+      if (uid == null) throw Exception('Current user id missing');
+
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
         'blockedUsers': FieldValue.arrayUnion([userId]),
       });
 
-      final chatId = getChatId(currentUser['id'], userId);
+      final chatId = getChatId(uid, userId);
       await _deleteChatDocument(chatId);
 
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${selectedOtherUser!['username']} blocked')));
       }
     } catch (e) {
+      // rollback local change
       _blockedUsers.remove(userId);
       await _saveCachedData();
+      notifyListeners();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to block user: $e')));
       }
@@ -294,20 +326,30 @@ class MessagesController extends ChangeNotifier {
 
   Future<void> unblockUser() async {
     if (selectedOtherUser == null || isGroup) return;
-    final userId = selectedOtherUser!['id'] as String;
-    _blockedUsers.remove(userId);
+    final userId = selectedOtherUser!['id'] as String?;
+    if (userId == null) return;
+
+    if (_blockedUsers.contains(userId)) {
+      _blockedUsers.remove(userId);
+      notifyListeners();
+    }
     await _saveCachedData();
 
     try {
-      await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).update({
+      final uid = currentUser['id'] as String?;
+      if (uid == null) throw Exception('Current user id missing');
+
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
         'blockedUsers': FieldValue.arrayRemove([userId]),
       });
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${selectedOtherUser!['username']} unblocked')));
       }
     } catch (e) {
-      _blockedUsers.add(userId);
+      // rollback
+      if (!_blockedUsers.contains(userId)) _blockedUsers.add(userId);
       await _saveCachedData();
+      notifyListeners();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to unblock user: $e')));
       }
@@ -318,12 +360,20 @@ class MessagesController extends ChangeNotifier {
 
   Future<void> muteUser() async {
     if (selectedOtherUser == null || isGroup) return;
-    final userId = selectedOtherUser!['id'] as String;
-    if (!_mutedUsers.contains(userId)) _mutedUsers.add(userId);
+    final userId = selectedOtherUser!['id'] as String?;
+    if (userId == null) return;
+
+    if (!_mutedUsers.contains(userId)) {
+      _mutedUsers.add(userId);
+      notifyListeners();
+    }
     await _saveCachedData();
 
     try {
-      await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).update({
+      final uid = currentUser['id'] as String?;
+      if (uid == null) throw Exception('Current user id missing');
+
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
         'mutedUsers': FieldValue.arrayUnion([userId]),
       });
       if (context.mounted) {
@@ -332,6 +382,7 @@ class MessagesController extends ChangeNotifier {
     } catch (e) {
       _mutedUsers.remove(userId);
       await _saveCachedData();
+      notifyListeners();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to mute user: $e')));
       }
@@ -342,20 +393,29 @@ class MessagesController extends ChangeNotifier {
 
   Future<void> unmuteUser() async {
     if (selectedOtherUser == null || isGroup) return;
-    final userId = selectedOtherUser!['id'] as String;
-    _mutedUsers.remove(userId);
+    final userId = selectedOtherUser!['id'] as String?;
+    if (userId == null) return;
+
+    if (_mutedUsers.contains(userId)) {
+      _mutedUsers.remove(userId);
+      notifyListeners();
+    }
     await _saveCachedData();
 
     try {
-      await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).update({
+      final uid = currentUser['id'] as String?;
+      if (uid == null) throw Exception('Current user id missing');
+
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
         'mutedUsers': FieldValue.arrayRemove([userId]),
       });
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${selectedOtherUser!['username']} unmuted')));
       }
     } catch (e) {
-      _mutedUsers.add(userId);
+      if (!_mutedUsers.contains(userId)) _mutedUsers.add(userId);
       await _saveCachedData();
+      notifyListeners();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to unmute user: $e')));
       }
@@ -367,11 +427,17 @@ class MessagesController extends ChangeNotifier {
   Future<void> muteGroup() async {
     if (selectedChatId == null || !isGroup) return;
     final id = selectedChatId!;
-    if (!_mutedUsers.contains(id)) _mutedUsers.add(id);
+    if (!_mutedUsers.contains(id)) {
+      _mutedUsers.add(id);
+      notifyListeners();
+    }
     await _saveCachedData();
 
     try {
-      await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).update({
+      final uid = currentUser['id'] as String?;
+      if (uid == null) throw Exception('Current user id missing');
+
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
         'mutedUsers': FieldValue.arrayUnion([id]),
       });
       if (context.mounted) {
@@ -380,6 +446,7 @@ class MessagesController extends ChangeNotifier {
     } catch (e) {
       _mutedUsers.remove(id);
       await _saveCachedData();
+      notifyListeners();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to mute group: $e')));
       }
@@ -391,19 +458,26 @@ class MessagesController extends ChangeNotifier {
   Future<void> unmuteGroup() async {
     if (selectedChatId == null || !isGroup) return;
     final id = selectedChatId!;
-    _mutedUsers.remove(id);
+    if (_mutedUsers.contains(id)) {
+      _mutedUsers.remove(id);
+      notifyListeners();
+    }
     await _saveCachedData();
 
     try {
-      await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).update({
+      final uid = currentUser['id'] as String?;
+      if (uid == null) throw Exception('Current user id missing');
+
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
         'mutedUsers': FieldValue.arrayRemove([id]),
       });
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Group unmuted')));
       }
     } catch (e) {
-      _mutedUsers.add(id);
+      if (!_mutedUsers.contains(id)) _mutedUsers.add(id);
       await _saveCachedData();
+      notifyListeners();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to unmute group: $e')));
       }
@@ -415,11 +489,17 @@ class MessagesController extends ChangeNotifier {
   Future<void> pinConversation() async {
     if (selectedChatId == null) return;
     final id = selectedChatId!;
-    if (!_pinnedChats.contains(id)) _pinnedChats.add(id);
+    if (!_pinnedChats.contains(id)) {
+      _pinnedChats.add(id);
+      notifyListeners();
+    }
     await _saveCachedData();
 
     try {
-      await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).update({
+      final uid = currentUser['id'] as String?;
+      if (uid == null) throw Exception('Current user id missing');
+
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
         'pinnedChats': FieldValue.arrayUnion([id]),
       });
       if (context.mounted) {
@@ -428,6 +508,7 @@ class MessagesController extends ChangeNotifier {
     } catch (e) {
       _pinnedChats.remove(id);
       await _saveCachedData();
+      notifyListeners();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to pin conversation: $e')));
       }
@@ -439,19 +520,26 @@ class MessagesController extends ChangeNotifier {
   Future<void> unpinConversation() async {
     if (selectedChatId == null) return;
     final id = selectedChatId!;
-    _pinnedChats.remove(id);
+    if (_pinnedChats.contains(id)) {
+      _pinnedChats.remove(id);
+      notifyListeners();
+    }
     await _saveCachedData();
 
     try {
-      await FirebaseFirestore.instance.collection('users').doc(currentUser['id']).update({
+      final uid = currentUser['id'] as String?;
+      if (uid == null) throw Exception('Current user id missing');
+
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
         'pinnedChats': FieldValue.arrayRemove([id]),
       });
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Conversation unpinned')));
       }
     } catch (e) {
-      _pinnedChats.add(id);
+      if (!_pinnedChats.contains(id)) _pinnedChats.add(id);
       await _saveCachedData();
+      notifyListeners();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to unpin conversation: $e')));
       }
@@ -460,23 +548,45 @@ class MessagesController extends ChangeNotifier {
     }
   }
 
+  /// Safely mark messages as deletedFor current user using pagination/chunking.
+  /// This avoids reading huge collections into memory and respects Firestore batch limits.
   Future<void> _deleteChatDocument(String chatId) async {
     try {
-      // Mark messages as deletedFor current user (fast)
-      final msgs = await FirebaseFirestore.instance.collection('chats').doc(chatId).collection('messages').get();
-      final batch = FirebaseFirestore.instance.batch();
-      for (var m in msgs.docs) {
-        final data = m.data();
-        final deletedFor = List<String>.from(data['deletedFor'] ?? []);
-        if (!deletedFor.contains(currentUser['id'])) {
-          deletedFor.add(currentUser['id']);
-          batch.update(m.reference, {'deletedFor': deletedFor});
-        }
-      }
-      // Update chat doc deletedBy
+      final uid = currentUser['id'] as String?;
+      if (uid == null) throw Exception('Current user id missing');
+
       final chatRef = FirebaseFirestore.instance.collection('chats').doc(chatId);
-      batch.update(chatRef, {'deletedBy': FieldValue.arrayUnion([currentUser['id']])});
-      await batch.commit();
+      const int pageSize = 200; // safe chunk size (well under 500 batch operations limit)
+      Query<Map<String, dynamic>> messagesQuery = chatRef.collection('messages').orderBy('timestamp').limit(pageSize);
+
+      bool more = true;
+      bool firstBatch = true;
+      while (more) {
+        final snap = await messagesQuery.get();
+        if (snap.docs.isEmpty) break;
+
+        final batch = FirebaseFirestore.instance.batch();
+        for (var m in snap.docs) {
+          final data = m.data();
+          final deletedFor = List<String>.from(data['deletedFor'] ?? []);
+          if (!deletedFor.contains(uid)) {
+            batch.update(m.reference, {'deletedFor': FieldValue.arrayUnion([uid])});
+          }
+        }
+
+        // ensure chat doc records deletedBy (use set with merge to be safe even if doc doesn't exist)
+        // only need to add once, but doing in each batch is harmless (idempotent).
+        batch.set(chatRef, {'deletedBy': FieldValue.arrayUnion([uid])}, SetOptions(merge: true));
+
+        await batch.commit();
+
+        // if fewer than pageSize docs, done
+        more = snap.docs.length == pageSize;
+        if (more) {
+          messagesQuery = chatRef.collection('messages').orderBy('timestamp').startAfterDocument(snap.docs.last).limit(pageSize);
+        }
+        firstBatch = false;
+      }
     } catch (e) {
       debugPrint('Error deleting chat: $e');
     }
@@ -486,28 +596,45 @@ class MessagesController extends ChangeNotifier {
     if (selectedChatId == null) return;
     try {
       if (isGroup) {
-        final groupDoc = await FirebaseFirestore.instance.collection('groups').doc(selectedChatId).get();
+        final groupDocRef = FirebaseFirestore.instance.collection('groups').doc(selectedChatId);
+        final groupDoc = await groupDocRef.get();
         if (!groupDoc.exists) {
           throw Exception('Group not found');
         }
         // Remove user from group and mark as deleted
-        await FirebaseFirestore.instance.collection('groups').doc(selectedChatId).update({
+        await groupDocRef.update({
           'userIds': FieldValue.arrayRemove([currentUser['id']]),
           'deletedBy': FieldValue.arrayUnion([currentUser['id']]),
         });
 
-        // Mark messages' deletedFor for this user
-        final msgsSnap = await FirebaseFirestore.instance.collection('groups').doc(selectedChatId).collection('messages').get();
-        final batch = FirebaseFirestore.instance.batch();
-        for (var m in msgsSnap.docs) {
-          final data = m.data();
-          final deletedFor = List<String>.from(data['deletedFor'] ?? []);
-          if (!deletedFor.contains(currentUser['id'])) {
-            deletedFor.add(currentUser['id']);
-            batch.update(m.reference, {'deletedFor': deletedFor});
+        // Mark messages' deletedFor for this user in paginated fashion
+        const int pageSize = 200;
+        Query<Map<String, dynamic>> messagesQuery = groupDocRef.collection('messages').orderBy('timestamp').limit(pageSize);
+        bool more = true;
+        final uid = currentUser['id'] as String?;
+        if (uid == null) throw Exception('Current user id missing');
+
+        while (more) {
+          final snap = await messagesQuery.get();
+          if (snap.docs.isEmpty) break;
+
+          final batch = FirebaseFirestore.instance.batch();
+          for (var m in snap.docs) {
+            final data = m.data();
+            final deletedFor = List<String>.from(data['deletedFor'] ?? []);
+            if (!deletedFor.contains(uid)) {
+              batch.update(m.reference, {'deletedFor': FieldValue.arrayUnion([uid])});
+            }
+          }
+          // mark group doc deletedBy as well (merge)
+          batch.set(groupDocRef, {'deletedBy': FieldValue.arrayUnion([uid])}, SetOptions(merge: true));
+          await batch.commit();
+
+          more = snap.docs.length == pageSize;
+          if (more) {
+            messagesQuery = groupDocRef.collection('messages').orderBy('timestamp').startAfterDocument(snap.docs.last).limit(pageSize);
           }
         }
-        await batch.commit();
 
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Left group')));
@@ -530,7 +657,9 @@ class MessagesController extends ChangeNotifier {
   Future<void> showChatCreationOptions() async {
     try {
       final snapshot = await FirebaseFirestore.instance.collection('users').get();
-      final allUsers = snapshot.docs.where((doc) => doc.exists && doc.id != currentUser['id'] && !_blockedUsers.contains(doc.id)).map((doc) {
+      final allUsers = snapshot.docs
+          .where((doc) => doc.exists && doc.id != currentUser['id'] && !_blockedUsers.contains(doc.id))
+          .map((doc) {
         final data = Map<String, dynamic>.from(doc.data() ?? {});
         data['id'] = doc.id;
         return data;
@@ -541,11 +670,11 @@ class MessagesController extends ChangeNotifier {
       showModalBottomSheet(
         context: context,
         backgroundColor: Colors.transparent,
-        builder: (context) => Container(
+        builder: (sheetCtx) => Container(
           decoration: BoxDecoration(
-            color: Colors.black.withAlpha((0.3 * 255).round()), // replaced withOpacity
+            color: Colors.black.withAlpha((0.3 * 255).round()),
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white.withAlpha((0.1 * 255).round())), // replaced withOpacity
+            border: Border.all(color: Colors.white.withAlpha((0.1 * 255).round())),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -560,7 +689,7 @@ class MessagesController extends ChangeNotifier {
                   ),
                 ),
                 onTap: () {
-                  Navigator.pop(context);
+                  Navigator.pop(sheetCtx);
                   navigateToNewGroupChat();
                 },
               ),
@@ -575,7 +704,7 @@ class MessagesController extends ChangeNotifier {
                       leading: CircleAvatar(
                         backgroundImage: user['photoUrl'] != null ? NetworkImage(user['photoUrl']) as ImageProvider : null,
                         child: user['photoUrl'] == null
-                            ? Text(user['username'] != null && user['username'].isNotEmpty ? user['username'][0].toUpperCase() : 'M', style: const TextStyle(color: Colors.white))
+                            ? Text(user['username'] != null && (user['username'] as String).isNotEmpty ? (user['username'] as String)[0].toUpperCase() : 'M', style: const TextStyle(color: Colors.white))
                             : null,
                       ),
                       title: Text(
@@ -591,9 +720,12 @@ class MessagesController extends ChangeNotifier {
                           return;
                         }
 
-                        final chatId = getChatId(currentUser['id'], userId);
+                        final uid = currentUser['id'] as String?;
+                        if (uid == null) return;
+
+                        final chatId = getChatId(uid, userId);
                         await FirebaseFirestore.instance.collection('chats').doc(chatId).set({
-                          'userIds': [currentUser['id'], user['id']],
+                          'userIds': [uid, user['id']],
                           'lastMessage': '',
                           'timestamp': FieldValue.serverTimestamp(),
                           'unreadBy': [],
@@ -602,7 +734,7 @@ class MessagesController extends ChangeNotifier {
                         }, SetOptions(merge: true));
 
                         if (context.mounted) {
-                          Navigator.pop(context);
+                          Navigator.pop(sheetCtx);
                           Navigator.push(context, MaterialPageRoute(builder: (_) => ChangeNotifierProvider.value(value: this, child: ChatScreen(
                             chatId: chatId,
                             currentUser: currentUser,
@@ -641,7 +773,14 @@ class MessagesController extends ChangeNotifier {
 
     try {
       final snapshot = await FirebaseFirestore.instance.collection('users').get();
-      final users = snapshot.docs.where((doc) => doc.exists && doc.id != currentUser['id'] && !_blockedUsers.contains(doc.id)).map((doc) => doc.data()).toList();
+      // ensure user map includes id property (CreateGroupScreen may expect it)
+      final users = snapshot.docs
+          .where((doc) => doc.exists && doc.id != currentUser['id'] && !_blockedUsers.contains(doc.id))
+          .map((doc) {
+        final Map<String, dynamic> d = Map<String, dynamic>.from(doc.data() ?? {});
+        d['id'] = doc.id;
+        return d;
+      }).toList();
 
       if (context.mounted) {
         Navigator.push(context, MaterialPageRoute(
@@ -697,4 +836,3 @@ class MessagesController extends ChangeNotifier {
     );
   }
 }
-

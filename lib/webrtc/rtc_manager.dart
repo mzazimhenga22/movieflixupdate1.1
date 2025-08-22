@@ -1,25 +1,39 @@
+// rtc_manager.dart
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/foundation.dart' show unawaited, debugPrint;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:uuid/uuid.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'dart:async';
-import 'dart:convert';
+import 'package:googleapis_auth/auth_io.dart' as auth;
 import 'package:livekit_client/livekit_client.dart' as lk;
 
 extension IterableExt<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }
 
+/// RtcManager: LiveKit + Firestore + FCM (HTTP v1) push sender.
+/// - Uses a service account JSON at assets/service-account.json to obtain OAuth2 access token for FCM HTTP v1.
+/// - Make sure to add that file to pubspec.yaml under flutter.assets.
+///
+/// NOTE: This implementation sends the "incoming_call" data payload to the receiver's FCM token.
+/// The client app should handle the incoming payload (show native call screen / overlay / flutter_callkit_incoming).
 class RtcManager {
   static final Map<String, lk.Room> _liveKitRooms = {};
   static final Map<String, lk.LocalParticipant?> _localParticipants = {};
   static final Map<String, Map<String, lk.RemoteParticipant>> _remoteParticipants = {};
   static final Map<String, Timer> _callTimers = {};
+
+  // LiveKit server & token (your values)
   static const String _sfuUrl = 'wss://movieflix-cyn3yzmd.livekit.cloud';
-  static const String _devToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjM0MjYwNzAsImlzcyI6IkFQSTZhVHFkYmFZOWd1ViIsIm5iZiI6MTc1NDQyNjA3MCwic3ViIjoibWF4IiwidmlkZW8iOnsiY2FuUHVibGlzaCI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwicm9vbSI6Imdyb3VwY2FsbCxjaGF0Y2FsbCIsInJvb21Kb2luIjp0cnVlfX0.KAFwOwgRpSMPoZ4xCAN7wSwGBHTq-GBjm_sdMyBMJxU';
-  static const String _pushySecretKey = 'cbfb2627ea2ff4c7aae398ab3d8ebb350b7afc57fc2aa7323d1d9200ba585644';
+  static const String _devToken =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjM0MjYwNzAsImlzcyI6IkFQSTZhVHFkYmFZOWd1ViIsIm5iZiI6MTc1NDQyNjA3MCwic3ViIjoibWF4IiwidmlkZW8iOnsiY2FuUHVibGlzaCI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwicm9vbSI6Imdyb3VwY2FsbCxjaGF0Y2FsbCIsInJvb21Kb2luIjp0cnVlfX0.KAFwOwgRpSMPoZ4xCAN7wSwGBHTq-GBjm_sdMyBMJxU';
+
+  // NOTE: No legacy server key here. The FCM HTTP v1 call uses an OAuth2 access token created from the service account.
 
   static Future<bool> _requestPermissions({required bool video}) async {
     final permissions = <Permission>[
@@ -30,48 +44,113 @@ class RtcManager {
     return statuses.values.every((status) => status.isGranted);
   }
 
-  static Future<void> _sendPushNotification(String callId, Map<String, dynamic> receiver, String callType, String callerName) async {
-    const pushyUrl = 'https://api.pushy.me/push';
-    final token = receiver['token'];
+  // ---------------------------
+  // FCM HTTP v1 helpers
+  // ---------------------------
 
-    final response = await http.post(
-      Uri.parse(pushyUrl),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Secret $_pushySecretKey',
-      },
-      body: jsonEncode({
-        'to': token,
-        'data': {
-          'callId': callId,
-          'callType': callType,
-          'callerName': callerName,
-          'action': 'incoming_call',
-        },
-        'notification': {
-          'title': 'Incoming $callType Call',
-          'body': 'Call from $callerName',
-          'sound': 'ringtone.caf',
-          'priority': 'high',
-          'content_available': true,
-          'mutable_content': true,
-        },
-        'ios': {
-          'badge': 1,
-          'sound': 'ringtone.caf',
-          'category': 'call',
-        },
-        'android': {
-          'priority': 'high',
-          'sound': 'raw/ringtone',
-        },
-      }),
-    );
+  /// Loads the service account JSON from assets and returns the decoded map.
+  static Future<Map<String, dynamic>> _loadServiceAccountJson() async {
+    final jsonStr = await rootBundle.loadString('assets/service-account.json');
+    final map = json.decode(jsonStr) as Map<String, dynamic>;
+    return map;
+  }
 
-    if (response.statusCode != 200) {
-      debugPrint('Failed to send Pushy notification to ${receiver['username']}: ${response.body}');
+  /// Returns an OAuth2 access token string using googleapis_auth client for the FCM scope.
+  static Future<String> _getAccessToken() async {
+    final serviceAccount = await _loadServiceAccountJson();
+    final accountCredentials = auth.ServiceAccountCredentials.fromJson(serviceAccount);
+    final scopes = ['https://www.googleapis.com/auth/firebase.messaging'];
+
+    final client = await auth.clientViaServiceAccount(accountCredentials, scopes);
+    final token = client.credentials.accessToken.data;
+    client.close();
+    return token;
+  }
+
+  /// Sends an FCM HTTP v1 push using the service account access token.
+  /// Returns true when HTTP status is 200 (OK).
+  static Future<bool> _sendPushNotification(
+    String callId,
+    Map<String, dynamic> receiver,
+    String callType,
+    String callerName,
+  ) async {
+    final token = receiver['fcmToken'] as String?;
+    if (token == null || token.isEmpty) {
+      debugPrint('Push not sent: receiver FCM token is null/empty for ${receiver['id'] ?? receiver['username']}');
+      return false;
+    }
+
+    try {
+      final serviceAccount = await _loadServiceAccountJson();
+      final projectId = serviceAccount['project_id'] as String?;
+      if (projectId == null || projectId.isEmpty) {
+        debugPrint('Service account JSON missing project_id');
+        return false;
+      }
+
+      final accessToken = await _getAccessToken();
+      final url = 'https://fcm.googleapis.com/v1/projects/$projectId/messages:send';
+
+      final payload = {
+        'message': {
+          'token': token,
+          'data': {
+            'callId': callId,
+            'callerId': receiver['id']?.toString() ?? '',
+            'callerName': callerName,
+            'callType': callType.toLowerCase(),
+            'type': 'incoming_call',
+          },
+          'notification': {
+            'title': 'Incoming ${callType[0].toUpperCase()}${callType.substring(1)} Call',
+            'body': 'Call from $callerName',
+          },
+          // Android/APNs configuration blocks are optional — include as needed
+          'android': {
+            'priority': 'high',
+            'notification': {
+              'channel_id': 'calls_channel',
+              'sound': 'default',
+              'priority': 'high',
+              // 'click_action', 'tag', etc. can be added here
+            },
+          },
+          'apns': {
+            'headers': {
+              'apns-priority': '10',
+            },
+            'payload': {
+              'aps': {
+                'sound': 'default',
+                'category': 'CALL',
+                'content-available': 1,
+              },
+            },
+          },
+        },
+      };
+
+      final response = await http.post(
+        Uri.parse(url),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $accessToken',
+        },
+        body: jsonEncode(payload),
+      );
+
+      debugPrint('FCM HTTP v1 response: ${response.statusCode} - ${response.body}');
+      return response.statusCode == 200;
+    } catch (e, st) {
+      debugPrint('Error sending FCM HTTP v1 push: $e\n$st');
+      return false;
     }
   }
+
+  // ---------------------------
+  // Call / LiveKit logic
+  // ---------------------------
 
   static Future<String> startVoiceCall({
     required Map<String, dynamic> caller,
@@ -106,17 +185,20 @@ class RtcManager {
         'type': 'voice',
         'callerId': caller['id'],
         'receiverId': receiver['id'],
+        'callerName': caller['username'] ?? 'Unknown',
         'status': 'ringing',
         'startedAt': FieldValue.serverTimestamp(),
-        'participantStatus': {caller['id']: 'joined'},
+        'participantStatus': {caller['id']: 'joined', receiver['id']: 'ringing'},
+        'unreadBy': [receiver['id']],
       });
     } catch (e) {
-      debugPrint("Error setting call: $e");
+      debugPrint("Error setting call doc: $e");
       await _endCall(callId, audioTrack: audioTrack);
       throw Exception("Failed to initiate call");
     }
 
-    _sendPushNotification(callId, receiver, 'Voice', caller['username'] ?? 'Unknown');
+    // Non-blocking push send (do not await to avoid slowing UX)
+    unawaited(_sendPushNotification(callId, receiver, 'voice', caller['username'] ?? 'Unknown'));
 
     _callTimers[callId] = Timer(const Duration(seconds: 30), () async {
       if (_liveKitRooms.containsKey(callId)) {
@@ -124,6 +206,12 @@ class RtcManager {
           final doc = await FirebaseFirestore.instance.collection('calls').doc(callId).get();
           if (doc.exists && doc['status'] == 'ringing') {
             await _endCall(callId, audioTrack: audioTrack);
+            try {
+              await FirebaseFirestore.instance.collection('calls').doc(callId).update({
+                'status': 'missed',
+                'endedAt': FieldValue.serverTimestamp(),
+              });
+            } catch (_) {}
           }
         } catch (e) {
           debugPrint("Error checking call status: $e");
@@ -178,17 +266,19 @@ class RtcManager {
         'type': 'video',
         'callerId': caller['id'],
         'receiverId': receiver['id'],
+        'callerName': caller['username'] ?? 'Unknown',
         'status': 'ringing',
         'startedAt': FieldValue.serverTimestamp(),
-        'participantStatus': {caller['id']: 'joined'},
+        'participantStatus': {caller['id']: 'joined', receiver['id']: 'ringing'},
+        'unreadBy': [receiver['id']],
       });
     } catch (e) {
-      debugPrint("Error setting call: $e");
+      debugPrint("Error setting call doc: $e");
       await _endCall(callId, videoTrack: videoTrack, audioTrack: audioTrack);
       throw Exception("Failed to initiate call");
     }
 
-    _sendPushNotification(callId, receiver, 'Video', caller['username'] ?? 'Unknown');
+    unawaited(_sendPushNotification(callId, receiver, 'video', caller['username'] ?? 'Unknown'));
 
     _callTimers[callId] = Timer(const Duration(seconds: 30), () async {
       if (_liveKitRooms.containsKey(callId)) {
@@ -196,6 +286,12 @@ class RtcManager {
           final doc = await FirebaseFirestore.instance.collection('calls').doc(callId).get();
           if (doc.exists && doc['status'] == 'ringing') {
             await _endCall(callId, videoTrack: videoTrack, audioTrack: audioTrack);
+            try {
+              await FirebaseFirestore.instance.collection('calls').doc(callId).update({
+                'status': 'missed',
+                'endedAt': FieldValue.serverTimestamp(),
+              });
+            } catch (_) {}
           }
         } catch (e) {
           debugPrint("Error checking call status: $e");
@@ -247,9 +343,11 @@ class RtcManager {
         }
       });
 
+      // Update call doc: set status answered and participant joined; remove peer from unreadBy
       await FirebaseFirestore.instance.collection('calls').doc(callId).update({
         'status': 'answered',
         'participantStatus.$peerId': 'joined',
+        'unreadBy': FieldValue.arrayRemove([peerId]),
       });
 
       _callTimers[callId]?.cancel();
@@ -269,6 +367,7 @@ class RtcManager {
         'status': 'rejected',
         'participantStatus.$peerId': 'rejected',
         'endedAt': FieldValue.serverTimestamp(),
+        'unreadBy': FieldValue.arrayRemove([peerId]),
       });
     } catch (e) {
       debugPrint("Error rejecting call: $e");
@@ -293,10 +392,15 @@ class RtcManager {
       _callTimers[callId]?.cancel();
       _callTimers.remove(callId);
 
-      await FirebaseFirestore.instance.collection('calls').doc(callId).update({
-        'status': 'ended',
-        'endedAt': FieldValue.serverTimestamp(),
-      });
+      // Update Firestore doc if it still exists
+      try {
+        await FirebaseFirestore.instance.collection('calls').doc(callId).update({
+          'status': 'ended',
+          'endedAt': FieldValue.serverTimestamp(),
+        });
+      } catch (_) {
+        // Doc may not exist or could already be updated — ignore
+      }
     } catch (e) {
       debugPrint("Error ending call: $e");
     }
@@ -344,8 +448,8 @@ class RtcManager {
       ),
     );
 
-    final pubs = room.localParticipant!.trackPublications.values
-        .where((pub) => pub.kind == lk.TrackType.VIDEO);
+    final pubs = room.localParticipant!.trackPublications.values.where((pub) => pub.kind == lk.TrackType.VIDEO);
+    // Implement quality adjustments if needed with LiveKit API (not shown here)
   }
 
   static String? getActiveSpeaker(String callId) {
@@ -364,7 +468,6 @@ class RtcManager {
           .where((pub) => pub.kind == lk.TrackType.AUDIO)
           .cast<lk.LocalTrackPublication?>()
           .firstOrNull;
-
       return audioPub?.track?.mediaStream;
     }
     return null;
@@ -377,7 +480,6 @@ class RtcManager {
           .where((pub) => pub.kind == lk.TrackType.AUDIO)
           .cast<lk.RemoteTrackPublication<lk.RemoteTrack>?>()
           .firstOrNull;
-
       return audioPub?.track?.mediaStream;
     }
     return null;

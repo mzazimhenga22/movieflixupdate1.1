@@ -234,52 +234,75 @@ class MessagesScreenState extends State<MessagesScreen>
     }
   }
 
-  Future<void> _cacheChats(List<ChatInfo> chats) async {
+Future<void> _cacheChats(List<ChatInfo> chats) async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+
+    // Build serializable entries, sanitizing everything (docData, lastMessageData, otherUser).
+    final List<Map<String, dynamic>> toCache = [];
+    for (final c in chats) {
+      final docData = Map<String, dynamic>.from(c.docData);
+      final serializableDocData = _convertTimestampsForCache(docData);
+
+      final lastMessageData = c.lastMessageData != null
+          ? Map<String, dynamic>.from(c.lastMessageData!)
+          : null;
+      final serializableLast = lastMessageData != null
+          ? _convertTimestampsForCache(lastMessageData)
+          : null;
+
+      final otherUser = c.otherUser != null
+          ? Map<String, dynamic>.from(c.otherUser!)
+          : null;
+      final serializableOther = otherUser != null
+          ? _convertTimestampsForCache(otherUser)
+          : null;
+
+      toCache.add({
+        'docId': c.docId,
+        'docData': serializableDocData,
+        'unreadCount': c.unreadCount,
+        'otherUser': serializableOther,
+        'lastMessageData': serializableLast,
+      });
+    }
+
+    final encoded = jsonEncode(toCache);
+    debugPrint('[cacheChats] serialised ${toCache.length} chats, size=${encoded.length} bytes');
+
+    if (encoded.length > 500000) {
+      debugPrint('[cacheChats] WARNING: cache size > 500KB; consider using Hive/sqflite or trimming fields');
+    }
+
+    await prefs.setString('chats_${widget.currentUser['id']}', encoded);
+    debugPrint('[cacheChats] saved cache for user ${widget.currentUser['id']}');
+  } catch (e, st) {
+    debugPrint('Error caching chats: $e\n$st');
+
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final List<Map<String, dynamic>> toCache = chats.map((c) {
-        final docData = Map<String, dynamic>.from(c.docData);
-        final serializableDocData = _convertTimestampsForCache(docData);
-
-        final lastMessageData = c.lastMessageData != null
-            ? Map<String, dynamic>.from(c.lastMessageData!)
-            : null;
-        final serializableLast = lastMessageData != null
-            ? _convertTimestampsForCache(lastMessageData)
-            : null;
-
-        final otherUser = c.otherUser != null
-            ? Map<String, dynamic>.from(c.otherUser!)
-            : null;
-
-        return {
-          'docId': c.docId,
-          'docData': serializableDocData,
-          'unreadCount': c.unreadCount,
-          'otherUser': otherUser,
-          'lastMessageData': serializableLast,
-        };
-      }).toList();
-
-      final encoded = jsonEncode(toCache);
-      debugPrint('[cacheChats] serialised ${toCache.length} chats, size=${encoded.length} bytes');
-
-      // safety guard — warn if cache is getting large
-      if (encoded.length > 500000) {
-        debugPrint('[cacheChats] WARNING: cache size > 500KB; consider using Hive/sqflite or trimming stored fields');
+      for (final c in chats) {
+        try {
+          final testMap = {
+            'docId': c.docId,
+            'docData': _convertTimestampsForCache(Map<String, dynamic>.from(c.docData)),
+            'unreadCount': c.unreadCount,
+            'otherUser': c.otherUser != null ? _convertTimestampsForCache(Map<String, dynamic>.from(c.otherUser!)) : null,
+            'lastMessageData': c.lastMessageData != null ? _convertTimestampsForCache(Map<String, dynamic>.from(c.lastMessageData!)) : null,
+          };
+          jsonEncode(testMap);
+        } catch (inner) {
+          debugPrint('[cacheChats] serialization failed for chat ${c.docId}: $inner');
+        }
       }
+    } catch (_) {}
 
-      await prefs.setString('chats_${widget.currentUser['id']}', encoded);
-      debugPrint('[cacheChats] saved cache for user ${widget.currentUser['id']}');
-    } catch (e, st) {
-      debugPrint('Error caching chats: $e\n$st');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to cache chats')),
-        );
-      }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to cache chats')),
+      );
     }
   }
+}
 
   /// Fetch chat and group documents and produce ChatInfo list.
   /// NOTE: we avoid expensive per-chat counts and use doc fields like 'unreadCount' or 'unreadBy' when available.
@@ -326,12 +349,16 @@ class MessagesScreenState extends State<MessagesScreen>
         combined.retainWhere((doc) {
           final data = doc.data();
           if (data.containsKey('unreadCount')) {
-            return (data['unreadCount'] as int? ?? 0) > 0;
+            // We will compute per-user unread below; here keep docs that could have unread
+            return (data['unreadCount'] as int? ?? 0) > 0 || (data['unreadBy'] != null);
           } else if (data.containsKey('unreadBy')) {
             final unreadBy = List<dynamic>.from(data['unreadBy'] ?? []);
-            return unreadBy.contains(userId);
+            // must check if current user is among unreadBy or readStatus says false
+            final isInUnreadBy = unreadBy.contains(userId);
+            final readStatus = data['readStatus'] is Map ? data['readStatus'][userId] != true : true;
+            return isInUnreadBy || readStatus;
           }
-          // fallback conservative: include docs and let MessageStatusUtils determine per-chat in UI if necessary
+          // fallback conservative: include docs and let UI finalise
           return true;
         });
       } else if (tab == 'Favorites') {
@@ -347,14 +374,23 @@ class MessagesScreenState extends State<MessagesScreen>
       final pinnedChats =
           List<String>.from(userDoc.data()?['pinnedChats'] ?? []);
 
-      // Sort: pinned first then by timestamp
+      // Sort: pinned chats remain above unpinned chats and preserve pinned order.
       combined.sort((a, b) {
-        final aTime = _parseTimestamp(a.data()['timestamp']);
-        final bTime = _parseTimestamp(b.data()['timestamp']);
-        final aPinned = pinnedChats.contains(a.id);
-        final bPinned = pinnedChats.contains(b.id);
+        final aPinnedIndex = pinnedChats.indexOf(a.id);
+        final bPinnedIndex = pinnedChats.indexOf(b.id);
+        final aPinned = aPinnedIndex >= 0;
+        final bPinned = bPinnedIndex >= 0;
+
+        if (aPinned && bPinned) {
+          // preserve the pinned order as defined in pinnedChats
+          return aPinnedIndex.compareTo(bPinnedIndex);
+        }
         if (aPinned && !bPinned) return -1;
         if (!aPinned && bPinned) return 1;
+
+        // both unpinned: order by timestamp (most recent first)
+        final aTime = _parseTimestamp(a.data()['timestamp']);
+        final bTime = _parseTimestamp(b.data()['timestamp']);
         return bTime.compareTo(aTime);
       });
 
@@ -375,7 +411,7 @@ class MessagesScreenState extends State<MessagesScreen>
 
       final lastMessagesSnapshots = await Future.wait(lastMessageFutures);
 
-      // Build results using available doc fields for unread counts (avoid expensive counting queries)
+      // Build results using available doc fields for unread counts (per-user focused)
       for (int i = 0; i < combined.length; i++) {
         final doc = combined[i];
         final data = doc.data();
@@ -386,16 +422,28 @@ class MessagesScreenState extends State<MessagesScreen>
         final msgsSnap = lastMessagesSnapshots[i];
         if (msgsSnap.docs.isNotEmpty) lastMessageData = msgsSnap.docs.first.data();
 
-        // Prefer doc metadata for unreadCount, otherwise default to 0
-        int unreadCount = 0;
-        if (data.containsKey('unreadCount')) {
-          unreadCount = (data['unreadCount'] as int?) ?? 0;
-        } else if (data.containsKey('unreadBy')) {
-          unreadCount = (data['unreadBy'] as List?)?.length ?? 0;
+        // Determine if this chat is unread *for the current user*.
+        bool isUnreadForUser = false;
+        if (data.containsKey('unreadBy')) {
+          final unreadBy = List<dynamic>.from(data['unreadBy'] ?? []);
+          // ensure the current user is not counted due to a buggy writer adding the sender
+          isUnreadForUser = unreadBy.contains(userId);
+        } else if (data.containsKey('readStatus')) {
+          final readStatus = data['readStatus'] as Map<dynamic, dynamic>? ?? {};
+          isUnreadForUser = readStatus[userId] != true;
         } else {
-          // Avoid expensive per-chat counting query; fallback to 0
-          unreadCount = 0;
+          // fallback: if last message sender != current user, assume unread
+          final lastSender = lastMessageData?['senderId'] as String?;
+          if (lastSender != null && lastSender != userId) {
+            isUnreadForUser = true;
+          } else {
+            isUnreadForUser = false;
+          }
         }
+
+        // For UI clarity: show a simple badge indicator (1) if unread for this user, else 0.
+        // This avoids showing inflated counts (e.g., group size) to the person reading.
+        final unreadCountForUI = isUnreadForUser ? 1 : 0;
 
         // For 1-1 chats, attempt to fetch the other user quickly (no heavy ops)
         Map<String, dynamic>? otherUser;
@@ -422,7 +470,7 @@ class MessagesScreenState extends State<MessagesScreen>
         chatInfoList.add(ChatInfo(
           docId: chatId,
           docData: data,
-          unreadCount: unreadCount,
+          unreadCount: unreadCountForUI,
           otherUser: otherUser,
           lastMessageData: lastMessageData,
           snapshot: doc,
@@ -1003,13 +1051,16 @@ class MessagesScreenState extends State<MessagesScreen>
                                       controller: controller,
                                       onTap: () {
                                         controller.clearSelection();
+                                        // mark as read for current user
                                         MessageStatusUtils.markAsRead(
                                                 chatId: chatId,
                                                 userId: currentUserId,
                                                 isGroup: true)
-                                            .then((_) {
+                                            .then((_) async {
                                           _reloadTrigger.value =
                                               !_reloadTrigger.value;
+                                        }).catchError((e) {
+                                          debugPrint('markAsRead error: $e');
                                         });
                                         Navigator.push(
                                             context,
@@ -1073,6 +1124,8 @@ class MessagesScreenState extends State<MessagesScreen>
                                                 .then((_) {
                                               _reloadTrigger.value =
                                                   !_reloadTrigger.value;
+                                            }).catchError((e) {
+                                              debugPrint('markAsRead error: $e');
                                             });
                                             Navigator.push(
                                                 context,

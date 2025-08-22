@@ -121,16 +121,37 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
     if (mounted) Navigator.of(context).pop();
   }
 
+bool _isDisposed = false;
+
 @override
 void dispose() {
-  _pulseController?.dispose(); // <- fix: null check added
-  _timer?.cancel();
-  _callStatusSubscription.cancel();
-  if (isAnswered) {
-    RtcManager.hangUp(widget.callId);
+  if (_isDisposed) return;
+  _isDisposed = true;
+
+  try {
+    // ✅ Stop and dispose the AnimationController first
+    if (_pulseController != null) {
+      _pulseController!.stop();
+      _pulseController!.dispose(); // This disposes the ticker
+    }
+
+    // Cancel timers and streams
+    _timer?.cancel();
+    _callStatusSubscription.cancel();
+
+    // Hang up the call if active
+    if (isAnswered) {
+      RtcManager.hangUp(widget.callId);
+    }
+  } catch (e) {
+    debugPrint("Dispose error: $e");
   }
+
+  // ✅ Call super.dispose() last
   super.dispose();
 }
+
+
 
 
   @override
