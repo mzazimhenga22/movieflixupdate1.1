@@ -1,9 +1,9 @@
 // chat_screen.dart
-// Updated to avoid large rebuilds when keyboard opens. Key idea:
-// - set resizeToAvoidBottomInset: false on Scaffold
-// - pin messages (won't be relaid out on keyboard open)
-// - pin typing area to bottom and animate its bottom padding using MediaQuery.viewInsets.bottom
-// - tap on messages area unfocuses keyboard
+// Updated: ensure message bubbles never appear below the typing area.
+// Key ideas:
+// - Keep resizeToAvoidBottomInset: false to avoid heavy relayouts on keyboard open.
+// - Pin typing area and animate its bottom using MediaQuery.viewInsets.bottom.
+// - Measure typing area height via GlobalKey and keep messages' bottom offset = typingHeight + viewInsets.bottom.
 
 import 'dart:io';
 import 'dart:async';
@@ -16,8 +16,6 @@ import 'package:movie_app/utils/read_status_utils.dart';
 import 'package:flutter/foundation.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
-// <-- Make sure this import matches the actual file name in your project.
-// If your file is `services/fcm_sender.dart` use that path; if it's `services/fcmsender.dart` change accordingly.
 import 'package:movie_app/services/fcm_sender.dart' show sendFcmPush;
 
 import 'VideoCallScreen_1to1.dart';
@@ -63,7 +61,11 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
   final ValueNotifier<String?> _backgroundUrlNotifier = ValueNotifier<String?>(null);
   final ValueNotifier<QueryDocumentSnapshot<Object?>?> _replyingToNotifier = ValueNotifier<QueryDocumentSnapshot<Object?>?>(null);
 
-  // Manage streams so we cancel them on dispose (prevents ValueNotifier-after-dispose bugs)
+  // Typing area measurement
+  final GlobalKey _typingKey = GlobalKey();
+  final ValueNotifier<double> _typingHeightNotifier = ValueNotifier<double>(0.0);
+
+  // Manage streams so we cancel them on dispose
   StreamSubscription<QuerySnapshot<Object?>>? _incomingCallsSub;
 
   bool _isDisposed = false;
@@ -81,17 +83,19 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
       markChatAsRead(widget.chatId, widget.currentUser['id']);
       _listenForIncomingCalls();
     });
+
+    // Ensure we capture an initial measurement after first frame
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateTypingHeight());
   }
 
   @override
   void dispose() {
-    // Cancel subscriptions & timers BEFORE disposing notifiers
     _incomingCallsSub?.cancel();
-
     _isDisposed = true;
 
     _backgroundUrlNotifier.dispose();
     _replyingToNotifier.dispose();
+    _typingHeightNotifier.dispose();
 
     super.dispose();
   }
@@ -155,14 +159,12 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
     };
 
     try {
-      // add message to messages subcollection
       final msgRef = await FirebaseFirestore.instance
           .collection('chats')
           .doc(widget.chatId)
           .collection('messages')
           .add(messageData);
 
-      // Update chat doc: lastMessage + timestamp + ensure userIds exist + add unreadBy receiver
       await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).set({
         'lastMessage': text,
         'timestamp': FieldValue.serverTimestamp(),
@@ -170,10 +172,8 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
         'unreadBy': FieldValue.arrayUnion([widget.otherUser['id']]),
       }, SetOptions(merge: true));
 
-      // Reset reply UI
       if (!_isDisposed) _replyingToNotifier.value = null;
 
-      // Fire-and-forget: send FCM push to receiver
       unawaited(_sendMessagePush(
         receiverId: widget.otherUser['id'],
         senderId: widget.currentUser['id'],
@@ -192,7 +192,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
     }
   }
 
-  /// Sends file message and push (file message currently only writes metadata here).
   void sendFile(File file) async {
     if (await _isUserBlocked(widget.otherUser['id'])) {
       if (mounted) {
@@ -203,7 +202,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
       return;
     }
     try {
-      // TODO: actually upload file to storage and retrieve URL; here we store placeholder
       final messageData = {
         'text': 'File',
         'fileName': file.path.split('/').last,
@@ -250,7 +248,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
     }
   }
 
-  /// Sends audio message and push (placeholder implementation)
   void sendAudio(File audio) async {
     if (await _isUserBlocked(widget.otherUser['id'])) {
       if (mounted) {
@@ -261,7 +258,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
       return;
     }
     try {
-      // TODO: upload audio to storage and attach URL
       final messageData = {
         'text': 'Voice message',
         'fileName': audio.path.split('/').last,
@@ -308,7 +304,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
     }
   }
 
-  /// Helper: fetch receiver FCM token and send data-only push via sendFcmPush().
   Future<void> _sendMessagePush({
     required String receiverId,
     required String senderId,
@@ -319,7 +314,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
     String messageType = 'text',
   }) async {
     try {
-      // read receiver user doc
       final userDoc = await FirebaseFirestore.instance.collection('users').doc(receiverId).get();
       if (!userDoc.exists) {
         debugPrint('[push] receiver user doc not found: $receiverId');
@@ -330,7 +324,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
       final isMuted = (userData['mutedChats'] as List<dynamic>?)?.contains(chatId) == true;
       final blockedByReceiver = (userData['blockedUsers'] as List<dynamic>?)?.contains(senderId) == true;
 
-      // do not send push if token not present, receiver muted this chat, or receiver blocked the sender
       if (fcmToken == null || fcmToken.isEmpty) {
         debugPrint('[push] no token for receiver $receiverId - skipping push');
         return;
@@ -344,14 +337,10 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
         return;
       }
 
-      // Choose projectId used by your FCM service account (match your service-account.json)
       const projectId = 'movieflix-53a51';
-
-      // Compose title/body - keep them short
       final title = senderName;
       final body = (messageType == 'text') ? (text.length <= 120 ? text : '${text.substring(0, 117)}...') : (messageType == 'file' ? 'Sent a file' : 'Sent a voice message');
 
-      // Extra data delivered to app (background handler should inspect these keys)
       final extraData = <String, String>{
         'type': 'message',
         'chatId': chatId,
@@ -362,7 +351,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
         'text': messageType == 'text' ? text : body,
       };
 
-      // Send data-only push (non-blocking)
       unawaited(sendFcmPush(
         fcmToken: fcmToken,
         projectId: projectId,
@@ -370,7 +358,7 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
         body: body,
         extraData: extraData,
         notification: true,
-        androidChannelId: 'messages', 
+        androidChannelId: 'messages',
       ));
       debugPrint('[push] pushed message to $receiverId');
     } catch (e, st) {
@@ -597,7 +585,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
   }
 
   void _listenForIncomingCalls() {
-    // cancel previous if any
     _incomingCallsSub?.cancel();
 
     _incomingCallsSub = FirebaseFirestore.instance
@@ -642,97 +629,116 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
     });
   }
 
-  // Reusable bottom sheet for quick actions (was previously a FAB menu)
-  void _showQuickActionsBottomSheet() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) {
-        return Container(
-          decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.85),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-            border: Border.all(color: widget.accentColor.withOpacity(0.08)),
-          ),
-          padding: const EdgeInsets.all(12),
-          child: Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            children: [
-              ListTile(
-                leading: CircleAvatar(
-                  backgroundImage: widget.otherUser['avatarUrl'] != null
-                      ? CachedNetworkImageProvider(widget.otherUser['avatarUrl'])
-                      : null,
-                  backgroundColor: widget.accentColor.withOpacity(0.2),
-                  child: widget.otherUser['avatarUrl'] == null ? const Icon(Icons.person) : null,
-                ),
-                title: Text(widget.otherUser['username'] ?? 'Contact'),
-                subtitle: Text(widget.otherUser['status'] ?? ''),
-                trailing: IconButton(
-                  icon: const Icon(Icons.info_outline),
-                  color: widget.accentColor,
+  // Put this inside _ChatScreenState (e.g. right after _listenForIncomingCalls())
+void _showQuickActionsBottomSheet() {
+  showModalBottomSheet(
+    context: context,
+    backgroundColor: Colors.transparent,
+    builder: (ctx) {
+      return Container(
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.85),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          border: Border.all(color: widget.accentColor.withOpacity(0.08)),
+        ),
+        padding: const EdgeInsets.all(12),
+        child: Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          children: [
+            ListTile(
+              leading: CircleAvatar(
+                backgroundImage: widget.otherUser['avatarUrl'] != null
+                    ? CachedNetworkImageProvider(widget.otherUser['avatarUrl'])
+                    : null,
+                backgroundColor: widget.accentColor.withOpacity(0.2),
+                child: widget.otherUser['avatarUrl'] == null ? const Icon(Icons.person) : null,
+              ),
+              title: Text(widget.otherUser['username'] ?? 'Contact'),
+              subtitle: Text(widget.otherUser['status'] ?? ''),
+              trailing: IconButton(
+                icon: const Icon(Icons.info_outline),
+                color: widget.accentColor,
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  Navigator.pushNamed(context, '/profile', arguments: {
+                    ...widget.otherUser,
+                    'onBackgroundSet': _setChatBackground,
+                  });
+                },
+              ),
+            ),
+            const Divider(),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
                   onPressed: () {
                     Navigator.pop(ctx);
-                    Navigator.pushNamed(context, '/profile', arguments: {
-                      ...widget.otherUser,
-                      'onBackgroundSet': _setChatBackground,
-                    });
+                    startVoiceCall();
                   },
+                  icon: const Icon(Icons.call),
+                  label: const Text('Voice'),
                 ),
-              ),
-              const Divider(),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      startVoiceCall();
-                    },
-                    icon: const Icon(Icons.call),
-                    label: const Text('Voice'),
-                  ),
-                  ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      startVideoCall();
-                    },
-                    icon: const Icon(Icons.videocam),
-                    label: const Text('Video'),
-                  ),
-                  OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(side: BorderSide(color: widget.accentColor)),
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      // future: open media picker
-                    },
-                    icon: const Icon(Icons.image),
-                    label: const Text('Media'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        );
-      },
-    );
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    startVideoCall();
+                  },
+                  icon: const Icon(Icons.videocam),
+                  label: const Text('Video'),
+                ),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(side: BorderSide(color: widget.accentColor)),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    // future: open media picker
+                  },
+                  icon: const Icon(Icons.image),
+                  label: const Text('Media'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+
+  // Measure typing area height and update notifier
+  void _updateTypingHeight() {
+    if (_isDisposed) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_isDisposed) return;
+      try {
+        final ctx = _typingKey.currentContext;
+        if (ctx == null) return;
+        final box = ctx.findRenderObject() as RenderBox?;
+        if (box == null || !box.hasSize) return;
+        final double newHeight = box.size.height;
+        if ((_typingHeightNotifier.value - newHeight).abs() > 0.5) {
+          _typingHeightNotifier.value = newHeight;
+        }
+      } catch (e) {
+        // ignore measurement errors
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
 
-    // We set resizeToAvoidBottomInset: false on the Scaffold below so the entire
-    // widget tree won't be relaid out when the keyboard opens. Instead, the typing
-    // area will animate up using MediaQuery.viewInsets.
+    // Schedule measurement every build (post-frame) to remain in sync with content/keyboard changes
+    _updateTypingHeight();
 
     return PresenceWrapper(
       userId: widget.currentUser['id'],
       groupIds: [widget.chatId],
       child: Scaffold(
-        // IMPORTANT: prevent scaffold from resizing the whole page when keyboard opens
         resizeToAvoidBottomInset: false,
         extendBodyBehindAppBar: false,
         backgroundColor: Colors.transparent,
@@ -755,11 +761,10 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
             hasStory: widget.storyInteractions.contains(widget.otherUser['id']),
           ),
         ),
-        // NOTE: removed floatingActionButton to avoid overlapping typing area
         body: Stack(
           children: [
             // Background
-            ValueListenableBuilder<String?>(
+            ValueListenableBuilder<String?>( // background shouldn't rebuild frequently
               valueListenable: _backgroundUrlNotifier,
               builder: (context, backgroundUrl, _) {
                 return _ChatBackground(backgroundUrl: backgroundUrl, accentColor: widget.accentColor);
@@ -769,7 +774,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
             // Foreground column with compact features bar + messages + typing area
             Column(
               children: [
-                // Compact contact features bar (replaces the old 'intro' which acted like another navbar)
                 SafeArea(
                   top: false,
                   child: ContactFeaturesBar(
@@ -783,7 +787,7 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
                     },
                     onVoiceCall: startVoiceCall,
                     onVideoCall: startVideoCall,
-                    onActions: _showQuickActionsBottomSheet, // moved Actions here
+                    onActions: _showQuickActionsBottomSheet,
                   ),
                 ),
 
@@ -799,34 +803,41 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
                           color: Colors.black.withOpacity(0.45),
                           borderRadius: BorderRadius.circular(14),
                         ),
-
-                        // Use a Stack so messages area stays stable and only the typing area
-                        // animates when the keyboard opens (avoids expensive relayouts).
                         child: Stack(
                           children: [
-                            // Messages: fill the available space (won't be relaid out on keyboard)
-                            Positioned.fill(
-                              child: GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onTap: () {
-                                  // dismiss keyboard when tapping messages area
-                                  FocusScope.of(context).unfocus();
-                                },
-                                child: RepaintBoundary(
-                                  child: _ChatMessagesWrapper(
-                                    chatId: widget.chatId,
-                                    currentUser: widget.currentUser,
-                                    otherUser: widget.otherUser,
-                                    replyingToNotifier: _replyingToNotifier,
-                                    onMessageLongPressed: _showMessageActions,
-                                    onReplyToMessage: _onReplyToMessage,
+                            // Messages: dynamic bottom offset so messages never underlap typing area.
+                            ValueListenableBuilder<double>(
+                              valueListenable: _typingHeightNotifier,
+                              builder: (context, typingHeight, _) {
+                                final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+                                // messages bottom = visible typing area top distance from bottom = typingHeight + bottomInset
+                                final messagesBottom = typingHeight + bottomInset;
+                                return Positioned(
+                                  top: 0,
+                                  left: 0,
+                                  right: 0,
+                                  bottom: messagesBottom,
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: () {
+                                      FocusScope.of(context).unfocus();
+                                    },
+                                    child: RepaintBoundary(
+                                      child: _ChatMessagesWrapper(
+                                        chatId: widget.chatId,
+                                        currentUser: widget.currentUser,
+                                        otherUser: widget.otherUser,
+                                        replyingToNotifier: _replyingToNotifier,
+                                        onMessageLongPressed: _showMessageActions,
+                                        onReplyToMessage: _onReplyToMessage,
+                                      ),
+                                    ),
                                   ),
-                                ),
-                              ),
+                                );
+                              },
                             ),
 
-                            // Typing area pinned to bottom — animate only bottom padding using viewInsets
-                            // so when keyboard opens only this widget layout changes.
+                            // Typing area pinned to bottom — measure its height using _typingKey
                             Positioned(
                               left: 0,
                               right: 0,
@@ -836,6 +847,7 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
                                 duration: const Duration(milliseconds: 160),
                                 curve: Curves.easeOut,
                                 child: Container(
+                                  key: _typingKey, // measure this container's height
                                   color: Colors.black.withOpacity(0.55),
                                   child: _TypingAreaWrapper(
                                     replyingToNotifier: _replyingToNotifier,
@@ -900,8 +912,6 @@ class _ChatBackground extends StatelessWidget {
                 ),
               ),
             ),
-
-          // Lightweight overlay
           Positioned.fill(
             child: Container(
               color: Colors.black.withOpacity(0.24),
@@ -1004,7 +1014,6 @@ class _TypingAreaWrapper extends StatelessWidget {
   }
 }
 
-/// Compact contact features bar that replaced the old "intro" (no second navbar)
 class ContactFeaturesBar extends StatelessWidget {
   final Map<String, dynamic> otherUser;
   final Color accentColor;
@@ -1061,7 +1070,6 @@ class ContactFeaturesBar extends StatelessWidget {
                     ],
                   ),
                 ),
-                // quick icons (voice/video)
                 IconButton(
                   onPressed: onVoiceCall,
                   icon: Icon(Icons.call, color: accentColor),
@@ -1072,7 +1080,6 @@ class ContactFeaturesBar extends StatelessWidget {
                   icon: Icon(Icons.videocam, color: accentColor),
                   tooltip: 'Video call',
                 ),
-                // moved actions (three dots) here - opens bottom sheet
                 IconButton(
                   onPressed: onActions,
                   icon: Icon(Icons.more_vert, color: accentColor),

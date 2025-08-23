@@ -2,3 +2,4 @@
 build/
 android/.gradle/
 android/.kotlin/errors/assets/service-account.json
+assets/service_account.json

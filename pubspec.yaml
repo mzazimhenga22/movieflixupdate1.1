@@ -83,6 +83,7 @@ dependencies:
   livekit_client: ^2.5.0+hotfix.1
   googleapis_auth: ^1.6.0
   dart_jsonwebtoken: ^2.14.0
+  jose: ^0.3.3 
 
   # Web & Sharing
   webview_flutter: ^4.11.0
@@ -135,6 +136,7 @@ flutter:
     - assets/icon/premierticket.jpg
     - assets/icon/movieposter.jpg
     - assets/cinema.jpg
+    - assets/service_account.json
 
 flutter_launcher_icons:
   android: true
