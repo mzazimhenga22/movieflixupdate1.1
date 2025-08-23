@@ -2,11 +2,15 @@
 import 'dart:async';
 import 'dart:isolate';
 import 'dart:ui';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
 import 'package:flutter_callkit_incoming/entities/call_kit_params.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'firebase_options.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:movie_app/splash_screen.dart';
@@ -62,6 +66,25 @@ class FcmPermissionManager {
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   // Ensure Firebase is initialized in the background isolate
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+  // Activate App Check in the background isolate as well (debug in non-release)
+  try {
+    if (kReleaseMode) {
+      await FirebaseAppCheck.instance.activate(
+        androidProvider: AndroidProvider.playIntegrity,
+        appleProvider: AppleProvider.deviceCheck,
+      );
+      debugPrint('[BG] Firebase App Check activated (release providers)');
+    } else {
+      await FirebaseAppCheck.instance.activate(
+        androidProvider: AndroidProvider.debug,
+        appleProvider: AppleProvider.debug,
+      );
+      debugPrint('[BG] Firebase App Check activated (debug provider)');
+    }
+  } catch (e, st) {
+    debugPrint('[BG] Firebase App Check activation failed: $e\n$st');
+  }
 
   final data = message.data ?? <String, dynamic>{};
 
@@ -185,6 +208,28 @@ void main() async {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
     debugPrint('✅ Firebase initialized');
 
+    // Activate Firebase App Check (debug provider in non-release, production providers in release)
+    try {
+      if (kReleaseMode) {
+        // production: use Play Integrity / DeviceCheck
+        await FirebaseAppCheck.instance.activate(
+          androidProvider: AndroidProvider.playIntegrity,
+          appleProvider: AppleProvider.deviceCheck,
+        );
+        debugPrint('✅ Firebase App Check activated (release providers)');
+      } else {
+        // debug/dev: use the debug provider for local testing
+        await FirebaseAppCheck.instance.activate(
+          androidProvider: AndroidProvider.debug,
+          appleProvider: AppleProvider.debug,
+        );
+        debugPrint('✅ Firebase App Check activated (debug provider)');
+      }
+    } catch (e, st) {
+      debugPrint('⚠️ Firebase App Check activation failed: $e\n$st');
+      // proceed; we'll still try to continue, but FCM requests may fail until App Check active
+    }
+
     // Initialize auth db safely (handles permission race)
     await _safeAuthDatabaseInitialize();
     debugPrint('✅ AuthDatabase initialized (safe)');
@@ -291,6 +336,32 @@ void main() async {
     }
   });
 
+  // ---------------------------
+  // Request CallKit permissions
+  // (Per your request: after Firebase init and before runApp)
+  // ---------------------------
+  try {
+    // Request notification permission for CallKit
+    await FlutterCallkitIncoming.requestNotificationPermission({
+      "title": "Notification permission",
+      "rationaleMessagePermission": "Notification permission is required to show incoming call notifications.",
+      "postNotificationMessageRequired": "Please enable notifications in Settings to receive incoming calls."
+    });
+    // On Android, check SDK version and request full-intent permission for SDK 34+
+    if (Platform.isAndroid) {
+      final deviceInfo = DeviceInfoPlugin();
+      final androidInfo = await deviceInfo.androidInfo;
+      final sdkInt = (androidInfo.version.sdkInt ?? 0);
+      debugPrint('[CallKit] Android SDK: $sdkInt');
+      if (sdkInt >= 34) {
+        await FlutterCallkitIncoming.requestFullIntentPermission();
+        debugPrint('[CallKit] requested full intent permission for SDK >= 34');
+      }
+    }
+  } catch (e) {
+    debugPrint('⚠️ CallKit permission request failed: $e');
+  }
+
   runApp(
     MultiProvider(
       providers: [
@@ -339,14 +410,21 @@ class _MyAppState extends State<MyApp> {
           await FcmPermissionManager.ensurePermissionRequested();
         } catch (_) {}
 
-        final token = await fcm.getToken();
-        if (token != null) {
-          try {
-            await FirebaseFirestore.instance.collection('users').doc(userId).set({'fcmToken': token}, SetOptions(merge: true));
-            debugPrint('[FCM] saved token for user $userId');
-          } catch (e) {
-            debugPrint('[FCM] failed saving token: $e');
+        // Try to grab token (App Check should already be activated)
+        try {
+          final token = await fcm.getToken();
+          if (token != null) {
+            try {
+              await FirebaseFirestore.instance.collection('users').doc(userId).set({'fcmToken': token}, SetOptions(merge: true));
+              debugPrint('[FCM] saved token for user $userId');
+            } catch (e) {
+              debugPrint('[FCM] failed saving token to firestore: $e');
+            }
+          } else {
+            debugPrint('[FCM] getToken returned null for user $userId');
           }
+        } catch (e) {
+          debugPrint('[FCM] getToken error: $e');
         }
 
         FirebaseMessaging.instance.onTokenRefresh.listen((newToken) async {
@@ -433,6 +511,9 @@ class _MyAppState extends State<MyApp> {
           final fcmToken = await FirebaseMessaging.instance.getToken();
           if (fcmToken != null) {
             await FirebaseFirestore.instance.collection('users').doc(userId).set({'fcmToken': fcmToken}, SetOptions(merge: true));
+            debugPrint('[FCM] post-frame token saved for $userId');
+          } else {
+            debugPrint('[FCM] post-frame getToken returned null');
           }
         } catch (e) {
           debugPrint('[FCM] post-frame token save error: $e');
@@ -497,4 +578,3 @@ class _MyAppState extends State<MyApp> {
     );
   }
 }
-

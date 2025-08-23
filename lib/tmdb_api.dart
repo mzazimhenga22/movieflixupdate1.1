@@ -1,21 +1,53 @@
 import 'dart:convert';
+import 'dart:async';
+import 'package:flutter/foundation.dart'; // for compute
 import 'package:http/http.dart' as http;
+
+/// NOTE:
+/// This file was updated to offload JSON decoding to a background isolate
+/// using `compute()` to avoid blocking the main isolate / UI thread.
 
 class TMDBApi {
   static const String apiKey = '1ba41bda48d0f1c90954f4811637b6d6';
   static const String baseUrl = 'https://api.themoviedb.org/3';
 
+  // -----------------------
+  // Top-level parser helpers
+  // -----------------------
+  // These must be top-level or static functions to be usable with compute().
+
+  static Map<String, dynamic> _parseBodyToMap(String body) {
+    return jsonDecode(body) as Map<String, dynamic>;
+  }
+
+  // Returns the 'results' list if available; otherwise returns parsed object as list if it is a list.
+  static List<dynamic> _extractResultsFromBody(String body) {
+    final decoded = jsonDecode(body);
+    if (decoded is Map && decoded.containsKey('results')) {
+      return decoded['results'] as List<dynamic>;
+    } else if (decoded is List) {
+      return decoded;
+    } else {
+      return <dynamic>[];
+    }
+  }
+
+  // -----------------------
+  // API methods
+  // -----------------------
+
   /// (Legacy) Fetches one featured movie (the first popular movie).
   static Future<Map<String, dynamic>> fetchFeaturedMovie() async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/movie/popular?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/movie/popular?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
+
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        List results = data['results'];
+        final Map<String, dynamic> data = await compute(_parseBodyToMap, response.body);
+        final List results = (data['results'] is List) ? data['results'] as List : <dynamic>[];
         if (results.isNotEmpty) {
-          return results[0]; // Return the first movie as featured.
+          return Map<String, dynamic>.from(results[0] as Map);
         } else {
           throw Exception("No movies found");
         }
@@ -25,6 +57,8 @@ class TMDBApi {
       }
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching featured movie: $e');
     } catch (e) {
       throw Exception('Unexpected error while fetching featured movie: $e');
     }
@@ -33,29 +67,39 @@ class TMDBApi {
   /// Fetches upcoming movies.
   static Future<List<dynamic>> fetchUpcomingMovies() async {
     final uri = Uri.parse('$baseUrl/movie/upcoming?api_key=$apiKey');
-    final response = await http.get(uri);
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      return data['results'];
-    } else {
-      throw Exception(
-          'Failed to load upcoming: ${response.statusCode} ${response.reasonPhrase}');
+    try {
+      final response = await http.get(uri).timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
+      } else {
+        throw Exception(
+            'Failed to load upcoming: ${response.statusCode} ${response.reasonPhrase}');
+      }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching upcoming movies: $e');
+    } on http.ClientException catch (e) {
+      throw Exception('Network error: Failed to connect to TMDB API - $e');
+    } catch (e) {
+      throw Exception('Unexpected error while fetching upcoming movies: $e');
     }
   }
 
   /// Fetches trending movies or TV shows.
   static Future<List<dynamic>> fetchTrendingMovies() async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/trending/all/day?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/trending/all/day?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to load trending movies: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching trending: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -66,16 +110,18 @@ class TMDBApi {
   /// Fetches trending TV shows.
   static Future<List<dynamic>> fetchTrendingTVShows() async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/trending/tv/day?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/trending/tv/day?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to load trending TV shows: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching trending TV shows: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -86,16 +132,18 @@ class TMDBApi {
   /// Fetches recommendations.
   static Future<List<dynamic>> fetchRecommendations() async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/movie/popular?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/movie/popular?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to load recommendations: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching recommendations: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -104,22 +152,23 @@ class TMDBApi {
   }
 
   /// Fetches recommended movies with pagination, returning movies and total pages.
-  static Future<Map<String, dynamic>> fetchRecommendedMovies(
-      {int page = 1}) async {
+  static Future<Map<String, dynamic>> fetchRecommendedMovies({int page = 1}) async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/movie/popular?api_key=$apiKey&page=$page'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/movie/popular?api_key=$apiKey&page=$page'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+        final Map<String, dynamic> data = await compute(_parseBodyToMap, response.body);
         return {
-          'movies': data['results'],
-          'total_pages': data['total_pages'],
+          'movies': (data['results'] is List) ? data['results'] as List<dynamic> : <dynamic>[],
+          'total_pages': data['total_pages'] ?? 1,
         };
       } else {
         throw Exception(
             'Failed to load recommended movies: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching recommended movies: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -130,22 +179,24 @@ class TMDBApi {
   /// Fetches recommended movies as a list (legacy support for non-paginated use cases).
   static Future<List<dynamic>> fetchRecommendedMoviesList() async {
     final result = await fetchRecommendedMovies(page: 1);
-    return result['movies'];
+    return result['movies'] as List<dynamic>;
   }
 
   /// Fetches the list of movie genres.
   static Future<List<dynamic>> fetchCategories() async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/genre/movie/list?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/genre/movie/list?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['genres'];
+        final Map<String, dynamic> data = await compute(_parseBodyToMap, response.body);
+        return (data['genres'] is List) ? data['genres'] as List<dynamic> : <dynamic>[];
       } else {
         throw Exception(
             'Failed to load categories: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching categories: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -173,17 +224,18 @@ class TMDBApi {
       throw Exception("Genre not found for $categoryName");
     }
     try {
-      final response = await http.get(
-        Uri.parse(
-            '$baseUrl/discover/movie?api_key=$apiKey&with_genres=$genreId'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/discover/movie?api_key=$apiKey&with_genres=$genreId'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to load category movies: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching category movies: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -198,16 +250,18 @@ class TMDBApi {
       throw Exception("Genre not found for $categoryName");
     }
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/discover/tv?api_key=$apiKey&with_genres=$genreId'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/discover/tv?api_key=$apiKey&with_genres=$genreId'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to load category TV shows: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching category TV shows: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -218,16 +272,18 @@ class TMDBApi {
   /// Fetches similar movies for a given movie ID.
   static Future<List<dynamic>> fetchSimilarMovies(int movieId) async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/movie/$movieId/similar?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/movie/$movieId/similar?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to load similar movies: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching similar movies: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -238,16 +294,18 @@ class TMDBApi {
   /// Fetches similar TV shows for a given TV show ID.
   static Future<List<dynamic>> fetchSimilarTVShows(int tvId) async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/tv/$tvId/similar?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/tv/$tvId/similar?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to load similar TV shows: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching similar TV shows: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -256,20 +314,21 @@ class TMDBApi {
   }
 
   /// Fetches trailers (videos) for a given movie or TV show ID.
-  static Future<List<dynamic>> fetchTrailers(int id,
-      {bool isTVShow = false}) async {
+  static Future<List<dynamic>> fetchTrailers(int id, {bool isTVShow = false}) async {
     final String endpoint = isTVShow ? 'tv/$id' : 'movie/$id';
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/$endpoint/videos?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/$endpoint/videos?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to load trailers: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching trailers: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -280,15 +339,18 @@ class TMDBApi {
   /// Fetches detailed TV show information, including seasons.
   static Future<Map<String, dynamic>> fetchTVShowDetails(int tvId) async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/tv/$tvId?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/tv/$tvId?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 20));
       if (response.statusCode == 200) {
-        return jsonDecode(response.body);
+        final Map<String, dynamic> data = await compute(_parseBodyToMap, response.body);
+        return data;
       } else {
         throw Exception(
             'Failed to load TV show details: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching TV show details: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -297,18 +359,20 @@ class TMDBApi {
   }
 
   /// Fetches detailed TV season information, including episodes.
-  static Future<Map<String, dynamic>> fetchTVSeasonDetails(
-      int tvId, int seasonNumber) async {
+  static Future<Map<String, dynamic>> fetchTVSeasonDetails(int tvId, int seasonNumber) async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/tv/$tvId/season/$seasonNumber?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/tv/$tvId/season/$seasonNumber?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 20));
       if (response.statusCode == 200) {
-        return jsonDecode(response.body);
+        final Map<String, dynamic> data = await compute(_parseBodyToMap, response.body);
+        return data;
       } else {
         throw Exception(
             'Failed to load TV season details: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching TV season details: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -317,45 +381,43 @@ class TMDBApi {
   }
 
   /// Fetches all episodes for all seasons of a TV show.
-  static Future<Map<String, dynamic>> fetchAllEpisodesForTVShow(
-      int tvId) async {
+  static Future<Map<String, dynamic>> fetchAllEpisodesForTVShow(int tvId) async {
     try {
       // Fetch basic TV show details, which includes the list of seasons.
       final tvDetails = await fetchTVShowDetails(tvId);
-      final seasons = tvDetails['seasons'] as List<dynamic>;
+      final seasons = (tvDetails['seasons'] is List) ? tvDetails['seasons'] as List<dynamic> : <dynamic>[];
 
       // For each season, fetch its episode details.
       for (var season in seasons) {
         final seasonNumber = season['season_number'] as int;
         final seasonDetails = await fetchTVSeasonDetails(tvId, seasonNumber);
-        season['episodes'] =
-            seasonDetails['episodes']; // Add episodes to the season map.
+        season['episodes'] = seasonDetails['episodes']; // Add episodes to the season map.
       }
 
       return tvDetails; // Return the updated TV show details with episodes.
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
-      throw Exception(
-          'Unexpected error while fetching all episodes for TV show: $e');
+      throw Exception('Unexpected error while fetching all episodes for TV show: $e');
     }
   }
 
   /// Fetches movies matching the search [query].
-  /// Fetches movies matching the search [query], with improved query handling.
   static Future<List<dynamic>> fetchSearchMovies(String query) async {
     try {
       final cleanedQuery = _cleanQuery(query);
-      final response = await http.get(
-        Uri.parse('$baseUrl/search/movie?api_key=$apiKey&query=${Uri.encodeQueryComponent(cleanedQuery)}'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/search/movie?api_key=$apiKey&query=${Uri.encodeQueryComponent(cleanedQuery)}'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to search movies: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while searching movies: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -363,20 +425,22 @@ class TMDBApi {
     }
   }
 
-  /// Fetches movies, TV shows, and people matching the search [query], with improved query handling.
+  /// Fetches movies, TV shows, and people matching the search [query].
   static Future<List<dynamic>> fetchSearchMulti(String query) async {
     try {
       final cleanedQuery = _cleanQuery(query);
-      final response = await http.get(
-        Uri.parse('$baseUrl/search/multi?api_key=$apiKey&query=${Uri.encodeQueryComponent(cleanedQuery)}'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/search/multi?api_key=$apiKey&query=${Uri.encodeQueryComponent(cleanedQuery)}'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to search: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while searching multi: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -389,20 +453,21 @@ class TMDBApi {
     return query.toLowerCase().replaceAll(RegExp(r'[^a-z0-9\s]'), '').trim();
   }
 
-
   /// Fetches featured movies (popular movies).
   static Future<List<dynamic>> fetchFeaturedMovies() async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/movie/popular?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/movie/popular?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to load featured movies: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching featured movies: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -413,16 +478,18 @@ class TMDBApi {
   /// Fetches featured TV shows (popular TV shows).
   static Future<List<dynamic>> fetchFeaturedTVShows() async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/tv/popular?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/tv/popular?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['results'];
+        final List<dynamic> results = await compute(_extractResultsFromBody, response.body);
+        return results;
       } else {
         throw Exception(
             'Failed to load featured TV shows: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching featured TV shows: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -441,8 +508,7 @@ class TMDBApi {
       List<dynamic> combined = [...movies, ...tvShows];
 
       // Sort the combined list by popularity (descending).
-      combined.sort(
-          (a, b) => (b['popularity'] as num).compareTo(a['popularity'] as num));
+      combined.sort((a, b) => (b['popularity'] as num).compareTo(a['popularity'] as num));
 
       // Limit to 20 items.
       if (combined.length > 20) {
@@ -459,44 +525,56 @@ class TMDBApi {
   /// Fetches dynamic reels.
   static Future<List<dynamic>> fetchReels() async {
     try {
-      final trendingResponse = await http.get(
-        Uri.parse('$baseUrl/trending/movie/day?api_key=$apiKey'),
-      );
+      final trendingResponse = await http
+          .get(Uri.parse('$baseUrl/trending/movie/day?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (trendingResponse.statusCode != 200) {
         throw Exception(
             'Failed to load trending movies for reels: ${trendingResponse.statusCode} - ${trendingResponse.reasonPhrase}');
       }
-      final trendingData = jsonDecode(trendingResponse.body);
-      List trendingMovies = trendingData['results'];
+
+      final trendingData = await compute(_parseBodyToMap, trendingResponse.body);
+      final List trendingMovies = (trendingData['results'] is List) ? trendingData['results'] as List<dynamic> : <dynamic>[];
+
       List<dynamic> reels = [];
+
       for (var movie in trendingMovies) {
-        final int movieId = movie['id'];
-        final trailerResponse = await http.get(
-          Uri.parse('$baseUrl/movie/$movieId/videos?api_key=$apiKey'),
-        );
-        if (trailerResponse.statusCode == 200) {
-          final trailerData = jsonDecode(trailerResponse.body);
-          List trailers = trailerData['results'];
-          if (trailers.isNotEmpty) {
-            var trailer = trailers.firstWhere(
-              (t) => t['type'] == 'Trailer' || t['type'] == 'Teaser',
-              orElse: () => trailers[0],
-            );
-            reels.add({
-              'title': movie['title'] ?? movie['name'] ?? 'Reel',
-              'videoUrl': 'https://www.youtube.com/watch?v=${trailer['key']}',
-              'thumbnail_url': movie['backdrop_path'] != null
-                  ? 'https://image.tmdb.org/t/p/w500${movie['backdrop_path']}'
-                  : '',
-            });
+        try {
+          final int movieId = movie['id'] as int;
+          final trailerResponse = await http
+              .get(Uri.parse('$baseUrl/movie/$movieId/videos?api_key=$apiKey'))
+              .timeout(const Duration(seconds: 15));
+
+          if (trailerResponse.statusCode == 200) {
+            final trailerData = await compute(_parseBodyToMap, trailerResponse.body);
+            final List trailers = (trailerData['results'] is List) ? trailerData['results'] as List<dynamic> : <dynamic>[];
+            if (trailers.isNotEmpty) {
+              var trailer = trailers.firstWhere(
+                (t) => t['type'] == 'Trailer' || t['type'] == 'Teaser',
+                orElse: () => trailers[0],
+              );
+              reels.add({
+                'title': movie['title'] ?? movie['name'] ?? 'Reel',
+                'videoUrl': 'https://www.youtube.com/watch?v=${trailer['key']}',
+                'thumbnail_url': movie['backdrop_path'] != null
+                    ? 'https://image.tmdb.org/t/p/w500${movie['backdrop_path']}'
+                    : '',
+              });
+            }
+          } else {
+            // Log failure but continue with other movies
+            // use debugPrint instead of print for Flutter compatibility
+            debugPrint('Failed to load trailers for movie $movieId: ${trailerResponse.statusCode}');
           }
-        } else {
-          // Log failure but continue with other movies
-          print(
-              'Failed to load trailers for movie $movieId: ${trailerResponse.statusCode}');
+        } catch (e) {
+          debugPrint('Error fetching trailer for movie: $e');
+          // continue with other movies
         }
       }
+
       return reels;
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching reels: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {
@@ -507,12 +585,12 @@ class TMDBApi {
   /// Fetches dynamic stories.
   static Future<List<dynamic>> fetchStories() async {
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/trending/tv/day?api_key=$apiKey'),
-      );
+      final response = await http
+          .get(Uri.parse('$baseUrl/trending/tv/day?api_key=$apiKey'))
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        List results = data['results'];
+        final Map<String, dynamic> data = await compute(_parseBodyToMap, response.body);
+        List results = (data['results'] is List) ? data['results'] as List<dynamic> : <dynamic>[];
         return results.map((tv) {
           return {
             'name': tv['name'] ?? 'Story',
@@ -525,6 +603,8 @@ class TMDBApi {
         throw Exception(
             'Failed to load stories: ${response.statusCode} - ${response.reasonPhrase}');
       }
+    } on TimeoutException catch (e) {
+      throw Exception('Request timed out while fetching stories: $e');
     } on http.ClientException catch (e) {
       throw Exception('Network error: Failed to connect to TMDB API - $e');
     } catch (e) {

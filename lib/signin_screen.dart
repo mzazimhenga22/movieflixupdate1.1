@@ -1,7 +1,9 @@
+// signin_screen.dart
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:movie_app/database/auth_database.dart';
 import 'package:movie_app/user_manager.dart';
 import 'package:movie_app/session_manager.dart';
@@ -66,6 +68,91 @@ class SignInScreenState extends State<SignInScreen> {
     }
   }
 
+  Future<void> _forceRefreshAuthToken() async {
+    try {
+      final currentUser = _firebaseAuth.currentUser;
+      if (currentUser != null) {
+        debugPrint('[AUTH] Forcing ID token refresh for ${currentUser.uid}');
+        await currentUser.getIdToken(true);
+        debugPrint('[AUTH] ID token refreshed for ${currentUser.uid}');
+      } else {
+        debugPrint('[AUTH] No current user to refresh token for');
+      }
+    } catch (e) {
+      debugPrint('[AUTH] Failed to refresh ID token: $e');
+    }
+  }
+
+  Future<void> _saveFcmTokenForUser(String userId) async {
+    try {
+      await _forceRefreshAuthToken();
+
+      final currentUser = _firebaseAuth.currentUser;
+      if (currentUser == null || currentUser.uid != userId) {
+        debugPrint('[FCM] Auth user mismatch or not signed in. '
+            'currentUser=${currentUser?.uid}, expected=$userId. Skipping FCM save.');
+        return;
+      }
+
+      final fcm = FirebaseMessaging.instance;
+      final token = await fcm.getToken();
+      if (token != null && token.isNotEmpty) {
+        try {
+          await _firestore.collection('users').doc(userId).set({'fcmToken': token}, SetOptions(merge: true));
+          debugPrint('[FCM] saved token for $userId -> $token');
+        } catch (e) {
+          debugPrint('[FCM] failed to save token to Firestore for $userId: $e');
+        }
+      } else {
+        debugPrint('[FCM] getToken returned null or empty for $userId');
+      }
+
+      fcm.onTokenRefresh.listen((newToken) async {
+        try {
+          final current = _firebaseAuth.currentUser;
+          if (current == null) {
+            debugPrint('[FCM] token refreshed but no auth user present, skipping save');
+            return;
+          }
+          if (current.uid != userId) {
+            debugPrint('[FCM] token refreshed for another user (${current.uid}), skipping save for $userId');
+            return;
+          }
+          if (newToken != null && newToken.isNotEmpty) {
+            try {
+              await current.getIdToken(true);
+            } catch (e) {
+              debugPrint('[FCM] failed to refresh ID token before saving refreshed FCM token: $e');
+            }
+            await _firestore.collection('users').doc(userId).set({'fcmToken': newToken}, SetOptions(merge: true));
+            debugPrint('[FCM] refreshed token saved for $userId -> $newToken');
+          } else {
+            debugPrint('[FCM] onTokenRefresh provided null/empty token for $userId');
+          }
+        } catch (e) {
+          debugPrint('[FCM] failed saving refreshed token: $e');
+        }
+      });
+    } catch (e) {
+      debugPrint('[FCM] _saveFcmTokenForUser error: $e');
+    }
+  }
+
+  Future<void> _removeFcmTokenForUser(String userId) async {
+    try {
+      await _firestore.collection('users').doc(userId).update({'fcmToken': FieldValue.delete()});
+      debugPrint('[FCM] removed token field for $userId');
+      try {
+        await FirebaseMessaging.instance.deleteToken();
+        debugPrint('[FCM] local token deleted');
+      } catch (e) {
+        debugPrint('[FCM] failed to delete local token: $e');
+      }
+    } catch (e) {
+      debugPrint('[FCM] _removeFcmTokenForUser error: $e');
+    }
+  }
+
   Future<void> _signIn() async {
     if (!_formKey.currentState!.validate()) return;
     _formKey.currentState!.save();
@@ -81,6 +168,13 @@ class SignInScreenState extends State<SignInScreen> {
       if (!mounted) return;
 
       if (firebaseUser != null) {
+        try {
+          await firebaseUser.getIdToken(true);
+          debugPrint('[AUTH] forced ID token refresh immediately after sign-in for ${firebaseUser.uid}');
+        } catch (e) {
+          debugPrint('[AUTH] failed forcing ID token refresh after sign-in: $e');
+        }
+
         final userDoc = await _firestore.collection('users').doc(firebaseUser.uid).get();
         final userData = userDoc.exists
             ? {
@@ -123,6 +217,8 @@ class SignInScreenState extends State<SignInScreen> {
 
         await _saveUserOffline(firebaseUser.uid, userData);
         UserManager.instance.updateUser(userData);
+
+        await _saveFcmTokenForUser(firebaseUser.uid);
 
         final token = await firebaseUser.getIdToken();
         if (token != null) {
@@ -188,6 +284,13 @@ class SignInScreenState extends State<SignInScreen> {
       if (!mounted) return;
 
       if (firebaseUser != null) {
+        try {
+          await firebaseUser.getIdToken(true);
+          debugPrint('[AUTH] forced ID token refresh immediately after Google sign-in for ${firebaseUser.uid}');
+        } catch (e) {
+          debugPrint('[AUTH] failed forcing ID token refresh after Google sign-in: $e');
+        }
+
         final username = firebaseUser.displayName ?? 'GoogleUser';
         final userData = {
           'id': firebaseUser.uid,
@@ -226,6 +329,8 @@ class SignInScreenState extends State<SignInScreen> {
           'email': firebaseUser.email ?? '',
           'photoURL': firebaseUser.photoURL,
         });
+
+        await _saveFcmTokenForUser(firebaseUser.uid);
 
         final idToken = await firebaseUser.getIdToken();
         if (idToken != null) {
@@ -267,6 +372,8 @@ class SignInScreenState extends State<SignInScreen> {
       if (user != null) {
         await _firestore.collection('sessions').doc(user.uid).delete();
         debugPrint('✅ Firestore session deleted for user: ${user.uid}');
+
+        await _removeFcmTokenForUser(user.uid);
 
         final prefs = await SharedPreferences.getInstance();
         await prefs.remove('session_user_id');
@@ -340,7 +447,7 @@ class SignInScreenState extends State<SignInScreen> {
               gradient: RadialGradient(
                 center: const Alignment(-0.1, -0.4),
                 radius: 1.2,
-                colors: [Colors.blueAccent.withValues(alpha: 0.4), Colors.black],
+                colors: [Colors.blueAccent.withOpacity(0.4), Colors.black],
                 stops: const [0.0, 0.6],
               ),
             ),
@@ -357,15 +464,15 @@ class SignInScreenState extends State<SignInScreen> {
                           filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
                           child: Container(
                             decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.7),
+                              color: Colors.black.withOpacity(0.7),
                               borderRadius: BorderRadius.circular(16),
                               border: Border.all(
-                                color: Colors.blueAccent.withValues(alpha: 0.3),
+                                color: Colors.blueAccent.withOpacity(0.3),
                                 width: 1.5,
                               ),
                               boxShadow: [
                                 BoxShadow(
-                                  color: Colors.blueAccent.withValues(alpha: 0.4),
+                                  color: Colors.blueAccent.withOpacity(0.4),
                                   blurRadius: 10,
                                   spreadRadius: 1,
                                   offset: const Offset(0, 4),
@@ -393,9 +500,9 @@ class SignInScreenState extends State<SignInScreen> {
                                       style: const TextStyle(color: Colors.white),
                                       decoration: InputDecoration(
                                         labelText: "Email",
-                                        labelStyle: TextStyle(color: Colors.blueAccent.withValues(alpha: 0.7)),
+                                        labelStyle: TextStyle(color: Colors.blueAccent.withOpacity(0.7)),
                                         filled: true,
-                                        fillColor: Colors.blueAccent.withValues(alpha: 0.15),
+                                        fillColor: Colors.blueAccent.withOpacity(0.15),
                                         border: OutlineInputBorder(
                                           borderRadius: BorderRadius.circular(12),
                                           borderSide: BorderSide.none,
@@ -403,7 +510,7 @@ class SignInScreenState extends State<SignInScreen> {
                                         enabledBorder: OutlineInputBorder(
                                           borderRadius: BorderRadius.circular(12),
                                           borderSide: BorderSide(
-                                            color: Colors.blueAccent.withValues(alpha: 0.3),
+                                            color: Colors.blueAccent.withOpacity(0.3),
                                           ),
                                         ),
                                         focusedBorder: OutlineInputBorder(
@@ -431,9 +538,9 @@ class SignInScreenState extends State<SignInScreen> {
                                       style: const TextStyle(color: Colors.white),
                                       decoration: InputDecoration(
                                         labelText: "Password",
-                                        labelStyle: TextStyle(color: Colors.blueAccent.withValues(alpha: 0.7)),
+                                        labelStyle: TextStyle(color: Colors.blueAccent.withOpacity(0.7)),
                                         filled: true,
-                                        fillColor: Colors.blueAccent.withValues(alpha: 0.15),
+                                        fillColor: Colors.blueAccent.withOpacity(0.15),
                                         border: OutlineInputBorder(
                                           borderRadius: BorderRadius.circular(12),
                                           borderSide: BorderSide.none,
@@ -441,7 +548,7 @@ class SignInScreenState extends State<SignInScreen> {
                                         enabledBorder: OutlineInputBorder(
                                           borderRadius: BorderRadius.circular(12),
                                           borderSide: BorderSide(
-                                            color: Colors.blueAccent.withValues(alpha: 0.3),
+                                            color: Colors.blueAccent.withOpacity(0.3),
                                           ),
                                         ),
                                         focusedBorder: OutlineInputBorder(
@@ -494,7 +601,7 @@ class SignInScreenState extends State<SignInScreen> {
                                         style: TextStyle(fontSize: 16, color: Colors.black87),
                                       ),
                                       style: ElevatedButton.styleFrom(
-                                        backgroundColor: Colors.white.withValues(alpha: 0.9),
+                                        backgroundColor: Colors.white.withOpacity(0.9),
                                         padding: const EdgeInsets.symmetric(
                                           horizontal: 24,
                                           vertical: 14,
@@ -512,7 +619,7 @@ class SignInScreenState extends State<SignInScreen> {
                                       children: [
                                         Text(
                                           "Don't have an account? ",
-                                          style: TextStyle(color: Colors.blueAccent.withValues(alpha: 0.7)),
+                                          style: TextStyle(color: Colors.blueAccent.withOpacity(0.7)),
                                         ),
                                         GestureDetector(
                                           onTap: _goToSignUp,

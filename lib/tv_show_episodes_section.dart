@@ -1,913 +1,191 @@
-import 'dart:convert';
-import 'dart:io';
+// tvshow_episodes_section.dart
 import 'dart:async';
+import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-// hide DownloadProgress from cached_network_image to avoid ambiguous_import
 import 'package:cached_network_image/cached_network_image.dart' hide DownloadProgress;
 import 'package:shimmer/shimmer.dart';
-import 'package:movie_app/main_videoplayer.dart';
-import 'package:movie_app/components/trailer_section.dart';
-import 'package:movie_app/components/similar_movies_section.dart';
-import 'package:movie_app/mylist_screen.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 import 'package:movie_app/tmdb_api.dart' as tmdb;
 import 'package:movie_app/streaming_service.dart';
-import 'package:visibility_detector/visibility_detector.dart';
+import 'package:movie_app/main_videoplayer.dart';
 import 'package:movie_app/settings_provider.dart';
+import 'package:movie_app/movie_detail_screen.dart'; // find ancestor for downloads and centralized modal helpers
 
-class MovieDetailScreen extends StatefulWidget {
-  final Map<String, dynamic> movie;
+/// Optimized TVShowEpisodesSection:
+/// - Keeps episodes state alive (AutomaticKeepAliveClientMixin)
+/// - Extracts episode row to a lightweight StatelessWidget
+/// - Uses listen:false for Provider reads to avoid unnecessary rebuilds
+/// - Minimizes widget allocations in build path
+/// - Uses const constructors where possible
 
-  const MovieDetailScreen({super.key, required this.movie});
+// ----------------------------- glass helper widgets -----------------------------
+class GlassContainer extends StatelessWidget {
+  final Widget child;
+  final EdgeInsets padding;
+  final BorderRadius borderRadius;
 
-  @override
-  MovieDetailScreenState createState() => MovieDetailScreenState();
-}
-
-class MovieDetailScreenState extends State<MovieDetailScreen> {
-  Future<Map<String, dynamic>>? _tvDetailsFuture;
-  String _selectedResolution = "720p";
-  bool _enableSubtitles = false;
-  late final bool _isTvShow;
-  List<Map<String, dynamic>> _similarMovies = [];
-  int? _releaseYear;
-
-  // Download notifier & cancel token for progress dialog
-  final ValueNotifier<DownloadProgress?> _downloadProgressNotifier = ValueNotifier(null);
-
-  @override
-  void initState() {
-    super.initState();
-    _isTvShow = (widget.movie['media_type']?.toString().toLowerCase() == 'tv') ||
-        (widget.movie['seasons'] != null && (widget.movie['seasons'] as List).isNotEmpty);
-    if (_isTvShow) {
-      _tvDetailsFuture = tmdb.TMDBApi.fetchTVShowDetails(widget.movie['id']);
-    }
-    _fetchSimilarMovies();
-    _fetchReleaseYear();
-  }
+  const GlassContainer({
+    required this.child,
+    this.padding = const EdgeInsets.all(12),
+    this.borderRadius = const BorderRadius.all(Radius.circular(14)),
+    super.key,
+  });
 
   @override
-  void dispose() {
-    _downloadProgressNotifier.dispose();
-    super.dispose();
-  }
-
-  Future<void> _fetchReleaseYear() async {
-    try {
-      final releaseDate = _isTvShow
-          ? widget.movie['first_air_date'] as String? ?? '1970-01-01'
-          : widget.movie['release_date'] as String? ?? '1970-01-01';
-      final year = int.parse(releaseDate.split('-')[0]);
-      if (mounted) setState(() => _releaseYear = year);
-    } catch (e) {
-      debugPrint('Failed to parse release year: $e');
-      if (mounted) setState(() => _releaseYear = 1970);
-    }
-  }
-
-  Future<void> _fetchSimilarMovies() async {
-    try {
-      final similar = await tmdb.TMDBApi.fetchSimilarMovies(widget.movie['id']);
-      if (mounted) {
-        setState(() => _similarMovies = similar.cast<Map<String, dynamic>>());
-      }
-    } catch (e) {
-      debugPrint('Failed to fetch similar movies: $e');
-    }
-  }
-
-  // Use SharePlus.instance.share to satisfy deprecation advice
-Future<void> _shareMovie(Map<String, dynamic> details) async {
-  const defaultSubject = 'Recommendation';
-  final message = "Check out ${details['title'] ?? details['name']}!\n\n${details['synopsis'] ?? details['overview'] ?? ''}";
-  final subject = details['title'] ?? details['name'] ?? defaultSubject;
-
-  try {
-    // Use ShareParams (the modern share_plus API)
-    final params = ShareParams(text: message, subject: subject);
-    final result = await SharePlus.instance.share(params);
-
-    // Optional: inspect result if you want
-    // debugPrint('Share result: ${result.status}');
-  } catch (e) {
-    debugPrint('Share failed: $e');
-  }
-}
-
-
-  Future<void> _addToMyList(Map<String, dynamic> details) async {
-    final prefs = await SharedPreferences.getInstance();
-    final myList = prefs.getStringList('myList') ?? [];
-    final movieId = details['id'].toString();
-
-    if (!myList.any((jsonStr) => (json.decode(jsonStr))['id'].toString() == movieId)) {
-      myList.add(json.encode(details));
-      await prefs.setStringList('myList', myList);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${details['title'] ?? details['name']} added to My List.')),
-      );
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MyListScreen()));
-    } else {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${details['title'] ?? details['name']} is already in My List.')),
-      );
-    }
-  }
-
-  void _showDownloadOptionsModal(Map<String, dynamic> details) {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (context) {
-        String downloadResolution = _selectedResolution;
-        bool downloadSubtitles = _enableSubtitles;
-        return _DownloadOptionsModal(
-          initialResolution: downloadResolution,
-          initialSubtitles: downloadSubtitles,
-          onConfirm: (resolution, subtitles) {
-            // If details represent a show without specific episode info, prompt user to pick an episode
-            if (_isTvShow && (details['season'] == null || details['episode'] == null)) {
-              Navigator.pop(context);
-              ScaffoldMessenger.of(this.context).showSnackBar(
-                const SnackBar(content: Text('Pick an episode from the Episodes list to download.')),
-              );
-              return;
-            }
-            _downloadMovie(details, resolution: resolution, subtitles: subtitles);
-          },
-        );
-      },
-    );
-  }
-
-  Future<bool> _requestStoragePermission() async {
-    if (Platform.isAndroid) {
-      final manageStatus = await Permission.manageExternalStorage.status;
-      if (manageStatus.isGranted) {
-        return true;
-      }
-
-      final result = await Permission.manageExternalStorage.request();
-      if (result.isGranted) {
-        return true;
-      }
-
-      if (result.isPermanentlyDenied) {
-        await showDialog(
-          context: context,
-          builder: (_) => AlertDialog(
-            backgroundColor: Colors.black87,
-            title: const Text("Permission Required", style: TextStyle(color: Colors.white)),
-            content: const Text("Please grant “All files access” in Settings\nso we can download your movies.", style: TextStyle(color: Colors.white70)),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  openAppSettings();
-                  Navigator.pop(context);
-                },
-                child: Text("Open Settings", style: TextStyle(color: Provider.of<SettingsProvider>(context, listen: false).accentColor)),
+  Widget build(BuildContext context) {
+    // keep this widget cheap — no Provider here (read from parent if needed)
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: ClipRRect(
+        borderRadius: borderRadius,
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: Container(
+            padding: padding,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Colors.white.withOpacity(0.04), Colors.white.withOpacity(0.02)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
-            ],
-          ),
-        );
-      }
-      return false;
-    } else {
-      final status = await Permission.storage.status;
-      if (status.isGranted) return true;
-      final result = await Permission.storage.request();
-      return result.isGranted;
-    }
-  }
-
-  /// PUBLIC method that can be called by nested widgets (episode section) to download an episode
-  Future<void> downloadEpisodeFromChild({
-    required int season,
-    required int episode,
-    required String showTitle,
-    required int showId,
-    required String resolution,
-    required bool subtitles,
-  }) async {
-    final details = <String, dynamic>{'id': showId, 'title': showTitle, 'season': season, 'episode': episode};
-    await _downloadMovie(details, resolution: resolution, subtitles: subtitles);
-  }
-
-  // Core download function for movies and episodes (works with StreamingService + OfflineDownloader)
-  Future<void> _downloadMovie(Map<String, dynamic> details, {required String resolution, required bool subtitles}) async {
-    final tmdbId = details['id']?.toString() ?? '';
-    final title = details['title']?.toString() ?? details['name']?.toString() ?? 'Untitled';
-    final seasonNumber = details['season'] != null ? (details['season'] as num).toInt() : null;
-    final episodeNumber = details['episode'] != null ? (details['episode'] as num).toInt() : null;
-    final idSuffix = (seasonNumber != null && episodeNumber != null) ? '_s${seasonNumber}_e${episodeNumber}' : '';
-
-    Map<String, String> streamingInfo;
-    try {
-      streamingInfo = await StreamingService.getStreamingLink(
-        tmdbId: tmdbId,
-        title: title,
-        releaseYear: _releaseYear ?? 1970,
-        resolution: resolution,
-        enableSubtitles: subtitles,
-        season: seasonNumber,
-        episode: episodeNumber,
-        forDownload: true,
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Unable to start download. Please try again later.")),
-      );
-      return;
-    }
-
-    final downloadUrl = streamingInfo['url'];
-    final urlType = streamingInfo['type'] ?? 'unknown';
-
-    if (downloadUrl == null || downloadUrl.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Download unavailable at this time.")));
-      return;
-    }
-
-    if (!await _requestStoragePermission()) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Storage permission is required to download.")));
-      return;
-    }
-
-    final downloadId = 'movie_${tmdbId}${idSuffix}'; // unique folder id
-    final cancelToken = CancelToken();
-    bool finished = false;
-    Map<String, String>? result;
-
-    // Show progress dialog and start download
-    _showDownloadProgressDialog(cancelToken);
-
-    try {
-      // call your OfflineDownloader (in streaming_service.dart)
-      result = await OfflineDownloader.downloadAnyStream(
-        streamInfo: streamingInfo,
-        id: downloadId,
-        preferredResolution: resolution,
-        mergeSegments: true,
-        concurrency: 6,
-        onProgress: (p) {
-          // publish progress to the notifier so dialog updates
-          _downloadProgressNotifier.value = p;
-        },
-        cancelToken: cancelToken,
-      );
-      finished = true;
-    } catch (e) {
-      if (e.toString().toLowerCase().contains('cancel')) {
-        if (mounted) {
-          Navigator.of(context, rootNavigator: true).pop(); // close dialog if open
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download cancelled.')));
-        }
-        return;
-      }
-      if (mounted) {
-        Navigator.of(context, rootNavigator: true).pop(); // close dialog if open
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Download failed: $e')));
-      }
-      return;
-    } finally {
-      // Ensure progress dialog is closed if still open
-      if (mounted) {
-        try {
-          Navigator.of(context, rootNavigator: true).pop();
-        } catch (_) {}
-      }
-    }
-
-    if (!finished || result == null) return;
-
-    // Make a non-nullable local copy
-    final res = result;
-
-    // Determine playable path (merged ts > file (mp4) > playlist)
-    final playablePath = res['merged'] ?? res['file'] ?? res['playlist'] ?? '';
-
-    if (playablePath.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download finished but no playable file found.')));
-      }
-      return;
-    }
-
-    // Save download metadata to SharedPreferences
-    final record = {
-      'id': downloadId,
-      'tmdbId': tmdbId,
-      'title': title,
-      'path': playablePath,
-      'type': res['type'] ?? urlType,
-      'resolution': resolution,
-      'subtitle': res['subtitle'] ?? streamingInfo['subtitleUrl'] ?? '',
-      'timestamp': DateTime.now().toIso8601String(),
-    };
-    await _saveDownloadRecord(record);
-
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Download finished: ${details['title'] ?? details['name']}'),
-        action: SnackBarAction(
-          label: 'Play',
-          onPressed: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => MainVideoPlayer(
-                  videoPath: playablePath,
-                  title: title,
-                  releaseYear: _releaseYear ?? 1970,
-                  isFullSeason: seasonNumber != null && episodeNumber != null,
-                  episodeFiles: const [],
-                  similarMovies: _similarMovies,
-                  subtitleUrl: res['subtitle'] ?? streamingInfo['subtitleUrl'],
-                  isHls: (res['type'] ?? urlType) == 'm3u8',
-                ),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
-  // ---------- DOWNLOAD HELPERS ----------
-  // Shows a cancellable progress dialog that listens to _downloadProgressNotifier.
-  void _showDownloadProgressDialog(CancelToken cancelToken) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        return AlertDialog(
-          backgroundColor: Colors.black87,
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ValueListenableBuilder<DownloadProgress?>(
-              valueListenable: _downloadProgressNotifier,
-              builder: (context, progress, _) {
-                final downloaded = progress?.downloadedSegments ?? 0;
-                final total = progress?.totalSegments ?? 0;
-                final bytes = progress?.bytesDownloaded ?? 0;
-                final percent = (total > 0) ? (downloaded / total) : null;
-                final percentStr = percent != null ? (percent * 100).toStringAsFixed(1) + '%' : _bytesToReadable(bytes);
-
-                return Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('Downloading...', style: TextStyle(color: Colors.white)),
-                    const SizedBox(height: 12),
-                    LinearProgressIndicator(value: percent),
-                    const SizedBox(height: 8),
-                    Text(
-                      total > 0 ? '$downloaded / $total segments ($percentStr)' : percentStr,
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        TextButton(
-                          onPressed: () {
-                            // Cancel download
-                            cancelToken.cancel();
-                            Navigator.of(context, rootNavigator: true).pop();
-                          },
-                          child: const Text('Cancel', style: TextStyle(color: Colors.red)),
-                        )
-                      ],
-                    )
-                  ],
-                );
-              },
+              borderRadius: borderRadius,
+              border: Border.all(color: Colors.white.withOpacity(0.06)),
+              color: Colors.black.withOpacity(0.04),
             ),
-          ),
-        );
-      },
-    );
-  }
-
-  /// Save simple download record to SharedPreferences under key 'downloads'
-  Future<void> _saveDownloadRecord(Map<String, dynamic> record) async {
-    final prefs = await SharedPreferences.getInstance();
-    final list = prefs.getStringList('downloads') ?? [];
-    list.add(json.encode(record));
-    await prefs.setStringList('downloads', list);
-  }
-
-  // utility to show bytes as a readable string
-  String _bytesToReadable(int bytes) {
-    if (bytes <= 0) return '0 B';
-    const suffixes = ['B', 'KB', 'MB', 'GB'];
-    var i = 0;
-    double size = bytes.toDouble();
-    while (size >= 1024 && i < suffixes.length - 1) {
-      size /= 1024;
-      i++;
-    }
-    return '${size.toStringAsFixed(2)} ${suffixes[i]}';
-  }
-  // ---------- END DOWNLOAD HELPERS ----------
-
-  void _rateMovie(Map<String, dynamic> details) {
-    double rating = 3.0;
-    showDialog(
-      context: context,
-      builder: (context) {
-        return _RatingDialog(
-          title: details['title'] ?? details['name'] ?? 'Rate Item',
-          onRatingChanged: (value) => rating = value,
-          onSubmit: () {
-            if (!mounted) return;
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Rating submitted: $rating")));
-          },
-        );
-      },
-    );
-  }
-
-  void _showPlayOptionsModal(Map<String, dynamic> details, bool isTvShow) {
-    if (!mounted) return;
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.black87,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (modalContext) {
-        return _PlayOptionsModal(
-          initialResolution: _selectedResolution,
-          initialSubtitles: _enableSubtitles,
-          onConfirm: (resolution, subtitles) async {
-            setState(() {
-              _selectedResolution = resolution;
-              _enableSubtitles = subtitles;
-            });
-            await _launchStreamingPlayer(details, isTvShow, resolution, subtitles);
-          },
-        );
-      },
-    );
-  }
-
-  Future<void> _launchStreamingPlayer(Map<String, dynamic> details, bool isTvShow, String resolution, bool subtitles) async {
-    if (!mounted) return;
-    _showLoadingDialog();
-
-    Map<String, String> streamingInfo = {};
-    List<String> episodeFiles = [];
-    int initialSeasonNumber = 1;
-    int initialEpisodeNumber = 1;
-
-    try {
-      if (isTvShow) {
-        final seasons = details['seasons'] as List<dynamic>?;
-        if (seasons != null && seasons.isNotEmpty) {
-          final selectedSeason = seasons.firstWhere(
-            (season) => season['episodes'] != null && (season['episodes'] as List).isNotEmpty,
-            orElse: () => throw Exception('No episodes available'),
-          );
-          final episodes = selectedSeason['episodes'] as List<dynamic>;
-          final firstEpisode = episodes[0];
-          initialSeasonNumber = selectedSeason['season_number']?.toInt() ?? 1;
-          initialEpisodeNumber = firstEpisode['episode_number']?.toInt() ?? 1;
-
-          streamingInfo = await StreamingService.getStreamingLink(
-            tmdbId: details['id']?.toString() ?? 'Unknown Show',
-            title: details['name']?.toString() ?? details['title']?.toString() ?? 'Unknown Show',
-            releaseYear: _releaseYear ?? 1970,
-            season: initialSeasonNumber,
-            episode: initialEpisodeNumber,
-            resolution: resolution,
-            enableSubtitles: subtitles,
-          );
-          episodeFiles = episodes.map<String>((e) => '').toList(); // Kept for compatibility
-        } else {
-          throw Exception('No seasons available');
-        }
-      } else {
-        streamingInfo = await StreamingService.getStreamingLink(
-          tmdbId: details['id']?.toString() ?? 'Unknown Movie',
-          title: details['title']?.toString() ?? details['name']?.toString() ?? 'Unknown Movie',
-          releaseYear: _releaseYear ?? 1970,
-          resolution: resolution,
-          enableSubtitles: subtitles,
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Unable to start streaming. Please try again later.")));
-      }
-      return;
-    }
-
-    if (!mounted) {
-      Navigator.pop(context);
-      return;
-    }
-
-    final streamUrl = streamingInfo['url'] ?? '';
-    final urlType = streamingInfo['type'] ?? 'unknown';
-    final subtitleUrl = streamingInfo['subtitleUrl'];
-
-    if (streamUrl.isEmpty) {
-      Navigator.pop(context);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Streaming unavailable at this time.")));
-      }
-      return;
-    }
-
-    Navigator.pop(context);
-    if (mounted) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => MainVideoPlayer(
-            videoPath: streamUrl,
-            title: streamingInfo['title'] ?? details['title'] ?? details['name'] ?? 'Untitled',
-            releaseYear: _releaseYear ?? 1970,
-            isFullSeason: isTvShow,
-            episodeFiles: episodeFiles,
-            similarMovies: _similarMovies,
-            subtitleUrl: subtitleUrl,
-            isHls: urlType == 'm3u8',
+            child: child,
           ),
         ),
-      );
-    }
-  }
-
-  void _showLoadingDialog() {
-    if (!mounted) return;
-    showDialog(context: context, barrierDismissible: false, builder: (context) => const LoadingDialog());
-  }
-
-  // Smaller widget components for _buildDetailsContent
-  Widget _TitleSection(Map<String, dynamic> details, bool isTvShow) {
-    final title = isTvShow ? (details['name'] ?? details['title'] ?? 'No Title') : (details['title'] ?? details['name'] ?? 'No Title');
-    return RepaintBoundary(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Text(title, style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white)),
       ),
     );
   }
+}
 
-  Widget _ReleaseDateSection(Map<String, dynamic> details, bool isTvShow) {
-    final dateLabel = isTvShow ? 'First Air Date' : 'Release Date';
-    final releaseDate = isTvShow ? (details['first_air_date'] ?? 'Unknown') : (details['release_date'] ?? 'Unknown');
-    return RepaintBoundary(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Text('$dateLabel: $releaseDate', style: const TextStyle(fontSize: 16, color: Colors.white70)),
+class EpisodeGlassCard extends StatelessWidget {
+  final Widget child;
+  final EdgeInsets padding;
+
+  const EpisodeGlassCard({required this.child, this.padding = const EdgeInsets.symmetric(vertical: 8, horizontal: 12), super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: Container(
+            padding: padding,
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.03),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white.withOpacity(0.05)),
+              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 6, offset: Offset(0, 2))],
+            ),
+            child: child,
+          ),
+        ),
       ),
     );
   }
+}
 
-  Widget _TagsSection(Map<String, dynamic> details, bool isLoading) {
-    if (isLoading) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        child: Wrap(
-          spacing: 8,
-          children: List.generate(
-            3,
-            (index) => Shimmer.fromColors(
-              baseColor: Colors.grey[800]!,
-              highlightColor: Colors.grey[600]!,
+// ----------------------------- Episode Row (stateless) -----------------------------
+// Keeps a minimal build cost per item.
+class _EpisodeRow extends StatelessWidget {
+  final Map<String, dynamic> episode;
+  final int seasonNumber;
+  final String tvShowName;
+  final int tvId;
+  final int? releaseYear;
+  final VoidCallback onPlayPressed;
+  final VoidCallback onDownloadPressed;
+
+  const _EpisodeRow({
+    required this.episode,
+    required this.seasonNumber,
+    required this.tvShowName,
+    required this.tvId,
+    required this.releaseYear,
+    required this.onPlayPressed,
+    required this.onDownloadPressed,
+    super.key,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final epNum = (episode['episode_number'] as num?)?.toInt() ?? 0;
+    final epName = episode['name'] as String? ?? 'Episode $epNum';
+    final epOverview = episode['overview'] as String? ?? '';
+    final stillPath = episode['still_path'] as String?;
+    final runtime = (episode['runtime'] as int?) ?? 0;
+
+    return EpisodeGlassCard(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SizedBox(
+            width: 140,
+            child: AspectRatio(
+              aspectRatio: 16 / 9,
               child: Container(
-                width: 80,
-                height: 32,
-                decoration: BoxDecoration(color: Colors.grey[800], borderRadius: BorderRadius.circular(16)),
-              ),
-            ),
-          ),
-        ),
-      );
-    } else if (details['tags'] != null && (details['tags'] as List).isNotEmpty) {
-      return RepaintBoundary(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          child: Wrap(
-            spacing: 8,
-            children: (details['tags'] as List)
-                .map((tag) => Chip(label: Text(tag.toString(), style: const TextStyle(color: Colors.white)), backgroundColor: Colors.grey[800]))
-                .toList(),
-          ),
-        ),
-      );
-    }
-    return const SizedBox.shrink();
-  }
-
-  Widget _RatingSection(Map<String, dynamic> details, bool isLoading) {
-    if (isLoading) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        child: Shimmer.fromColors(baseColor: Colors.grey[800]!, highlightColor: Colors.grey[600]!, child: Container(width: 120, height: 20, color: Colors.grey[800])),
-      );
-    } else if (details['rating'] != null && details['rating'].toString().isNotEmpty) {
-      return RepaintBoundary(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          child: Text('Rating: ${details['rating']}/10', style: const TextStyle(fontSize: 16, color: Colors.white70)),
-        ),
-      );
-    }
-    return const SizedBox.shrink();
-  }
-
-  Widget _SynopsisSection(Map<String, dynamic> details, bool isLoading) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: isLoading
-          ? Shimmer.fromColors(
-              baseColor: Colors.grey[800]!,
-              highlightColor: Colors.grey[600]!,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: List.generate(
-                  3,
-                  (index) => Container(
-                    width: double.infinity,
-                    height: 16,
-                    color: Colors.grey[800],
-                    margin: const EdgeInsets.only(bottom: 8),
-                  ),
-                ),
-              ),
-            )
-          : Text(details['synopsis'] ?? details['overview'] ?? 'No overview available.', style: const TextStyle(fontSize: 16, color: Colors.white)),
-    );
-  }
-
-  Widget _CastSection(Map<String, dynamic> details, bool isLoading) {
-    if (isLoading) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Shimmer.fromColors(baseColor: Colors.grey[800]!, highlightColor: Colors.grey[600]!, child: Container(width: 100, height: 24, color: Colors.grey[800])),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: List.generate(
-                4,
-                (index) => Shimmer.fromColors(
-                  baseColor: Colors.grey[800]!,
-                  highlightColor: Colors.grey[600]!,
-                  child: Container(width: 100, height: 32, decoration: BoxDecoration(color: Colors.grey[800], borderRadius: BorderRadius.circular(16))),
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-    } else if (details['cast'] != null && (details['cast'] as List).isNotEmpty) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const _SectionTitle(title: 'Cast'),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: (details['cast'] as List)
-                  .asMap()
-                  .entries
-                  .map((entry) => Chip(
-                        label: Text(entry.value.toString(), style: const TextStyle(color: Colors.white)),
-                        backgroundColor: entry.key % 3 == 0 ? Colors.red[800] : entry.key % 3 == 1 ? Colors.blue[800] : Colors.green[800],
-                      ))
-                  .toList(),
-            ),
-          ],
-        ),
-      );
-    }
-    return const SizedBox.shrink();
-  }
-
-  Widget _AwardsSection(Map<String, dynamic> details, bool isLoading) {
-    if (isLoading) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Shimmer.fromColors(baseColor: Colors.grey[800]!, highlightColor: Colors.grey[600]!, child: Container(width: 100, height: 24, color: Colors.grey[800])),
-            const SizedBox(height: 8),
-            Shimmer.fromColors(baseColor: Colors.grey[800]!, highlightColor: Colors.grey[600]!, child: Container(width: double.infinity, height: 16, color: Colors.grey[800])),
-          ],
-        ),
-      );
-    } else if (details['cinemeta'] != null && details['cinemeta']['awards'] != null && details['cinemeta']['awards'].toString().isNotEmpty) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const _SectionTitle(title: 'Awards'),
-            const SizedBox(height: 8),
-            Text(
-              details['cinemeta']['awards'].length > 50 ? '${details['cinemeta']['awards'].substring(0, 50)}...' : details['cinemeta']['awards'],
-              style: const TextStyle(fontSize: 16, color: Colors.white70),
-            ),
-          ],
-        ),
-      );
-    }
-    return const SizedBox.shrink();
-  }
-
-  List<Widget> _buildDetailsContent(Map<String, dynamic> details, bool isTvShow, bool isLoading) {
-    return [
-      _TitleSection(details, isTvShow),
-      _ReleaseDateSection(details, isTvShow),
-      _TagsSection(details, isLoading),
-      _RatingSection(details, isLoading),
-      _SynopsisSection(details, isLoading),
-      _CastSection(details, isLoading),
-      _AwardsSection(details, isLoading),
-      if (isTvShow)
-        TVShowEpisodesSection(
-          key: ValueKey('tv_${details['id']}'),
-          tvId: details['id'],
-          seasons: details['seasons'] ?? [],
-          tvShowName: details['name']?.toString() ?? details['title']?.toString() ?? 'Unknown Show',
-        ),
-      const _SectionTitle(title: 'Trailers'),
-      VisibilityDetector(key: ValueKey('trailers_${details['id']}'), onVisibilityChanged: (info) {}, child: TrailerSection(movieId: details['id'])),
-      _SectionTitle(title: 'Related ${isTvShow ? 'TV Shows' : 'Movies'}'),
-      VisibilityDetector(key: ValueKey('similar_${details['id']}'), onVisibilityChanged: (info) {}, child: SimilarMoviesSection(movieId: details['id'])),
-      const SizedBox(height: 32),
-    ];
-  }
-
-  Widget _buildDetailScreen(Map<String, dynamic> details) {
-    final posterUrl = 'https://image.tmdb.org/t/p/w500${details['poster'] ?? details['poster_path'] ?? ''}';
-    final settings = Provider.of<SettingsProvider>(context);
-
-    return Scaffold(
-      body: Stack(
-        children: [
-          const _BackgroundDecoration(),
-          CustomScrollView(
-            slivers: [
-              SliverAppBar(
-                expandedHeight: 400,
-                pinned: true,
-                backgroundColor: Colors.black87,
-                title: Text(details['title'] ?? details['name'] ?? ''),
-                flexibleSpace: FlexibleSpaceBar(
-                  background: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      CachedNetworkImage(
-                        imageUrl: posterUrl,
+                decoration: BoxDecoration(borderRadius: BorderRadius.circular(4), color: Colors.grey[800]),
+                clipBehavior: Clip.hardEdge,
+                child: (stillPath != null && stillPath.toString().isNotEmpty)
+                    ? CachedNetworkImage(
+                        imageUrl: 'https://image.tmdb.org/t/p/w300$stillPath',
                         fit: BoxFit.cover,
-                        placeholder: (context, url) => Shimmer.fromColors(
-                          baseColor: Colors.grey[800]!,
-                          highlightColor: Colors.grey[600]!,
-                          child: Container(color: Colors.grey[800]),
-                        ),
-                        errorWidget: (context, url, error) => Container(color: Colors.grey),
-                      ),
-                      Container(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [
-                              Colors.black.withAlpha(230),
-                              Colors.black.withAlpha(178),
-                              Colors.transparent
-                            ],
-                            begin: Alignment.bottomCenter,
-                            end: Alignment.topCenter,
-                            stops: const [0.0, 0.3, 1.0],
-                          ),
-                        ),
-                      ),
-                      Center(
-                        child: _PlayButton(
-                          onPressed: () => _showPlayOptionsModal(details, _isTvShow),
-                          accentColor: settings.accentColor,
-                        ),
-                      ),
-                      _GlassActionBar(
-                        onShare: () => _shareMovie(details),
-                        onAddToList: () => _addToMyList(details),
-                        onDownload: () => _showDownloadOptionsModal(details),
-                        onRate: () => _rateMovie(details),
-                        accentColor: settings.accentColor,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              SliverList(
-                delegate: SliverChildBuilderDelegate(
-                  (context, index) {
-                    final content = _buildDetailsContent(details, _isTvShow, false);
-                    return RepaintBoundary(child: content[index]);
-                  },
-                  childCount: _buildDetailsContent(details, _isTvShow, false).length,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Consumer<SettingsProvider>(
-      builder: (context, settings, child) {
-        if (_isTvShow && _tvDetailsFuture != null) {
-          return FutureBuilder<Map<String, dynamic>>(
-            future: _tvDetailsFuture,
-            builder: (context, snapshot) {
-              final details = snapshot.connectionState == ConnectionState.waiting ? widget.movie : {...widget.movie, ...snapshot.data!};
-              if (snapshot.hasError) {
-                return const Scaffold(
-                  backgroundColor: Colors.black,
-                  body: Center(
-                    child: Text('Unable to load details. Please try again later.', style: TextStyle(color: Colors.white)),
-                  ),
-                );
-              }
-              return _buildDetailScreen(details);
-            },
-          );
-        }
-        return _buildDetailScreen(widget.movie);
-      },
-    );
-  }
-}
-
-class _SectionTitle extends StatelessWidget {
-  final String title;
-
-  const _SectionTitle({required this.title});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
-    );
-  }
-}
-
-class _BackgroundDecoration extends StatelessWidget {
-  const _BackgroundDecoration();
-
-  @override
-  Widget build(context) {
-    final settings = Provider.of<SettingsProvider>(context);
-    return Container(
-      decoration: const BoxDecoration(color: Color(0xff0d121d)),
-      child: Stack(
-        children: [
-          Positioned.fill(
-            child: Container(
-              decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  center: const Alignment(-0.06, -0.34),
-                  radius: 0.8,
-                  colors: [settings.accentColor.withOpacity(0.4), Colors.transparent],
-                  stops: const [0.0, 0.59],
-                ),
+                        errorWidget: (c, u, e) => Container(color: Colors.grey),
+                      )
+                    : const Icon(Icons.tv, color: Colors.white70),
               ),
             ),
           ),
-          Positioned.fill(
-            child: Container(
-              decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  center: const Alignment(0.64, 0.30),
-                  radius: 0.8,
-                  colors: [settings.accentColor.withOpacity(0.2), Colors.transparent],
-                  stops: const [0.0, 0.55],
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(epName, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 4),
+                if (epOverview.isNotEmpty)
+                  Text(epOverview, maxLines: 4, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70, fontSize: 13)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 96, maxWidth: 120),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: <Widget>[
+                if (runtime > 0)
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                    decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(12)),
+                    child: Text('${runtime}m', style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                  ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    IconButton(
+                      icon: const Icon(Icons.play_arrow, color: Colors.white),
+                      onPressed: onPlayPressed,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: const Icon(Icons.download, color: Colors.white),
+                      onPressed: onDownloadPressed,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                  ],
                 ),
-              ),
+              ],
             ),
           ),
         ],
@@ -916,335 +194,40 @@ class _BackgroundDecoration extends StatelessWidget {
   }
 }
 
-class _PlayButton extends StatelessWidget {
-  final VoidCallback onPressed;
-  final Color accentColor;
-
-  const _PlayButton({required this.onPressed, required this.accentColor});
-
-  @override
-  Widget build(BuildContext context) {
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        Container(width: 80, height: 80, decoration: BoxDecoration(shape: BoxShape.circle, gradient: RadialGradient(colors: [accentColor.withAlpha(204), Colors.transparent], stops: const [0.5, 1.0]))),
-        Card(
-          elevation: 8,
-          shadowColor: Colors.black54,
-          shape: const CircleBorder(),
-          child: SizedBox(
-            width: 60,
-            height: 60,
-            child: IconButton(icon: const Icon(Icons.play_arrow, color: Colors.black, size: 30), onPressed: onPressed),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _GlassActionBar extends StatelessWidget {
-  final VoidCallback onShare;
-  final VoidCallback onAddToList;
-  final VoidCallback onDownload;
-  final VoidCallback onRate;
-  final Color accentColor;
-
-  const _GlassActionBar({required this.onShare, required this.onAddToList, required this.onDownload, required this.onRate, required this.accentColor});
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned(
-      bottom: 16,
-      left: 16,
-      right: 16,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        decoration: BoxDecoration(color: accentColor.withOpacity(0.3), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white.withOpacity(0.125))),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: [
-            IconButton(icon: const Icon(Icons.share, color: Colors.white), onPressed: onShare),
-            IconButton(icon: const Icon(Icons.add, color: Colors.white), onPressed: onAddToList),
-            IconButton(icon: const Icon(Icons.download, color: Colors.white), onPressed: onDownload),
-            IconButton(icon: const Icon(Icons.star, color: Colors.white), onPressed: onRate),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _DownloadOptionsModal extends StatefulWidget {
+// ----------------------------- Episode options modal (reusable, public name) -----------------------------
+// Using a public name here prevents cross-file private symbol issues.
+class EpisodePlayOptionsModal extends StatefulWidget {
   final String initialResolution;
   final bool initialSubtitles;
-  final void Function(String, bool) onConfirm;
-
-  const _DownloadOptionsModal({required this.initialResolution, required this.initialSubtitles, required this.onConfirm});
-
-  @override
-  _DownloadOptionsModalState createState() => _DownloadOptionsModalState();
-}
-
-class _DownloadOptionsModalState extends State<_DownloadOptionsModal> {
-  late String _resolution;
-  late bool _subtitles;
-
-  @override
-  void initState() {
-    super.initState();
-    _resolution = widget.initialResolution;
-    _subtitles = widget.initialSubtitles;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final settings = Provider.of<SettingsProvider>(context);
-    return Container(
-      padding: const EdgeInsets.all(16),
-      height: 300,
-      decoration: const BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text("Download Options", style: TextStyle(fontSize: 20, color: Colors.white, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
-          const Text("Select Resolution:", style: TextStyle(color: Colors.white)),
-          DropdownButton<String>(
-            value: _resolution,
-            dropdownColor: Colors.black87,
-            items: const [
-              DropdownMenuItem(value: "480p", child: Text("480p", style: TextStyle(color: Colors.white))),
-              DropdownMenuItem(value: "720p", child: Text("720p", style: TextStyle(color: Colors.white))),
-              DropdownMenuItem(value: "1080p", child: Text("1080p", style: TextStyle(color: Colors.white))),
-            ],
-            onChanged: (value) => setState(() => _resolution = value!),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              const Text("Enable Subtitles:", style: TextStyle(color: Colors.white)),
-              Switch(value: _subtitles, activeColor: settings.accentColor, onChanged: (value) => setState(() => _subtitles = value)),
-            ],
-          ),
-          const Spacer(),
-          Center(
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: settings.accentColor),
-              onPressed: () {
-                Navigator.pop(context);
-                widget.onConfirm(_resolution, _subtitles);
-              },
-              child: const Text("Start Download", style: TextStyle(color: Colors.black)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PlayOptionsModal extends StatefulWidget {
-  final String initialResolution;
-  final bool initialSubtitles;
-  final void Function(String, bool) onConfirm;
-
-  const _PlayOptionsModal({required this.initialResolution, required this.initialSubtitles, required this.onConfirm});
-
-  @override
-  _PlayOptionsModalState createState() => _PlayOptionsModalState();
-}
-
-class _PlayOptionsModalState extends State<_PlayOptionsModal> {
-  late String _resolution;
-  late bool _subtitles;
-
-  @override
-  void initState() {
-    super.initState();
-    _resolution = widget.initialResolution;
-    _subtitles = widget.initialSubtitles;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final settings = Provider.of<SettingsProvider>(context);
-    return Container(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, top: 16, left: 16, right: 16),
-      height: MediaQuery.of(context).size.height * 0.5,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Center(child: Text("Play Options", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white))),
-          const SizedBox(height: 16),
-          const Text("Select Resolution:", style: TextStyle(fontSize: 16, color: Colors.white)),
-          DropdownButton<String>(
-            value: _resolution,
-            dropdownColor: Colors.black87,
-            items: const [
-              DropdownMenuItem(value: "480p", child: Text("480p", style: TextStyle(color: Colors.white))),
-              DropdownMenuItem(value: "720p", child: Text("720p", style: TextStyle(color: Colors.white))),
-              DropdownMenuItem(value: "1080p", child: Text("1080p", style: TextStyle(color: Colors.white))),
-            ],
-            onChanged: (value) => setState(() => _resolution = value!),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              const Text("Enable Subtitles:", style: TextStyle(fontSize: 16, color: Colors.white)),
-              Switch(value: _subtitles, activeColor: settings.accentColor, onChanged: (value) => setState(() => _subtitles = value)),
-            ],
-          ),
-          const Spacer(),
-          Center(
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: settings.accentColor),
-              onPressed: () {
-                Navigator.pop(context);
-                widget.onConfirm(_resolution, _subtitles);
-              },
-              child: const Text("Play Now", style: TextStyle(color: Colors.black)),
-            ),
-          ),
-          const SizedBox(height: 16),
-        ],
-      ),
-    );
-  }
-}
-
-// Rating dialog (unchanged)
-class _RatingDialog extends StatefulWidget {
-  final String title;
-  final void Function(double) onRatingChanged;
-  final VoidCallback onSubmit;
-
-  const _RatingDialog({required this.title, required this.onRatingChanged, required this.onSubmit});
-
-  @override
-  _RatingDialogState createState() => _RatingDialogState();
-}
-
-class _RatingDialogState extends State<_RatingDialog> {
-  double _rating = 3.0;
-
-  @override
-  Widget build(BuildContext context) {
-    final settings = Provider.of<SettingsProvider>(context);
-    return AlertDialog(
-      title: Text('Rate ${widget.title}'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Text("Select rating:"),
-          Slider(
-            value: _rating,
-            min: 1.0,
-            max: 5.0,
-            divisions: 4,
-            label: _rating.toString(),
-            activeColor: settings.accentColor,
-            onChanged: (value) {
-              setState(() => _rating = value);
-              widget.onRatingChanged(value);
-            },
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
-        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: settings.accentColor), onPressed: widget.onSubmit, child: const Text("Submit", style: TextStyle(color: Colors.black))),
-      ],
-    );
-  }
-}
-
-// Loading dialog (unchanged)
-class LoadingDialog extends StatefulWidget {
-  const LoadingDialog({super.key});
-
-  @override
-  _LoadingDialogState createState() => _LoadingDialogState();
-}
-
-class _LoadingDialogState extends State<LoadingDialog> {
-  bool _showSecondMessage = false;
-  Timer? _timer;
-
-  @override
-  void initState() {
-    super.initState();
-    _timer = Timer(const Duration(seconds: 30), () {
-      if (mounted) setState(() => _showSecondMessage = true);
-    });
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final settings = Provider.of<SettingsProvider>(context);
-    return Dialog(
-      backgroundColor: Colors.black.withOpacity(0.8),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          CircularProgressIndicator(color: settings.accentColor),
-          const SizedBox(height: 16),
-          const Text("Preparing your content...", style: TextStyle(color: Colors.white), textAlign: TextAlign.center),
-          if (_showSecondMessage) ...[
-            const SizedBox(height: 12),
-            const Text("The app is in its inception stage,\nso some content might not be available yet.", style: TextStyle(color: Colors.white70), textAlign: TextAlign.center),
-          ],
-        ]),
-      ),
-    );
-  }
-}
-
-// Episode Loading Dialog (was missing)
-class EpisodeLoadingDialog extends StatelessWidget {
-  const EpisodeLoadingDialog({Key? key}) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    final settings = Provider.of<SettingsProvider>(context);
-    return Dialog(
-      backgroundColor: Colors.black.withOpacity(0.85),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          CircularProgressIndicator(color: settings.accentColor),
-          const SizedBox(width: 16),
-          const Flexible(child: Text('Preparing episode...', style: TextStyle(color: Colors.white))),
-        ]),
-      ),
-    );
-  }
-}
-
-// Episode play/download options modal (was missing)
-class _EpisodePlayOptionsModal extends StatefulWidget {
-  final void Function(String resolution, bool subtitles) onConfirm;
+  final void Function(String resolution, bool subtitles) onPlay;
   final void Function(String resolution, bool subtitles) onDownload;
 
-  const _EpisodePlayOptionsModal({required this.onConfirm, required this.onDownload, Key? key}) : super(key: key);
+  const EpisodePlayOptionsModal({
+    required this.initialResolution,
+    required this.initialSubtitles,
+    required this.onPlay,
+    required this.onDownload,
+    super.key,
+  });
 
   @override
-  State<_EpisodePlayOptionsModal> createState() => _EpisodePlayOptionsModalState();
+  State<EpisodePlayOptionsModal> createState() => _EpisodePlayOptionsModalState();
 }
 
-class _EpisodePlayOptionsModalState extends State<_EpisodePlayOptionsModal> {
-  String _resolution = "720p";
-  bool _subtitles = false;
+class _EpisodePlayOptionsModalState extends State<EpisodePlayOptionsModal> {
+  late String _resolution;
+  late bool _subtitles;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolution = widget.initialResolution;
+    _subtitles = widget.initialSubtitles;
+  }
 
   @override
   Widget build(BuildContext context) {
-    final settings = Provider.of<SettingsProvider>(context);
+    final settings = Provider.of<SettingsProvider>(context, listen: false);
     return Container(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, top: 16, left: 16, right: 16),
       height: MediaQuery.of(context).size.height * 0.45,
@@ -1276,15 +259,16 @@ class _EpisodePlayOptionsModalState extends State<_EpisodePlayOptionsModal> {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: settings.accentColor),
             onPressed: () {
-              Navigator.pop(context);
-              widget.onConfirm(_resolution, _subtitles);
+              // close bottom sheet then notify host
+              Navigator.of(context).pop();
+              widget.onPlay(_resolution, _subtitles);
             },
             child: const Text("Play Now", style: TextStyle(color: Colors.black)),
           ),
           OutlinedButton(
             style: OutlinedButton.styleFrom(side: BorderSide(color: settings.accentColor)),
             onPressed: () {
-              Navigator.pop(context);
+              Navigator.of(context).pop();
               widget.onDownload(_resolution, _subtitles);
             },
             child: const Text("Download", style: TextStyle(color: Colors.white)),
@@ -1296,98 +280,158 @@ class _EpisodePlayOptionsModalState extends State<_EpisodePlayOptionsModal> {
   }
 }
 
-// TV show episodes section
+// ----------------------------- main widget -----------------------------
 class TVShowEpisodesSection extends StatefulWidget {
   final int tvId;
   final List<dynamic> seasons;
   final String tvShowName;
+  final int? releaseYear; // parent provides this to avoid duplicate TV show fetch
 
-  const TVShowEpisodesSection({super.key, required this.tvId, required this.seasons, required this.tvShowName});
+  const TVShowEpisodesSection({
+    super.key,
+    required this.tvId,
+    required this.seasons,
+    required this.tvShowName,
+    this.releaseYear,
+  });
 
   @override
   State<TVShowEpisodesSection> createState() => TVShowEpisodesSectionState();
 }
 
-class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> {
-  final Map<int, List<dynamic>> _episodesCache = {};
+class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with AutomaticKeepAliveClientMixin {
+  final Map<int, List<dynamic>> _episodesCache = <int, List<dynamic>>{};
   late int _selectedSeasonNumber;
   bool _isLoading = false;
   bool _isVisible = false;
   int? _releaseYear;
 
+  // expose error message so UI doesn't spin forever
+  String? _errorMessage;
+
+  @override
+  bool get wantKeepAlive => true;
+
   @override
   void initState() {
     super.initState();
     _selectedSeasonNumber = widget.seasons.isNotEmpty ? (widget.seasons.first['season_number'] as int? ?? 1) : 1;
-    _fetchTVShowDetails();
-  }
-
-  Future<void> _fetchTVShowDetails() async {
-    try {
-      final tvDetails = await tmdb.TMDBApi.fetchTVShowDetails(widget.tvId);
-      final firstAirDate = tvDetails['first_air_date'] as String? ?? '1970-01-01';
-      if (mounted) {
-        setState(() {
-          _releaseYear = int.parse(firstAirDate.split('-')[0]);
-        });
-      }
-    } catch (e) {
-      debugPrint('Failed to fetch TV show details: $e');
-      if (mounted) {
-        setState(() {
-          _releaseYear = 1970;
-        });
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    super.dispose();
+    _releaseYear = widget.releaseYear;
   }
 
   Future<void> _fetchEpisodes(int seasonNumber) async {
-    if (_episodesCache[seasonNumber] != null || _isLoading) return;
-    setState(() => _isLoading = true);
+    if (_episodesCache.containsKey(seasonNumber) || _isLoading) return;
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    // tiny yield so layout completes before heavy work
+    await Future.delayed(const Duration(milliseconds: 10));
+
+    final stopwatch = Stopwatch()..start();
     try {
-      final seasonDetails = await tmdb.TMDBApi.fetchTVSeasonDetails(widget.tvId, seasonNumber);
+      debugPrint('TVShowEpisodesSection: fetching season $seasonNumber for tvId=${widget.tvId}');
+
+      final seasonDetails = await tmdb.TMDBApi.fetchTVSeasonDetails(widget.tvId, seasonNumber).timeout(const Duration(seconds: 20));
+
+      stopwatch.stop();
+      debugPrint('Fetched season $seasonNumber in ${stopwatch.elapsedMilliseconds}ms');
+
+      if (!mounted) return;
+
+      final episodes = (seasonDetails['episodes'] is List) ? seasonDetails['episodes'] as List<dynamic> : <dynamic>[];
+
+      setState(() {
+        _episodesCache[seasonNumber] = episodes;
+        _isLoading = false;
+        _errorMessage = null;
+      });
+    } on TimeoutException catch (e) {
+      stopwatch.stop();
+      debugPrint('Timeout fetching season $seasonNumber: $e');
       if (!mounted) return;
       setState(() {
-        _episodesCache[seasonNumber] = seasonDetails['episodes'] ?? [];
+        _episodesCache[seasonNumber] = <dynamic>[];
         _isLoading = false;
+        _errorMessage = 'Request timed out while loading episodes.';
       });
-    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Request timed out while loading episodes.')));
+    } catch (e, st) {
+      stopwatch.stop();
+      debugPrint('Error fetching season $seasonNumber: $e\n$st');
       if (!mounted) return;
       setState(() {
-        _episodesCache[seasonNumber] = [];
+        _episodesCache[seasonNumber] = <dynamic>[];
         _isLoading = false;
+        _errorMessage = 'Unable to load episodes. Tap Retry.';
       });
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to load episodes. Please try again later.')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to load episodes. Please try again.')));
     }
   }
 
-  void _showLoadingDialog() {
+  /// Show a small fallback dialog if parent MovieDetailScreenState isn't available.
+  Future<void> _showLocalLoadingDialog() async {
     if (!mounted) return;
-    showDialog(context: context, barrierDismissible: false, builder: (context) => const EpisodeLoadingDialog());
+    final settings = Provider.of<SettingsProvider>(context, listen: false);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      useRootNavigator: true,
+      builder: (dctx) {
+        return Dialog(
+          backgroundColor: Colors.black.withOpacity(0.85),
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              CircularProgressIndicator(color: settings.accentColor),
+              const SizedBox(width: 16),
+              const Flexible(child: Text('Preparing episode...', style: TextStyle(color: Colors.white))),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _dismissLocalLoadingDialog() async {
+    try {
+      Navigator.of(context, rootNavigator: true).pop();
+    } catch (_) {}
   }
 
   void _showEpisodePlayOptionsModal(Map<String, dynamic> episode, int seasonNumber) {
     if (!mounted) return;
-    showModalBottomSheet(
+    // Read accent color once w/out listen to keep rebuilds cheap
+    final settings = Provider.of<SettingsProvider>(context, listen: false);
+
+    // find parent helpers (safe to call; method exists on MovieDetailScreenState added previously)
+    final MovieDetailScreenState? parentState = context.findAncestorStateOfType<MovieDetailScreenState>();
+
+    showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.black87,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (modalContext) {
-        return _EpisodePlayOptionsModal(
-          onConfirm: (resolution, subtitles) async {
-            Navigator.pop(modalContext);
-            _showLoadingDialog();
+        return EpisodePlayOptionsModal(
+          initialResolution: '720p',
+          initialSubtitles: false,
+          onPlay: (resolution, subtitles) async {
+            // bottom sheet closed by modal widget itself before calling this callback
+            // Use parent's centralized modal if available to avoid popping wrong navigator.
+            if (parentState != null) {
+              parentState.showModalLoading();
+            } else {
+              // fallback local dialog
+              _showLocalLoadingDialog();
+            }
 
             final episodeNumber = (episode['episode_number'] as num?)?.toInt() ?? 1;
             final episodeName = episode['name'] as String? ?? 'Untitled';
+            Map<String, String> streamingInfo = <String, String>{};
 
-            Map<String, String> streamingInfo = {};
             try {
               streamingInfo = await StreamingService.getStreamingLink(
                 tmdbId: widget.tvId.toString(),
@@ -1399,55 +443,60 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> {
                 enableSubtitles: subtitles,
               );
             } catch (e) {
-              if (mounted) {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Unable to start streaming. Please try again later.")));
+              if (parentState != null) {
+                parentState.dismissModalLoading();
+              } else {
+                _dismissLocalLoadingDialog();
               }
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Unable to start streaming. Please try again later.")));
               return;
             }
 
-            if (!mounted) {
-              Navigator.pop(context);
-              return;
-            }
-            Navigator.pop(context);
-
+            // got response — if no URL, dismiss and show message
             final streamUrl = streamingInfo['url'] ?? '';
             final urlType = streamingInfo['type'] ?? 'unknown';
             final subtitleUrl = streamingInfo['subtitleUrl'];
 
             if (streamUrl.isEmpty) {
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Streaming unavailable at this time.")));
+              if (parentState != null) {
+                parentState.dismissModalLoading();
+              } else {
+                _dismissLocalLoadingDialog();
               }
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Streaming unavailable at this time.")));
               return;
             }
 
-            if (mounted) {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => MainVideoPlayer(
-                    videoPath: streamUrl,
-                    title: streamingInfo['title'] ?? episodeName,
-                    releaseYear: _releaseYear ?? 1970,
-                    isFullSeason: true,
-                    episodeFiles: const [],
-                    similarMovies: const [],
-                    subtitleUrl: subtitleUrl,
-                    isHls: urlType == 'm3u8',
-                  ),
-                ),
-              );
+            // success: dismiss loading and navigate to player
+            if (parentState != null) {
+              parentState.dismissModalLoading();
+            } else {
+              _dismissLocalLoadingDialog();
             }
+
+            if (!mounted) return;
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => MainVideoPlayer(
+                  videoPath: streamUrl,
+                  title: streamingInfo['title'] ?? episodeName,
+                  releaseYear: _releaseYear ?? 1970,
+                  isFullSeason: true,
+                  episodeFiles: const [],
+                  similarMovies: const [],
+                  subtitleUrl: subtitleUrl,
+                  isHls: urlType == 'm3u8',
+                ),
+              ),
+            );
           },
           onDownload: (resolution, subtitles) async {
-            Navigator.pop(modalContext);
+            // sheet closed inside modal; call parent state's download method if available
             final episodeNumber = (episode['episode_number'] as num?)?.toInt() ?? 1;
-            // find ancestor MovieDetailScreenState and call its public method
-            final parentState = context.findAncestorStateOfType<MovieDetailScreenState>();
-            if (parentState != null) {
-              await parentState.downloadEpisodeFromChild(
+            final parent = context.findAncestorStateOfType<MovieDetailScreenState>();
+            if (parent != null) {
+              await parent.downloadEpisodeFromChild(
                 season: seasonNumber,
                 episode: episodeNumber,
                 showTitle: widget.tvShowName,
@@ -1456,7 +505,7 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> {
                 subtitles: subtitles,
               );
             } else {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to start download.')));
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to start download.')));
             }
           },
         );
@@ -1466,154 +515,147 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin
     if (widget.seasons.isEmpty) return const SizedBox.shrink();
 
-    return Consumer<SettingsProvider>(
-      builder: (context, settings, child) {
-        return VisibilityDetector(
-          key: ValueKey('episodes_${widget.tvId}'),
-          onVisibilityChanged: (info) {
-            if (info.visibleFraction > 0 && !_isVisible && !_isLoading) {
-              _isVisible = true;
-              _fetchEpisodes(_selectedSeasonNumber);
-            }
-          },
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Row(
-                  children: [
-                    const Text('Episodes', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
-                    const Spacer(),
-                    DropdownButton<int>(
-                      value: _selectedSeasonNumber,
-                      dropdownColor: Colors.black87,
-                      style: const TextStyle(color: Colors.white),
-                      iconEnabledColor: settings.accentColor,
-                      items: widget.seasons
-                          .map<DropdownMenuItem<int>>((season) => DropdownMenuItem(
-                                value: season['season_number'] as int? ?? 0,
-                                child: Text('Season ${season['season_number'] ?? 0}'),
-                              ))
-                          .toList(),
-                      onChanged: (value) {
-                        if (value != null && mounted) {
-                          setState(() {
-                            _selectedSeasonNumber = value;
-                          });
-                          // fetch episodes for the newly selected season
-                          _fetchEpisodes(value);
-                        }
-                      },
-                    ),
-                  ],
+    // read accent color once without listening for changes (cheap)
+    final accentColor = Provider.of<SettingsProvider>(context, listen: false).accentColor;
+
+    return VisibilityDetector(
+      key: ValueKey('episodes_${widget.tvId}'),
+      onVisibilityChanged: (info) {
+        if (info.visibleFraction > 0.05 && !_isVisible && !_isLoading && _episodesCache[_selectedSeasonNumber] == null) {
+          _isVisible = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            Future.microtask(() => _fetchEpisodes(_selectedSeasonNumber));
+          });
+        }
+      },
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          // header + season selector inside glass container
+          GlassContainer(
+            child: Row(
+              children: <Widget>[
+                const Text('Episodes', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
+                const Spacer(),
+                DropdownButton<int>(
+                  value: _selectedSeasonNumber,
+                  dropdownColor: Colors.black87,
+                  style: const TextStyle(color: Colors.white),
+                  iconEnabledColor: accentColor,
+                  items: widget.seasons
+                      .map<DropdownMenuItem<int>>((season) => DropdownMenuItem(
+                            value: season['season_number'] as int? ?? 0,
+                            child: Text('Season ${season['season_number'] ?? 0}'),
+                          ))
+                      .toList(growable: false),
+                  onChanged: (value) {
+                    if (value != null && mounted) {
+                      setState(() {
+                        _selectedSeasonNumber = value;
+                        _errorMessage = null;
+                      });
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        Future.microtask(() => _fetchEpisodes(value));
+                      });
+                    }
+                  },
                 ),
-              ),
-              const SizedBox(height: 8),
-              Builder(builder: (ctx) {
-                final episodes = _episodesCache[_selectedSeasonNumber];
-                if (_isLoading && (episodes == null || episodes.isEmpty)) {
-                  // show placeholder shimmer while loading
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Column(
-                      children: List.generate(
-                        4,
-                        (index) => Padding(
-                          padding: const EdgeInsets.only(bottom: 12.0),
-                          child: Shimmer.fromColors(
-                            baseColor: Colors.grey[800]!,
-                            highlightColor: Colors.grey[600]!,
-                            child: Container(
-                              height: 72,
-                              decoration: BoxDecoration(color: Colors.grey[800], borderRadius: BorderRadius.circular(8)),
-                            ),
-                          ),
-                        ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 8),
+
+          // content: shimmer / error / empty / list
+          Builder(builder: (ctx) {
+            final episodes = _episodesCache[_selectedSeasonNumber];
+
+            if (_isLoading && (episodes == null || episodes.isEmpty)) {
+              // shimmer placeholder
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Column(
+                  children: List<Widget>.generate(
+                    4,
+                    (index) => Padding(
+                      padding: const EdgeInsets.only(bottom: 12.0),
+                      child: Shimmer.fromColors(
+                        baseColor: Colors.grey[800]!,
+                        highlightColor: Colors.grey[600]!,
+                        child: Container(height: 72, decoration: BoxDecoration(color: Colors.grey[800], borderRadius: BorderRadius.circular(8))),
                       ),
                     ),
-                  );
-                }
-
-                final list = episodes ?? [];
-                if (list.isEmpty) {
-                  return const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    child: Text('No episodes found for this season.', style: TextStyle(color: Colors.white70)),
-                  );
-                }
-
-                return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Column(
-                    children: list.map<Widget>((episode) {
-                      final epNum = (episode['episode_number'] as num?)?.toInt() ?? 0;
-                      final epName = episode['name'] as String? ?? 'Episode $epNum';
-                      final epOverview = episode['overview'] as String? ?? '';
-                      return Card(
-                        color: Colors.black54,
-                        margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
-                        child: ListTile(
-                          contentPadding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                          leading: Container(
-                            width: 80,
-                            height: 48,
-                            color: Colors.grey[800],
-                            child: (episode['still_path'] != null && episode['still_path'].toString().isNotEmpty)
-                                ? CachedNetworkImage(
-                                    imageUrl: 'https://image.tmdb.org/t/p/w300${episode['still_path']}',
-                                    fit: BoxFit.cover,
-                                    errorWidget: (c, u, e) => Container(color: Colors.grey),
-                                  )
-                                : const Icon(Icons.tv, color: Colors.white70),
-                          ),
-                          title: Text('$epName', style: const TextStyle(color: Colors.white)),
-                          subtitle: epOverview.isNotEmpty ? Text(epOverview, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70)) : null,
-                          trailing: SizedBox(
-                            width: 120,
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.end,
-                              children: [
-                                IconButton(
-                                  icon: const Icon(Icons.play_arrow, color: Colors.white),
-                                  onPressed: () => _showEpisodePlayOptionsModal(episode as Map<String, dynamic>, _selectedSeasonNumber),
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.download, color: Colors.white),
-                                  onPressed: () async {
-                                    // Quick download using parent's method with default resolution/subtitles
-                                    final parentState = context.findAncestorStateOfType<MovieDetailScreenState>();
-                                    if (parentState != null) {
-                                      final epNumber = (episode['episode_number'] as num?)?.toInt() ?? 1;
-                                      await parentState.downloadEpisodeFromChild(
-                                        season: _selectedSeasonNumber,
-                                        episode: epNumber,
-                                        showTitle: widget.tvShowName,
-                                        showId: widget.tvId,
-                                        resolution: '720p',
-                                        subtitles: false,
-                                      );
-                                    } else {
-                                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to start download.')));
-                                    }
-                                  },
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      );
-                    }).toList(),
                   ),
-                );
-              }),
-              const SizedBox(height: 12),
-            ],
-          ),
-        );
-      },
+                ),
+              );
+            }
+
+            if (_errorMessage != null && (episodes == null || episodes.isEmpty)) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
+                  Text(_errorMessage!, style: const TextStyle(color: Colors.white70)),
+                  const SizedBox(height: 8),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: accentColor),
+                    onPressed: () => _fetchEpisodes(_selectedSeasonNumber),
+                    child: const Text('Retry', style: TextStyle(color: Colors.black)),
+                  ),
+                ]),
+              );
+            }
+
+            final list = episodes ?? <dynamic>[];
+            if (list.isEmpty) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text('No episodes found for this season.', style: TextStyle(color: Colors.white70)),
+              );
+            }
+
+            // Lazy list of episodes — each item is a minimal StatelessWidget
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: list.length,
+                itemBuilder: (context, index) {
+                  final episode = list[index] as Map<String, dynamic>;
+                  return _EpisodeRow(
+                    episode: episode,
+                    seasonNumber: _selectedSeasonNumber,
+                    tvShowName: widget.tvShowName,
+                    tvId: widget.tvId,
+                    releaseYear: _releaseYear,
+                    onPlayPressed: () => _showEpisodePlayOptionsModal(episode, _selectedSeasonNumber),
+                    onDownloadPressed: () {
+                      final parentState = context.findAncestorStateOfType<MovieDetailScreenState>();
+                      if (parentState != null) {
+                        final epNumber = (episode['episode_number'] as num?)?.toInt() ?? 1;
+                        parentState.downloadEpisodeFromChild(
+                          season: _selectedSeasonNumber,
+                          episode: epNumber,
+                          showTitle: widget.tvShowName,
+                          showId: widget.tvId,
+                          resolution: '720p',
+                          subtitles: false,
+                        );
+                      } else {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to start download.')));
+                      }
+                    },
+                  );
+                },
+              ),
+            );
+          }),
+          const SizedBox(height: 12),
+        ],
+      ),
     );
   }
 }

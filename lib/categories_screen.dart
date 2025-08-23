@@ -1,4 +1,4 @@
-import 'dart:ui';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:movie_app/settings_provider.dart';
@@ -19,6 +19,85 @@ class AnimatedBackground extends StatelessWidget {
           colors: [Colors.redAccent, Colors.blueAccent],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
+        ),
+      ),
+    );
+  }
+}
+
+/// Reusable frosted container: faux frosted glass without real-time blur.
+/// Use this instead of BackdropFilter for a lightweight glassy look.
+class FrostedContainer extends StatelessWidget {
+  final Widget child;
+  final BorderRadius borderRadius;
+  final Color accentColor;
+  final EdgeInsetsGeometry? padding;
+
+  const FrostedContainer({
+    required this.child,
+    required this.borderRadius,
+    required this.accentColor,
+    this.padding,
+    super.key,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: borderRadius,
+      child: RepaintBoundary(
+        child: Container(
+          padding: padding,
+          decoration: BoxDecoration(
+            borderRadius: borderRadius,
+            // subtle white tint gradient for frosted look
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Colors.white.withOpacity(0.035),
+                Colors.white.withOpacity(0.02),
+              ],
+            ),
+            border: Border.all(color: Colors.white.withOpacity(0.06)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.45),
+                blurRadius: 14,
+                offset: const Offset(0, 6),
+              ),
+              BoxShadow(
+                color: accentColor.withOpacity(0.03),
+                blurRadius: 22,
+                spreadRadius: 2,
+              ),
+            ],
+          ),
+          child: Stack(
+            children: [
+              // faint sheen overlay
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Colors.white.withOpacity(0.012),
+                          Colors.transparent,
+                          Colors.white.withOpacity(0.008),
+                        ],
+                        stops: const [0.0, 0.5, 1.0],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              // actual content
+              child,
+            ],
+          ),
         ),
       ),
     );
@@ -51,7 +130,7 @@ class CategoriesScreenState extends State<CategoriesScreen> {
       context: context,
       builder: (context) {
         return AlertDialog(
-          backgroundColor: const Color.fromARGB(160, 17, 19, 40),
+          backgroundColor: Colors.black.withOpacity(0.55),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
             side: BorderSide(color: Colors.white.withOpacity(0.125)),
@@ -183,89 +262,78 @@ class CategoriesScreenState extends State<CategoriesScreen> {
                     ),
                   ],
                 ),
-                child: ClipRRect(
+                child: FrostedContainer(
                   borderRadius: BorderRadius.circular(12),
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: const Color.fromARGB(160, 17, 19, 40),
-                        borderRadius: BorderRadius.circular(12),
-                        border:
-                            Border.all(color: Colors.white.withOpacity(0.125)),
+                  accentColor: settings.accentColor,
+                  padding: const EdgeInsets.all(0),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minHeight: screenHeight),
+                    child: GridView.builder(
+                      padding: const EdgeInsets.all(16.0),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 2,
+                        crossAxisSpacing: 16.0,
+                        mainAxisSpacing: 16.0,
+                        childAspectRatio: 3 / 2,
                       ),
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(minHeight: screenHeight),
-                        child: GridView.builder(
-                          padding: const EdgeInsets.all(16.0),
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 2,
-                            crossAxisSpacing: 16.0,
-                            mainAxisSpacing: 16.0,
-                            childAspectRatio: 3 / 2,
-                          ),
-                          itemCount: categories.length,
-                          itemBuilder: (context, index) {
-                            final category = categories[index];
-                            return InkWell(
-                              onTap: () => _onCategoryTap(context, category),
+                      itemCount: categories.length,
+                      itemBuilder: (context, index) {
+                        final category = categories[index];
+                        return InkWell(
+                          onTap: () => _onCategoryTap(context, category),
+                          borderRadius: BorderRadius.circular(16.0),
+                          child: Card(
+                            elevation: 4.0,
+                            shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(16.0),
-                              child: Card(
-                                elevation: 4.0,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(16.0),
+                            ),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [
+                                    settings.accentColor.withOpacity(0.2),
+                                    settings.accentColor.withOpacity(0.4),
+                                  ],
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
                                 ),
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      colors: [
-                                        settings.accentColor.withOpacity(0.2),
-                                        settings.accentColor.withOpacity(0.4),
-                                      ],
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                    ),
-                                    borderRadius: BorderRadius.circular(16.0),
-                                    border: Border.all(
-                                      color:
-                                          settings.accentColor.withOpacity(0.5),
-                                      width: 1.5,
-                                    ),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: settings.accentColor
-                                            .withOpacity(0.3),
-                                        blurRadius: 8,
-                                        offset: const Offset(0, 4),
-                                      ),
-                                    ],
-                                  ),
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Icon(
-                                        category['icon'],
-                                        size: 40.0,
-                                        color: settings.accentColor,
-                                      ),
-                                      const SizedBox(height: 8.0),
-                                      Text(
-                                        category['name'],
-                                        style: const TextStyle(
-                                          fontSize: 16.0,
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.white,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
+                                borderRadius: BorderRadius.circular(16.0),
+                                border: Border.all(
+                                  color: settings.accentColor.withOpacity(0.5),
+                                  width: 1.5,
                                 ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: settings.accentColor.withOpacity(0.3),
+                                    blurRadius: 8,
+                                    offset: const Offset(0, 4),
+                                  ),
+                                ],
                               ),
-                            );
-                          },
-                        ),
-                      ),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    category['icon'],
+                                    size: 40.0,
+                                    color: settings.accentColor,
+                                  ),
+                                  const SizedBox(height: 8.0),
+                                  Text(
+                                    category['name'],
+                                    style: const TextStyle(
+                                      fontSize: 16.0,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -414,84 +482,74 @@ class CategoryContentScreen extends StatelessWidget {
                     ),
                   ],
                 ),
-                child: ClipRRect(
+                child: FrostedContainer(
                   borderRadius: BorderRadius.circular(12),
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: const Color.fromARGB(160, 17, 19, 40),
-                        borderRadius: BorderRadius.circular(12),
-                        border:
-                            Border.all(color: Colors.white.withOpacity(0.125)),
-                      ),
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(minHeight: screenHeight),
-                        child: FutureBuilder<List<dynamic>>(
-                          future: _fetchCategoryContent(),
-                          builder: (context, snapshot) {
-                            if (snapshot.connectionState ==
-                                ConnectionState.waiting) {
-                              return GridView.builder(
-                                padding: const EdgeInsets.all(16.0),
-                                gridDelegate:
-                                    const SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: 2,
-                                  mainAxisSpacing: 10,
-                                  crossAxisSpacing: 10,
-                                  childAspectRatio: 0.7,
-                                ),
-                                itemCount: 6,
-                                itemBuilder: (context, index) =>
-                                    buildMovieCardPlaceholder(),
-                              );
-                            }
-                            if (snapshot.hasError) {
-                              return Center(
-                                child: Text(
-                                  'Error: ${snapshot.error}',
-                                  style: const TextStyle(color: Colors.white),
-                                ),
-                              );
-                            }
-                            final content = snapshot.data ?? [];
-                            if (content.isEmpty) {
-                              return const Center(
-                                child: Text(
-                                  'No content available.',
-                                  style: TextStyle(color: Colors.white70),
-                                ),
-                              );
-                            }
-                            return GridView.builder(
-                              padding: const EdgeInsets.all(16.0),
-                              gridDelegate:
-                                  const SliverGridDelegateWithFixedCrossAxisCount(
-                                crossAxisCount: 2,
-                                mainAxisSpacing: 10,
-                                crossAxisSpacing: 10,
-                                childAspectRatio: 0.7,
-                              ),
-                              itemCount: content.length,
-                              itemBuilder: (context, index) {
-                                final item = content[index];
-                                return MovieCard.fromJson(
-                                  item,
-                                  onTap: () {
-                                    Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (context) =>
-                                            MovieDetailScreen(movie: item),
-                                      ),
-                                    );
-                                  },
+                  accentColor: settings.accentColor,
+                  padding: const EdgeInsets.all(0),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minHeight: screenHeight),
+                    child: FutureBuilder<List<dynamic>>(
+                      future: _fetchCategoryContent(),
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState == ConnectionState.waiting) {
+                          return GridView.builder(
+                            padding: const EdgeInsets.all(16.0),
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 2,
+                              mainAxisSpacing: 10,
+                              crossAxisSpacing: 10,
+                              childAspectRatio: 0.7,
+                            ),
+                            itemCount: 6,
+                            itemBuilder: (context, index) =>
+                                buildMovieCardPlaceholder(),
+                          );
+                        }
+                        if (snapshot.hasError) {
+                          return Center(
+                            child: Text(
+                              'Error: ${snapshot.error}',
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                          );
+                        }
+                        final content = snapshot.data ?? [];
+                        if (content.isEmpty) {
+                          return const Center(
+                            child: Text(
+                              'No content available.',
+                              style: TextStyle(color: Colors.white70),
+                            ),
+                          );
+                        }
+                        return GridView.builder(
+                          padding: const EdgeInsets.all(16.0),
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2,
+                            mainAxisSpacing: 10,
+                            crossAxisSpacing: 10,
+                            childAspectRatio: 0.7,
+                          ),
+                          itemCount: content.length,
+                          itemBuilder: (context, index) {
+                            final item = content[index];
+                            return MovieCard.fromJson(
+                              item,
+                              onTap: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (context) =>
+                                        MovieDetailScreen(movie: item),
+                                  ),
                                 );
                               },
                             );
                           },
-                        ),
-                      ),
+                        );
+                      },
                     ),
                   ),
                 ),

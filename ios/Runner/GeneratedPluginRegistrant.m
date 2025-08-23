@@ -204,12 +204,6 @@
 @import permission_handler_apple;
 #endif
 
-#if __has_include(<pushy_flutter/PushyPlugin.h>)
-#import <pushy_flutter/PushyPlugin.h>
-#else
-@import pushy_flutter;
-#endif
-
 #if __has_include(<screen_brightness_ios/ScreenBrightnessIosPlugin.h>)
 #import <screen_brightness_ios/ScreenBrightnessIosPlugin.h>
 #else
@@ -300,7 +294,6 @@
   [FPPNetworkInfoPlusPlugin registerWithRegistrar:[registry registrarForPlugin:@"FPPNetworkInfoPlusPlugin"]];
   [PathProviderPlugin registerWithRegistrar:[registry registrarForPlugin:@"PathProviderPlugin"]];
   [PermissionHandlerPlugin registerWithRegistrar:[registry registrarForPlugin:@"PermissionHandlerPlugin"]];
-  [PushyPlugin registerWithRegistrar:[registry registrarForPlugin:@"PushyPlugin"]];
   [ScreenBrightnessIosPlugin registerWithRegistrar:[registry registrarForPlugin:@"ScreenBrightnessIosPlugin"]];
   [FPPSensorsPlusPlugin registerWithRegistrar:[registry registrarForPlugin:@"FPPSensorsPlusPlugin"]];
   [FPPSharePlusPlugin registerWithRegistrar:[registry registrarForPlugin:@"FPPSharePlusPlugin"]];

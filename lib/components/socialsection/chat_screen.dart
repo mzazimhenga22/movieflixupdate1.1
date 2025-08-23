@@ -1,4 +1,10 @@
 // chat_screen.dart
+// Updated to avoid large rebuilds when keyboard opens. Key idea:
+// - set resizeToAvoidBottomInset: false on Scaffold
+// - pin messages (won't be relaid out on keyboard open)
+// - pin typing area to bottom and animate its bottom padding using MediaQuery.viewInsets.bottom
+// - tap on messages area unfocuses keyboard
+
 import 'dart:io';
 import 'dart:async';
 
@@ -363,6 +369,8 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
         title: title,
         body: body,
         extraData: extraData,
+        notification: true,
+        androidChannelId: 'messages', 
       ));
       debugPrint('[push] pushed message to $receiverId');
     } catch (e, st) {
@@ -716,11 +724,16 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
   Widget build(BuildContext context) {
     super.build(context);
 
+    // We set resizeToAvoidBottomInset: false on the Scaffold below so the entire
+    // widget tree won't be relaid out when the keyboard opens. Instead, the typing
+    // area will animate up using MediaQuery.viewInsets.
+
     return PresenceWrapper(
       userId: widget.currentUser['id'],
       groupIds: [widget.chatId],
       child: Scaffold(
-        resizeToAvoidBottomInset: true,
+        // IMPORTANT: prevent scaffold from resizing the whole page when keyboard opens
+        resizeToAvoidBottomInset: false,
         extendBodyBehindAppBar: false,
         backgroundColor: Colors.transparent,
         appBar: PreferredSize(
@@ -786,33 +799,55 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
                           color: Colors.black.withOpacity(0.45),
                           borderRadius: BorderRadius.circular(14),
                         ),
-                        child: Column(
+
+                        // Use a Stack so messages area stays stable and only the typing area
+                        // animates when the keyboard opens (avoids expensive relayouts).
+                        child: Stack(
                           children: [
-                            // Messages
-                            Expanded(
-                              child: _ChatMessagesWrapper(
-                                chatId: widget.chatId,
-                                currentUser: widget.currentUser,
-                                otherUser: widget.otherUser,
-                                replyingToNotifier: _replyingToNotifier,
-                                onMessageLongPressed: _showMessageActions,
-                                onReplyToMessage: _onReplyToMessage,
+                            // Messages: fill the available space (won't be relaid out on keyboard)
+                            Positioned.fill(
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () {
+                                  // dismiss keyboard when tapping messages area
+                                  FocusScope.of(context).unfocus();
+                                },
+                                child: RepaintBoundary(
+                                  child: _ChatMessagesWrapper(
+                                    chatId: widget.chatId,
+                                    currentUser: widget.currentUser,
+                                    otherUser: widget.otherUser,
+                                    replyingToNotifier: _replyingToNotifier,
+                                    onMessageLongPressed: _showMessageActions,
+                                    onReplyToMessage: _onReplyToMessage,
+                                  ),
+                                ),
                               ),
                             ),
 
-                            // Typing area
-                            // ensure there is no overlap by not using FAB and by giving some padding
-                            Container(
-                              color: Colors.black.withOpacity(0.55),
-                              child: _TypingAreaWrapper(
-                                replyingToNotifier: _replyingToNotifier,
-                                onSendMessage: sendMessage,
-                                onSendFile: sendFile,
-                                onSendAudio: sendAudio,
-                                onCancelReply: _onCancelReply,
-                                accentColor: widget.accentColor,
-                                currentUser: widget.currentUser,
-                                otherUser: widget.otherUser,
+                            // Typing area pinned to bottom — animate only bottom padding using viewInsets
+                            // so when keyboard opens only this widget layout changes.
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              child: AnimatedPadding(
+                                padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+                                duration: const Duration(milliseconds: 160),
+                                curve: Curves.easeOut,
+                                child: Container(
+                                  color: Colors.black.withOpacity(0.55),
+                                  child: _TypingAreaWrapper(
+                                    replyingToNotifier: _replyingToNotifier,
+                                    onSendMessage: sendMessage,
+                                    onSendFile: sendFile,
+                                    onSendAudio: sendAudio,
+                                    onCancelReply: _onCancelReply,
+                                    accentColor: widget.accentColor,
+                                    currentUser: widget.currentUser,
+                                    otherUser: widget.otherUser,
+                                  ),
+                                ),
                               ),
                             ),
                           ],

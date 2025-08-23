@@ -27,15 +27,15 @@ class BottomNavBar extends StatelessWidget {
     return Container(
       decoration: useBlurEffect
           ? BoxDecoration(
-              color: const Color.fromARGB(160, 17, 19, 40),
+              color: Colors.white.withOpacity(0.08), // subtle translucent layer
               border: Border(
-                top: BorderSide(color: Colors.white.withOpacity(0.125), width: 1.0),
+                top: BorderSide(color: Colors.white.withOpacity(0.2), width: 1.0),
               ),
               boxShadow: [
                 BoxShadow(
-                  color: accentColor.withOpacity(0.3),
-                  blurRadius: 8,
-                  spreadRadius: 2,
+                  color: accentColor.withOpacity(0.25),
+                  blurRadius: 12,
+                  spreadRadius: 1,
                 ),
               ],
             )
@@ -44,15 +44,17 @@ class BottomNavBar extends StatelessWidget {
             ),
       child: ClipRRect(
         borderRadius: useBlurEffect
-            ? const BorderRadius.vertical(top: Radius.circular(12))
+            ? const BorderRadius.vertical(top: Radius.circular(18))
             : BorderRadius.zero,
         child: useBlurEffect
             ? BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
+                filter: ImageFilter.blur(sigmaX: 20.0, sigmaY: 20.0),
                 child: BottomNavigationBar(
-                  backgroundColor: Colors.transparent,
-                  selectedItemColor: Colors.white,
-                  unselectedItemColor: accentColor.withOpacity(0.6),
+                  type: BottomNavigationBarType.fixed,
+                  elevation: 0,
+                  backgroundColor: Colors.transparent, // glassy background
+                  selectedItemColor: accentColor,
+                  unselectedItemColor: Colors.white.withOpacity(0.7),
                   currentIndex: selectedIndex,
                   items: _navItems,
                   onTap: onItemTapped,
@@ -60,8 +62,8 @@ class BottomNavBar extends StatelessWidget {
               )
             : BottomNavigationBar(
                 backgroundColor: Colors.black.withOpacity(0.8),
-                selectedItemColor: Colors.white,
-                unselectedItemColor: accentColor.withOpacity(0.6),
+                selectedItemColor: accentColor,
+                unselectedItemColor: Colors.white.withOpacity(0.6),
                 currentIndex: selectedIndex,
                 items: _navItems,
                 onTap: onItemTapped,

@@ -1,17 +1,20 @@
+// profile_selection_screen.dart
 import 'dart:async';
 import 'dart:math';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'database/auth_database.dart';
-import 'package:movie_app/main_tab_screen.dart';
-import 'package:movie_app/signin_screen.dart';
+import 'main_tab_screen.dart';
+import 'signin_screen.dart';
 import 'user_manager.dart';
 import 'session_manager.dart';
-import 'dart:ui';
-import 'package:movie_app/settings_provider.dart';
+import 'settings_provider.dart';
 
 class AnimatedBorder extends StatefulWidget {
   const AnimatedBorder({
@@ -135,6 +138,10 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
 
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final FirebaseMessaging _fcm = FirebaseMessaging.instance;
+
+  StreamSubscription<String>? _fcmTokenRefreshSub;
+  String? _fcmSavedForUserId;
 
   @override
   void initState() {
@@ -147,7 +154,48 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
   @override
   void dispose() {
     _profilesController.close();
+    _fcmTokenRefreshSub?.cancel();
     super.dispose();
+  }
+
+  Future<void> _ensureFcmTokenSavedForUser(String userId) async {
+    try {
+      // Avoid re-registering listener multiple times for same user
+      if (_fcmSavedForUserId == userId) return;
+
+      final token = await _fcm.getToken();
+      if (token != null && token.isNotEmpty) {
+        await _firestore
+            .collection('users')
+            .doc(userId)
+            .set({'fcmToken': token}, SetOptions(merge: true));
+        debugPrint('[FCM] ensured token saved for $userId');
+      } else {
+        debugPrint('[FCM] token null/empty for $userId');
+      }
+
+      // Cancel previous subscription if different user
+      await _fcmTokenRefreshSub?.cancel();
+
+      // Listen for token refresh and update Firestore
+      _fcmTokenRefreshSub = _fcm.onTokenRefresh.listen((newToken) async {
+        try {
+          if (newToken != null && newToken.isNotEmpty) {
+            await _firestore
+                .collection('users')
+                .doc(userId)
+                .set({'fcmToken': newToken}, SetOptions(merge: true));
+            debugPrint('[FCM] refreshed token saved for $userId');
+          }
+        } catch (e) {
+          debugPrint('[FCM] failed saving refreshed token: $e');
+        }
+      });
+
+      _fcmSavedForUserId = userId;
+    } catch (e) {
+      debugPrint('[FCM] _ensureFcmTokenSavedForUser error: $e');
+    }
   }
 
   Future<void> _loadCurrentUserAndProfiles() async {
@@ -201,6 +249,9 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
         debugPrint('✅ Valid session found');
       }
 
+      // Ensure FCM token recorded for current user
+      await _ensureFcmTokenSavedForUser(user.uid);
+
       await _refreshProfiles();
     } catch (e) {
       debugPrint('❌ Error in _loadCurrentUserAndProfiles: $e');
@@ -230,6 +281,10 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
       setState(() {});
       return;
     }
+
+    // Ensure FCM token recorded for this user whenever we refresh profiles
+    await _ensureFcmTokenSavedForUser(userId);
+
     try {
       // Try to fetch from Firestore cache first
       final snapshot = await _firestore
@@ -587,37 +642,65 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
     }
   }
 
-  void _selectProfile(Map<String, dynamic> profile) {
+  Future<void> _rememberLastSelectedProfileLocally(String profileId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('last_selected_profile', profileId);
+    } catch (e) {
+      debugPrint('❌ failed to save last_selected_profile locally: $e');
+    }
+  }
+
+  void _selectProfile(Map<String, dynamic> profile) async {
     debugPrint(
         '🚀 Navigating to main tab screen with profile: ${profile['name']}');
     UserManager.instance.updateProfile(profile);
-    if (mounted) {
-      Navigator.pushReplacement(
-        context,
-        PageRouteBuilder(
-          transitionDuration: const Duration(milliseconds: 800),
-          pageBuilder: (context, animation, secondaryAnimation) =>
-              MainTabScreen(
-            profileName: profile['name'] as String,
-          ),
-          transitionsBuilder: (context, animation, secondaryAnimation, child) {
-            const begin = 0.0;
-            const end = 1.0;
-            final scaleTween = Tween(begin: begin, end: end)
-                .chain(CurveTween(curve: Curves.easeInOut));
-            final fadeTween = Tween(begin: 0.0, end: 1.0)
-                .chain(CurveTween(curve: Curves.easeIn));
-            return ScaleTransition(
-              scale: animation.drive(scaleTween),
-              child: FadeTransition(
-                opacity: animation.drive(fadeTween),
-                child: child,
-              ),
-            );
-          },
-        ),
-      );
+
+    // Save last-selected profile to Firestore user doc and locally
+    final currentUser = UserManager.instance.currentUser.value;
+    final userId = currentUser?['id']?.toString() ?? _auth.currentUser?.uid;
+    if (userId != null && userId.isNotEmpty) {
+      try {
+        await _firestore.collection('users').doc(userId).update({
+          'last_selected_profile': profile['id'],
+          'last_selected_profile_name': profile['name'],
+          'updated_at': FieldValue.serverTimestamp(),
+        });
+        debugPrint('✅ saved last_selected_profile for $userId');
+        await _rememberLastSelectedProfileLocally(profile['id']?.toString() ?? '');
+      } catch (e) {
+        debugPrint('❌ failed saving last_selected_profile: $e');
+      }
+      // Ensure FCM token is present on the user document (in case signin didn't)
+      await _ensureFcmTokenSavedForUser(userId);
     }
+
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      PageRouteBuilder(
+        transitionDuration: const Duration(milliseconds: 800),
+        pageBuilder: (context, animation, secondaryAnimation) =>
+            MainTabScreen(
+          profileName: profile['name'] as String,
+        ),
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          const begin = 0.0;
+          const end = 1.0;
+          final scaleTween = Tween(begin: begin, end: end)
+              .chain(CurveTween(curve: Curves.easeInOut));
+          final fadeTween = Tween(begin: 0.0, end: 1.0)
+              .chain(CurveTween(curve: Curves.easeIn));
+          return ScaleTransition(
+            scale: animation.drive(scaleTween),
+            child: FadeTransition(
+              opacity: animation.drive(fadeTween),
+              child: child,
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Widget _buildAddProfileTile() {
@@ -644,8 +727,7 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
     var background = profile['backgroundImage'] as String? ?? "";
     final locked = (profile['locked'] as int?) == 1;
 
-    // --- Deterministic handling: only use defaults when avatar/background is empty.
-    // If avatar is already saved as an asset or an http url, keep it as-is.
+    // Deterministic handling: only use defaults when avatar/background is empty.
     if (avatar.isEmpty) {
       avatar = defaultAvatars.first;
     } else if (avatar.startsWith("http")) {
@@ -653,11 +735,9 @@ class _ProfileSelectionScreenState extends State<ProfileSelectionScreen> {
     } else if (avatar.startsWith("assets/")) {
       // keep asset path as-is
     } else {
-      // unknown format -> fallback to first default
       avatar = defaultAvatars.first;
     }
 
-    // Background: similar deterministic fallback
     if (background.isEmpty) {
       background = defaultBackgrounds.first;
     } else if (background.startsWith("http")) {

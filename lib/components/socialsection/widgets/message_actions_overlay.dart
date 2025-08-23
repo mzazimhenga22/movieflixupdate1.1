@@ -32,7 +32,7 @@ Future<void> showMessageActionsOverlay({
         top: false,
         child: DraggableScrollableSheet(
           // make it taller by default
-          initialChildSize: 0.75,
+          initialChildSize: 0.55,
           minChildSize: 0.45,
           maxChildSize: 0.9,
           expand: false,

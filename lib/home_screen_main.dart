@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:movie_app/settings_provider.dart';
@@ -77,6 +76,8 @@ class RandomMovieScreenState extends State<RandomMovieScreen> {
           randomMovie = allContent.first;
           isLoading = false;
         });
+      } else {
+        setState(() => isLoading = false);
       }
     } catch (e) {
       debugPrint("Error fetching random content: $e");
@@ -679,11 +680,11 @@ class HomeScreenMainState extends State<HomeScreenMain>
               _RadialOverlayOne(accentColor: accentColor),
               _RadialOverlayTwo(accentColor: accentColor),
 
-              // Foreground blurred container that is independent from scrolling content
+              // Foreground frosted container that is independent from scrolling content
               Positioned.fill(
                 child: Padding(
                   padding: const EdgeInsets.all(8.0),
-                  child: _BlurredCard(
+                  child: _FrostedCard(
                     accentColor: accentColor,
                     screenHeight: screenHeight,
                     onRefresh: refreshData,
@@ -715,7 +716,6 @@ class HomeScreenMainState extends State<HomeScreenMain>
     super.dispose();
   }
 }
-
 
 /// Extracted AppBar actions to reduce rebuilds
 class _AppBarActions extends StatelessWidget {
@@ -805,15 +805,17 @@ class _RadialOverlayTwo extends StatelessWidget {
   }
 }
 
-/// The blurred card that contains the scrollable content.
-/// This widget is isolated (keeps BackdropFilter inside its own RepaintBoundary)
-class _BlurredCard extends StatelessWidget {
+/// The frosted card that contains the scrollable content.
+/// This widget is isolated (keeps RepaintBoundary to limit re-rasterization).
+/// NOTE: this uses a faux "frost" (translucent tint + border + subtle shadow)
+/// instead of a real-time blur to reduce GPU load.
+class _FrostedCard extends StatelessWidget {
   final Color accentColor;
   final double screenHeight;
   final Future<void> Function() onRefresh;
   final GlobalKey<SubHomeScreenState> subHomeKey;
 
-  const _BlurredCard({
+  const _FrostedCard({
     required this.accentColor,
     required this.screenHeight,
     required this.onRefresh,
@@ -822,63 +824,105 @@ class _BlurredCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // The blurred container is kept separate from the scrollable content in the stack
+    // Use a semi-transparent layered container to simulate frosted glass:
+    // - subtle white-tint gradient (low opacity)
+    // - thin border (light)
+    // - soft shadow (depth)
+    // This gives a glass-like appearance without expensive blurs.
     return ClipRRect(
       borderRadius: const BorderRadius.all(Radius.circular(12)),
       child: RepaintBoundary(
-        // RepaintBoundary caches this layer on GPU so scrolling won't force a re-render here
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
-          child: Container(
-            decoration: const BoxDecoration(
-              color: Color.fromARGB(160, 17, 19, 40),
+        child: Container(
+          // Outer decoration gives the frosted look
+          decoration: BoxDecoration(
+            borderRadius: const BorderRadius.all(Radius.circular(12)),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Colors.white.withOpacity(0.035),
+                Colors.white.withOpacity(0.02),
+              ],
             ),
-            child: RefreshIndicator(
-              onRefresh: onRefresh,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(minHeight: screenHeight),
-                child: NotificationListener<ScrollNotification>(
-                  // If you want to do certain actions on scroll, do them here but avoid setState
-                  onNotification: (notification) {
-                    // No rebuilds triggered here; keep light-weight logic only
-                    return false;
-                  },
-                  child: SingleChildScrollView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    child: SafeArea(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: const [
-                            StoriesSection(),
-                            SizedBox(height: 10),
-                            FeaturedSlider(),
-                            SizedBox(height: 20),
-                            _SongOfMoviesCard(),
-                            SizedBox(height: 20),
-                            SizedBox(
-                              height: 430,
-                              child: Opacity(
-                                opacity: 0.7,
-                                child: ReelsSection(),
+            border: Border.all(color: Colors.white.withOpacity(0.06)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.45),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+              // faint accent glow
+              BoxShadow(
+                color: accentColor.withOpacity(0.02),
+                blurRadius: 24,
+                spreadRadius: 2,
+              ),
+            ],
+          ),
+          child: Stack(
+            children: [
+              // subtle diagonal sheen overlay to sell the frosted effect
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Colors.white.withOpacity(0.012),
+                          Colors.transparent,
+                          Colors.white.withOpacity(0.008),
+                        ],
+                        stops: const [0.0, 0.5, 1.0],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+              // Main content (kept same as your previous structure)
+              RefreshIndicator(
+                onRefresh: onRefresh,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: screenHeight),
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: (notification) {
+                      // No heavy setState here — keep logic minimal
+                      return false;
+                    },
+                    child: SingleChildScrollView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      child: SafeArea(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: const [
+                              StoriesSection(),
+                              SizedBox(height: 10),
+                              FeaturedSlider(),
+                              SizedBox(height: 20),
+                              _SongOfMoviesCard(),
+                              SizedBox(height: 20),
+                              SizedBox(
+                                height: 430,
+                                child: Opacity(
+                                  opacity: 0.7,
+                                  child: ReelsSection(),
+                                ),
                               ),
-                            ),
-                            SizedBox(height: 20),
-                            SubHomeScreen(key: GlobalObjectKey('subHome')),
-                            // NOTE: I replaced your _subHomeScreenKey with a GlobalObjectKey here inside the const section.
-                            // If you need to call refreshData() on a specific instance, either:
-                            // 1) Keep the instance-level _subHomeScreenKey in HomeScreenMainState (you already have it).
-                            // 2) Or change this const SubHomeScreen to use the passed key.
-                            // For simplicity and immutability in the UI tree we used a stable GlobalObjectKey.
-                          ],
+                              SizedBox(height: 20),
+                              SubHomeScreen(key: GlobalObjectKey('subHome')),
+                            ],
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
+            ],
           ),
         ),
       ),

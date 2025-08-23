@@ -7,13 +7,13 @@ plugins {
 
 android {
     namespace = "com.example.movieflix"
-    compileSdk = 35
+    compileSdk = 36
     ndkVersion = "27.3.13750724"
 
     defaultConfig {
         applicationId = "com.example.movieflix"
         minSdk = 24
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
 

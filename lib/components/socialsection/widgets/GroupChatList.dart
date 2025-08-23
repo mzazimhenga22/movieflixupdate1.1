@@ -12,6 +12,7 @@ class GroupChatList extends StatefulWidget {
   final void Function(QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey bubbleKey) onMessageLongPressed;
   final QueryDocumentSnapshot<Object?>? replyingTo;
   final VoidCallback? onCancelReply;
+  final void Function(QueryDocumentSnapshot<Object?> message)? onReplyToMessage;
 
   const GroupChatList({
     required this.groupId,
@@ -20,6 +21,7 @@ class GroupChatList extends StatefulWidget {
     required this.onMessageLongPressed,
     this.replyingTo,
     this.onCancelReply,
+    this.onReplyToMessage,
     super.key,
   });
 

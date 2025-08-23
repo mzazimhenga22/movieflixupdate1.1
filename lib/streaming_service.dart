@@ -46,20 +46,22 @@ class StreamingService {
     final url = Uri.parse('https://moviflxpro.onrender.com/media-links');
     final isShow = season != null && episode != null;
 
-    final body = <String, dynamic>{
-      'type': isShow ? 'show' : 'movie',
-      'tmdbId': tmdbId,
-      'title': title,
-      'releaseYear': releaseYear.toString(),
-      'resolution': resolution,
-      'subtitleLanguage': 'en',
-      if (isShow) ...{
-        'seasonNumber': season,
-        'seasonTmdbId': seasonTmdbId ?? tmdbId,
-        'episodeNumber': episode,
-        'episodeTmdbId': episodeTmdbId ?? tmdbId,
-      }
-    };
+final body = <String, dynamic>{
+  'type': isShow ? 'show' : 'movie',
+  'tmdbId': tmdbId,
+  'title': title,
+  'releaseYear': releaseYear, // send a number, not a string
+  'resolution': resolution,
+  'subtitleLanguage': 'en',
+  if (isShow) ...{
+    'seasonNumber': season,
+    // make sure these are strings of digits if you have IDs, otherwise omit them
+    'seasonTmdbId': seasonTmdbId?.toString() ?? tmdbId,
+    'episodeNumber': episode,
+    'episodeTmdbId': episodeTmdbId?.toString() ?? tmdbId,
+  }
+};
+
 
     try {
       final response = await http.post(

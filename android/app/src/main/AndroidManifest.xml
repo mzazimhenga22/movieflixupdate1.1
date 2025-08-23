@@ -20,6 +20,9 @@
     <!-- ✅ Android 13+ Notification Permission -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- ✅ Android 14+ Full-screen notifications (for incoming call UI) -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
     <!-- Features -->
     <uses-feature android:name="android.software.picture_in_picture" android:required="false" />
 
@@ -50,7 +53,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleInstance"
             android:theme="@style/LaunchTheme"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize"

@@ -1,4 +1,7 @@
 // group_chat_screen.dart
+// Members bar moved inside the container at the top (sliding horizontal row).
+// Typing area pinned to bottom; scaffold set to resizeToAvoidBottomInset:false.
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -7,10 +10,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+
 import 'package:movie_app/webrtc/group_rtc_manager.dart';
 import 'package:movie_app/utils/read_status_utils.dart';
 
-// Make sure this path matches your project: update if your file name or path differs.
+// Make sure this import matches your project path
 import 'package:movie_app/services/fcm_sender.dart' show sendFcmPush;
 
 import 'Group_profile_screen.dart';
@@ -866,12 +871,13 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       userId: widget.currentUser['id'],
       groupIds: [widget.chatId],
       child: Scaffold(
-        // Let Flutter handle keyboard insets (prevents gap)
-        resizeToAvoidBottomInset: true,
+        // IMPORTANT: prevent scaffold from resizing the whole page when keyboard opens
+        resizeToAvoidBottomInset: false,
+        extendBodyBehindAppBar: false,
+        backgroundColor: Colors.transparent,
         appBar: PreferredSize(
           preferredSize: const Size.fromHeight(kToolbarHeight),
           child: ValueListenableBuilder<Map<String, dynamic>?>(
-
             valueListenable: _groupDataNotifier,
             builder: (context, groupData, _) {
               return GroupChatAppBar(
@@ -887,79 +893,134 @@ class _GroupChatScreenState extends State<GroupChatScreen>
             },
           ),
         ),
-        // NOTE: removed floatingActionButton (we now expose features in a compact GroupFeaturesBar)
         body: Stack(
           children: [
-            // base gradients for background (cheap)
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 400),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [widget.accentColor.withOpacity(0.12), Colors.black],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-              ),
+            // Background (image/gradient overlay)
+            ValueListenableBuilder<String?>(
+              valueListenable: _backgroundUrlNotifier,
+              builder: (context, backgroundUrl, _) {
+                return _GroupBackground(backgroundUrl: backgroundUrl, accentColor: widget.accentColor);
+              },
             ),
 
-            // subtle radial accent
-            Positioned.fill(
-              child: IgnorePointer(
-                child: Opacity(
-                  opacity: 0.06,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: RadialGradient(
-                        center: const Alignment(-0.1, -0.4),
-                        radius: 1.2,
-                        colors: [widget.accentColor.withOpacity(0.9), Colors.transparent],
-                        stops: const [0.0, 0.6],
+            // Foreground column with features bar + messages + pinned bottom (typing)
+            Column(
+              children: [
+                // Compact group features bar (above container)
+                SafeArea(
+                  top: false,
+                  child: GroupFeaturesBar(
+                    groupDataNotifier: _groupDataNotifier,
+                    accentColor: widget.accentColor,
+                    onInfoTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => GroupProfileScreen(groupId: widget.chatId, currentUserId: widget.currentUser['id']))),
+                    onVoiceCall: () => startGroupCall(false),
+                    onVideoCall: () => startGroupCall(true),
+                    onActions: _showGroupActionsBottomSheet,
+                  ),
+                ),
+
+                // Main content container
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 8.0),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          border: Border.all(color: widget.accentColor.withOpacity(0.12)),
+                          color: Colors.black.withOpacity(0.45),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+
+                        // Use a Stack so messages area stays stable, members bar sits at the top of this container,
+                        // and only the pinned bottom typing area animates when the keyboard opens.
+                        child: Stack(
+                          children: [
+                            // Messages: fill the available space (won't be relaid out on keyboard)
+                            Positioned.fill(
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () {
+                                  // dismiss keyboard when tapping messages area
+                                  FocusScope.of(context).unfocus();
+                                },
+                                // add top padding so messages are not covered by the members bar overlay
+                                child: Padding(
+                                  padding: const EdgeInsets.only(top: 80.0), // match members bar height + spacing
+                                  child: RepaintBoundary(
+                                    child: _GroupMessagesWrapper(
+                                      groupId: widget.chatId,
+                                      currentUser: widget.currentUser,
+                                      groupMembersNotifier: _groupMembersNotifier,
+                                      replyingToNotifier: _replyingToNotifier,
+                                      onMessageLongPressed: _showMessageActions,
+                                      onCancelReply: _onCancelReply,
+                                      onReplyToMessage: _onReplyToMessage, // forward taps from list to set reply target
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+
+                            // MEMBERS BAR: placed at the top INSIDE the container and slides horizontally
+                            Positioned(
+                              top: 8,
+                              left: 8,
+                              right: 8,
+                              child: Container(
+                                // translucent background to visually separate from messages
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withOpacity(0.28),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: widget.accentColor.withOpacity(0.04)),
+                                ),
+                                padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+                                child: _GroupMembersBar(
+                                  groupMembersNotifier: _groupMembersNotifier,
+                                  accentColor: widget.accentColor,
+                                  chatId: widget.chatId,
+                                  currentUserId: widget.currentUser['id'] as String? ?? '',
+                                ),
+                              ),
+                            ),
+
+                            // Pinned bottom: typing area animate only bottom inset
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              child: AnimatedPadding(
+                                padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+                                duration: const Duration(milliseconds: 160),
+                                curve: Curves.easeOut,
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    // Typing area wrapper
+                                    Container(
+                                      color: Colors.black.withOpacity(0.55),
+                                      child: _GroupTypingAreaWrapper(
+                                        replyingToNotifier: _replyingToNotifier,
+                                        onSendMessage: sendMessage,
+                                        onSendFile: sendFile,
+                                        onSendAudio: sendAudio,
+                                        onCancelReply: _onCancelReply,
+                                        accentColor: widget.accentColor,
+                                        currentUser: widget.currentUser,
+                                        groupMembersNotifier: _groupMembersNotifier,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            ),
-
-            // Foreground content (covers whole body under appBar)
-            ValueListenableBuilder<String?>(
-              valueListenable: _backgroundUrlNotifier,
-              builder: (context, backgroundUrl, _) {
-                return Column(
-                  children: [
-                    // Group features bar (compact, replaces previous FAB)
-                    SafeArea(
-                      top: false,
-                      child: GroupFeaturesBar(
-                        groupDataNotifier: _groupDataNotifier,
-                        accentColor: widget.accentColor,
-                        onInfoTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => GroupProfileScreen(groupId: widget.chatId, currentUserId: widget.currentUser['id']))),
-                        onVoiceCall: () => startGroupCall(false),
-                        onVideoCall: () => startGroupCall(true),
-                        onActions: _showGroupActionsBottomSheet,
-                      ),
-                    ),
-
-                    // The rest of the screen uses the previous _GroupBackground content
-                    Expanded(
-                      child: _GroupBackground(
-                        backgroundUrl: backgroundUrl,
-                        accentColor: widget.accentColor,
-                        groupMembersNotifier: _groupMembersNotifier,
-                        groupDataNotifier: _groupDataNotifier,
-                        replyingToNotifier: _replyingToNotifier,
-                        chatId: widget.chatId,
-                        currentUser: widget.currentUser,
-                        onShowMessageActions: _showMessageActions,
-                        onSendMessage: sendMessage,
-                        onSendFile: sendFile,
-                        onSendAudio: sendAudio,
-                        onCancelReply: _onCancelReply,
-                      ),
-                    ),
-                  ],
-                );
-              },
+              ],
             ),
           ],
         ),
@@ -1057,94 +1118,46 @@ class GroupFeaturesBar extends StatelessWidget {
   }
 }
 
-// The rest of the helpers (_GroupBackground, _GroupMembersBar, _GroupMessagesWrapper, _GroupTypingAreaWrapper)
-// are intentionally unchanged from your previous structure but reproduced below to keep this file self-contained.
-
+// Background widget now only manages background image/overlay (cheap)
 class _GroupBackground extends StatelessWidget {
   final String? backgroundUrl;
   final Color accentColor;
-  final ValueNotifier<List<Map<String, dynamic>>> groupMembersNotifier;
-  final ValueNotifier<Map<String, dynamic>?> groupDataNotifier;
-  final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
-  final String chatId;
-  final Map<String, dynamic> currentUser;
-  final void Function(QueryDocumentSnapshot<Object?>, bool, GlobalKey) onShowMessageActions;
-  final void Function(String) onSendMessage;
-  final void Function(File) onSendFile;
-  final void Function(File) onSendAudio;
-  final VoidCallback onCancelReply;
-
-  const _GroupBackground({
-    required this.backgroundUrl,
-    required this.accentColor,
-    required this.groupMembersNotifier,
-    required this.groupDataNotifier,
-    required this.replyingToNotifier,
-    required this.chatId,
-    required this.currentUser,
-    required this.onShowMessageActions,
-    required this.onSendMessage,
-    required this.onSendFile,
-    required this.onSendAudio,
-    required this.onCancelReply,
-  });
+  const _GroupBackground({this.backgroundUrl, required this.accentColor});
 
   @override
   Widget build(BuildContext context) {
-    // Keep this widget cheap to avoid jank; avoid BackdropFilter
     return RepaintBoundary(
-      child: ClipRRect(
-        borderRadius: BorderRadius.zero,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 350),
-          decoration: backgroundUrl != null
-              ? BoxDecoration(image: DecorationImage(image: NetworkImage(backgroundUrl!), fit: BoxFit.cover))
-              : null,
-          child: Container(
-            // semi-transparent overlay instead of blur
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.25),
-              border: Border.all(color: accentColor.withOpacity(0.06)),
+      child: Stack(
+        children: [
+          if (backgroundUrl != null)
+            Positioned.fill(
+              child: CachedNetworkImage(
+                imageUrl: backgroundUrl!,
+                fit: BoxFit.cover,
+                placeholder: (_, __) => const SizedBox.shrink(),
+                errorWidget: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            )
+          else
+            Positioned.fill(
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [accentColor.withOpacity(0.06), Colors.black],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                ),
+              ),
             ),
-            child: Column(
-              children: [
-                // Messages area and typing area
-                Expanded(
-                  child: _GroupMessagesWrapper(
-                    groupId: chatId,
-                    currentUser: currentUser,
-                    groupMembersNotifier: groupMembersNotifier,
-                    replyingToNotifier: replyingToNotifier,
-                    onMessageLongPressed: onShowMessageActions,
-                    onCancelReply: onCancelReply,
-                  ),
-                ),
 
-                // Compact members bar placed above typing area (non-blocking)
-                _GroupMembersBar(
-                  groupMembersNotifier: groupMembersNotifier,
-                  accentColor: accentColor,
-                  chatId: chatId,
-                  currentUserId: currentUser['id'] as String? ?? '',
-                ),
-
-                Container(
-                  color: Colors.black.withOpacity(0.55),
-                  child: _GroupTypingAreaWrapper(
-                    replyingToNotifier: replyingToNotifier,
-                    onSendMessage: onSendMessage,
-                    onSendFile: onSendFile,
-                    onSendAudio: onSendAudio,
-                    accentColor: accentColor,
-                    currentUser: currentUser,
-                    groupMembersNotifier: groupMembersNotifier,
-                    onCancelReply: onCancelReply,
-                  ),
-                ),
-              ],
+          // Lightweight overlay
+          Positioned.fill(
+            child: Container(
+              color: Colors.black.withOpacity(0.25),
             ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -1165,62 +1178,32 @@ class _GroupMembersBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Fixed height small bar - non intrusive and outside typing row
-    return SafeArea(
-      top: false,
-      child: Container(
-        height: 64,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        color: Colors.transparent,
-        child: RepaintBoundary(
-          child: ValueListenableBuilder<List<Map<String, dynamic>>>(
+    // Fixed height small bar - sliding horizontal avatars
+    return RepaintBoundary(
+      child: ValueListenableBuilder<List<Map<String, dynamic>>>(
+        valueListenable: groupMembersNotifier,
+        builder: (context, members, _) {
+          final showMembers = members.isNotEmpty;
+          final count = members.isNotEmpty ? (members.length > 20 ? members.length : members.length) : 0;
 
-            valueListenable: groupMembersNotifier,
-            builder: (context, members, _) {
-              final showMembers = members.isNotEmpty;
-              final count = members.isNotEmpty ? (members.length > 6 ? 6 : members.length) : 0;
-
-              return Row(
-                children: [
-                  if (showMembers)
-                    Expanded(
-                      child: ListView.builder(
-                        scrollDirection: Axis.horizontal,
-                        physics: const BouncingScrollPhysics(),
-                        itemCount: count,
-                        itemBuilder: (context, index) {
-                          // show up to 5 avatars + one overflow badge if more
-                          if (index == 5 && members.length > 6) {
-                            final remaining = members.length - 5;
-                            return Padding(
-                              padding: const EdgeInsets.only(right: 8.0),
-                              child: GestureDetector(
-                                onTap: () {
-                                  // open group profile (shows full members list)
-                                  Navigator.push(context, MaterialPageRoute(builder: (_) => GroupProfileScreen(groupId: chatId, currentUserId: currentUserId)));
-                                },
-                                child: CircleAvatar(
-                                  radius: 20,
-                                  backgroundColor: accentColor.withOpacity(0.18),
-                                  child: Text(
-                                    '+$remaining',
-                                    style: TextStyle(color: accentColor, fontWeight: FontWeight.bold, fontSize: 12),
-                                  ),
-                                ),
-                              ),
-                            );
-                          }
-
-                          // normal member avatar
+          return Row(
+            children: [
+              if (showMembers)
+                Expanded(
+                  child: SizedBox(
+                    height: 48,
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      physics: const BouncingScrollPhysics(),
+                      itemCount: count + 1, // +1 for trailing group icon
+                      itemBuilder: (context, index) {
+                        if (index < members.length) {
                           final member = members[index];
                           final avatarUrl = (member['avatarUrl'] as String?) ?? '';
-                          final memberId = (member['id'] as String?) ?? '';
-
                           return Padding(
                             padding: const EdgeInsets.only(right: 8.0),
                             child: GestureDetector(
                               onTap: () {
-                                // navigate to the app's profile screen route safely
                                 Navigator.pushNamed(
                                   context,
                                   '/profile',
@@ -1237,31 +1220,31 @@ class _GroupMembersBar extends StatelessWidget {
                               ),
                             ),
                           );
-                        },
-                      ),
-                    )
-                  else
-                    const Spacer(),
-
-                  // Always show compact group icon at the end - opens full group info
-                  Padding(
-                    padding: const EdgeInsets.only(left: 6.0),
-                    child: Material(
-                      color: Colors.transparent,
-                      child: IconButton(
-                        icon: Icon(Icons.group, color: accentColor),
-                        tooltip: 'Group info',
-                        onPressed: () {
-                          Navigator.push(context, MaterialPageRoute(builder: (_) => GroupProfileScreen(groupId: chatId, currentUserId: currentUserId)));
-                        },
-                      ),
+                        } else {
+                          // trailing group icon
+                          return Padding(
+                            padding: const EdgeInsets.only(left: 6.0),
+                            child: Material(
+                              color: Colors.transparent,
+                              child: IconButton(
+                                icon: Icon(Icons.group, color: accentColor),
+                                tooltip: 'Group info',
+                                onPressed: () {
+                                  Navigator.push(context, MaterialPageRoute(builder: (_) => GroupProfileScreen(groupId: chatId, currentUserId: currentUserId)));
+                                },
+                              ),
+                            ),
+                          );
+                        }
+                      },
                     ),
                   ),
-                ],
-              );
-            },
-          ),
-        ),
+                )
+              else
+                const Spacer(),
+            ],
+          );
+        },
       ),
     );
   }
@@ -1274,6 +1257,7 @@ class _GroupMessagesWrapper extends StatelessWidget {
   final ValueNotifier<QueryDocumentSnapshot<Object?>?> replyingToNotifier;
   final void Function(QueryDocumentSnapshot<Object?>, bool, GlobalKey) onMessageLongPressed;
   final VoidCallback onCancelReply;
+  final void Function(QueryDocumentSnapshot<Object?> message)? onReplyToMessage;
 
   const _GroupMessagesWrapper({
     required this.groupId,
@@ -1282,6 +1266,7 @@ class _GroupMessagesWrapper extends StatelessWidget {
     required this.replyingToNotifier,
     required this.onMessageLongPressed,
     required this.onCancelReply,
+    this.onReplyToMessage,
   });
 
   @override
@@ -1300,6 +1285,7 @@ class _GroupMessagesWrapper extends StatelessWidget {
                 onMessageLongPressed: onMessageLongPressed,
                 replyingTo: replyingTo,
                 onCancelReply: onCancelReply,
+                onReplyToMessage: onReplyToMessage,
               );
             },
           );
@@ -1363,4 +1349,3 @@ class _GroupTypingAreaWrapper extends StatelessWidget {
     );
   }
 }
-

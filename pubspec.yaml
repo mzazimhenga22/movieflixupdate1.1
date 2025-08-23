@@ -80,7 +80,6 @@ dependencies:
   cloud_functions: ^6.0.0
   supabase_flutter: ^2.0.0
   dartz: ^0.10.0
-  pushy_flutter: ^2.0.38
   livekit_client: ^2.5.0+hotfix.1
   googleapis_auth: ^1.6.0
   dart_jsonwebtoken: ^2.14.0
