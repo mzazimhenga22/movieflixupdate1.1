@@ -1,39 +1,55 @@
 // services/fcm_sender.dart
-// Release-safe FCM HTTP v1 helper.
+// Backend-forwarding FCM helper for Flutter
 //
 // Behavior:
-//  - In debug/non-release builds: can sign & send directly using a service account
-//    (loaded from assets/service_account.json or passed via `serviceAccount`) — useful for dev.
-//  - In release builds: direct signing is disabled for security. You MUST provide `serverUrl`
-//    (your backend) which will perform signing + send. If `serverUrl` is not provided the
-//    function throws an exception to avoid accidentally shipping secrets.
+//  - In release builds the function will POST to your secure server endpoint
+//    (default: https://moviflxpro.onrender.com/sendPush). The server is expected
+//    to perform service-account signing and call FCM HTTP v1.
+//  - In debug/dev builds, the function will still support signing on-device
+//    using a service account JSON (via compute) if no serverUrl is provided.
 //
-// SECURITY: Do NOT embed service account JSON in production apps. Use a server (Cloud Function,
-// Cloud Run, etc.) to sign JWTs and call FCM.
+// Important: FCM `message.data` requires Map<String, String>. This file
+// strictly coerces all extraData values to strings (json-encoding non-primitives).
 
 import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart' show compute, kReleaseMode;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 
-/// Sends an FCM message.
-///
-/// Parameters:
-///  - fcmToken, projectId, title, body: standard fields.
-///  - extraData: Map of extra key-values sent in `message.data`. Values can be any JSON
-///               type but will be coerced to strings. If any value is a nested Map/List
-///               the function will return a friendly error showing the offending keys.
-///  - notification: whether to include the `notification` block (may show system UI).
-///  - androidChannelId, ttlSeconds: optional android settings.
-///  - serviceAccount: optional decoded service account JSON (preferred over embedding asset).
-///  - assetPath: fallback asset path used in debug mode when serviceAccount isn't supplied.
-///  - serverUrl: in release builds this must be provided. The client will POST the payload
-///               to this URL and the server must perform the secure signing and FCM send.
-///               The POST body is JSON:
-///               { fcmToken, projectId, title, body, extraData, notification, androidChannelId, ttlSeconds }
+String _shortSample(Object? v, [int max = 200]) {
+  try {
+    final s = jsonEncode(v);
+    if (s.length <= max) return s;
+    return s.substring(0, max) + '...';
+  } catch (_) {
+    final s = v?.toString() ?? '<null>';
+    if (s.length <= max) return s;
+    return s.substring(0, max) + '...';
+  }
+}
+
+const String _defaultServerBase = 'https://moviflxpro.onrender.com';
+const String _defaultServerPath = '/sendPush';
+
+String _normalizeServerUrl(String baseOrFull) {
+  final trimmed = (baseOrFull ?? '').trim();
+  if (trimmed.isEmpty) return '$_defaultServerBase$_defaultServerPath';
+  if (trimmed.endsWith('/sendPush')) return trimmed;
+  if (trimmed.endsWith('/')) return '$trimmed${_defaultServerPath.substring(1)}';
+  if (trimmed.contains('/sendPush')) return trimmed;
+  return '$trimmed$_defaultServerPath';
+}
+
+/// Sends an FCM push. In release mode this posts to a secure server which must
+/// sign requests and call the FCM HTTP v1 API (recommended). In dev you may
+/// either provide `serviceAccount` (decoded JSON map) or include the JSON file
+/// as an asset and set `assetPath`.
 Future<void> sendFcmPush({
-  required String fcmToken,
+  String? fcmToken,
+  String? topic,
   required String projectId,
   required String title,
   required String body,
@@ -43,49 +59,64 @@ Future<void> sendFcmPush({
   int? ttlSeconds,
   Map<String, dynamic>? serviceAccount,
   String assetPath = 'assets/service_account.json',
-  /// Required in release builds: HTTPS endpoint on your server that will perform signing + FCM send.
   String? serverUrl,
+  String? apiKey,
 }) async {
-  // If we're in release mode, do NOT attempt to sign locally.
+  // validate
+  if ((fcmToken == null || fcmToken.trim().isEmpty) &&
+      (topic == null || topic.trim().isEmpty)) {
+    throw Exception('Either fcmToken or topic must be provided.');
+  }
+
+  final resolvedServerUrl = _normalizeServerUrl(serverUrl ?? _defaultServerBase);
+
+  // Release: forward to your server (recommended).
   if (kReleaseMode) {
-    if (serverUrl == null || serverUrl.trim().isEmpty) {
-      throw Exception(
-          'In release builds sendFcmPush cannot sign with a service account on-device. '
-          'Provide a secure server endpoint using the "serverUrl" parameter and have your server '
-          'perform signing and the FCM HTTP v1 send. This prevents shipping service account keys in your app.');
-    }
-
-    // Convert extraData to Map<String, String> for server side; server should do its own validation.
-    final serverExtra = _coerceExtraDataForServer(extraData);
-
-    // Send a lightweight JSON payload to your server. Server must handle auth and FCM send.
-    final payload = {
-      'fcmToken': fcmToken,
+    final payload = <String, dynamic>{
+      if (fcmToken != null && fcmToken.trim().isNotEmpty) 'fcmToken': fcmToken,
+      if (topic != null && topic.trim().isNotEmpty) 'topic': topic,
       'projectId': projectId,
       'title': title,
       'body': body,
-      'extraData': serverExtra,
+      // ensure server receives only strings in extraData
+      'extraData': _coerceExtraDataForServer(extraData),
       'notification': notification,
       if (androidChannelId != null) 'androidChannelId': androidChannelId,
       if (ttlSeconds != null) 'ttlSeconds': ttlSeconds,
     };
 
-    final resp = await http.post(
-      Uri.parse(serverUrl),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(payload),
-    );
+    final headers = <String, String>{'Content-Type': 'application/json'};
+    if (apiKey != null && apiKey.trim().isNotEmpty) {
+      headers['X-Api-Key'] = apiKey;
+    }
+
+    final resp = await http
+        .post(
+          Uri.parse(resolvedServerUrl),
+          headers: headers,
+          body: jsonEncode(payload),
+        )
+        .timeout(const Duration(seconds: 20));
 
     if (resp.statusCode >= 200 && resp.statusCode < 300) {
-      // success
       return;
     } else {
-      throw Exception('Server-side push failed (${resp.statusCode}): ${resp.body}');
+      String bodyPreview = resp.body;
+      try {
+        final parsed = jsonDecode(resp.body);
+        if (parsed is Map && parsed['error'] != null) {
+          bodyPreview = parsed['error'].toString();
+        } else {
+          bodyPreview = resp.body.toString();
+        }
+      } catch (_) {
+        // keep raw body
+      }
+      throw Exception('Server-side push failed (${resp.statusCode}): $bodyPreview');
     }
   }
 
-  // Non-release (dev) path: allow local signing for development convenience.
-  // Load service account from assets if not provided
+  // ----------------- Dev/local signing -----------------
   Map<String, dynamic>? sa = serviceAccount;
   if (sa == null) {
     try {
@@ -93,18 +124,18 @@ Future<void> sendFcmPush({
       sa = jsonDecode(raw) as Map<String, dynamic>;
     } catch (e) {
       throw Exception(
-          'Failed to load service account from asset "$assetPath": ${e.toString()}.'
-          '\nIn development, add the JSON to your assets and declare it in pubspec.yaml, or '
+          'Failed to load service account from asset "$assetPath": ${e.toString()}.\n'
+          'In development, add the JSON to your assets and declare it in pubspec.yaml, or '
           'pass the decoded map via the "serviceAccount" parameter.');
     }
   }
 
   final args = <String, dynamic>{
     'fcmToken': fcmToken,
+    'topic': topic,
     'projectId': projectId,
     'title': title,
     'body': body,
-    // pass raw extraData to isolate; isolate will validate and coerce
     'extraData': extraData ?? <String, dynamic>{},
     'notification': notification,
     'androidChannelId': androidChannelId,
@@ -112,7 +143,7 @@ Future<void> sendFcmPush({
     'serviceAccount': sa,
   };
 
-  final result = await compute(_sendFcmPushIsolate, args);
+  final result = await compute(_sendFcmPushIsolateSafe, args);
 
   if (result['ok'] == true) {
     return;
@@ -126,8 +157,11 @@ Future<void> sendFcmPush({
       // ignore: avoid_print
       print(stack);
     }
+    if (badExtra != null) {
+      // ignore: avoid_print
+      print('sendFcmPush (dev) badExtra: $badExtra');
+    }
 
-    // Provide a friendly error that includes the root cause if available
     final buffer = StringBuffer();
     buffer.writeln(err);
     if (badExtra != null) {
@@ -141,38 +175,45 @@ Future<void> sendFcmPush({
   }
 }
 
-// Helper used in release path to coerce extraData into Map<String, String>
+/// Coerce a Map<String, dynamic> into Map<String, String> for server-forwarding.
+/// For non-primitives we JSON-encode; on failure we fallback to `toString()`.
 Map<String, String> _coerceExtraDataForServer(Map<String, dynamic>? raw) {
   final out = <String, String>{};
   if (raw == null) return out;
   raw.forEach((k, v) {
     if (k == null) return;
     final key = k.toString();
-    if (v == null) {
-      out[key] = '';
-    } else if (v is String || v is num || v is bool) {
-      out[key] = v.toString();
-    } else {
-      // For release path we stringify complex structures to JSON so server receives something useful
-      try {
-        out[key] = jsonEncode(v);
-      } catch (_) {
+    try {
+      if (v == null) {
+        out[key] = '';
+      } else if (v is String || v is num || v is bool) {
         out[key] = v.toString();
+      } else {
+        try {
+          out[key] = jsonEncode(v);
+        } catch (_) {
+          out[key] = v.toString();
+        }
       }
+    } catch (_) {
+      out[key] = '';
     }
   });
   return out;
 }
 
-/// Background isolate that signs JWT with the service account and sends to FCM.
-/// This is only used in non-release (development) mode.
-Future<Map<String, dynamic>> _sendFcmPushIsolate(Map<String, dynamic> args) async {
+/// Isolate entrypoint with safe coercion & logging (dev signing flow)
+/// Isolate entrypoint with safe coercion & logging (dev signing flow)
+Future<Map<String, dynamic>> _sendFcmPushIsolateSafe(Map<String, dynamic> args) async {
   try {
     final serviceAccount = (args['serviceAccount'] as Map).cast<String, dynamic>();
 
     final clientEmail = serviceAccount['client_email']?.toString();
     final tokenUri = serviceAccount['token_uri']?.toString();
     final privateKeyPem = serviceAccount['private_key']?.toString();
+
+    // ignore: avoid_print
+    print('DEBUG sendFcmPushIsolate: clientEmail=$clientEmail tokenUri=$tokenUri now=${DateTime.now().toUtc().toIso8601String()}');
 
     if (clientEmail == null || tokenUri == null || privateKeyPem == null) {
       return {
@@ -181,7 +222,6 @@ Future<Map<String, dynamic>> _sendFcmPushIsolate(Map<String, dynamic> args) asyn
       };
     }
 
-    // Validate PEM block
     final pemMatch =
         RegExp(r'-----BEGIN PRIVATE KEY-----\s*([\s\S]+?)\s*-----END PRIVATE KEY-----')
             .firstMatch(privateKeyPem);
@@ -203,7 +243,6 @@ Future<Map<String, dynamic>> _sendFcmPushIsolate(Map<String, dynamic> args) asyn
       };
     }
 
-    // Build & sign JWT
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final jwt = JWT({
       'iss': clientEmail,
@@ -216,7 +255,6 @@ Future<Map<String, dynamic>> _sendFcmPushIsolate(Map<String, dynamic> args) asyn
     final key = RSAPrivateKey(privateKeyPem);
     final signedJwt = jwt.sign(key, algorithm: JWTAlgorithm.RS256);
 
-    // Exchange JWT for access token
     final oauthResp = await http
         .post(
           Uri.parse(tokenUri),
@@ -241,60 +279,79 @@ Future<Map<String, dynamic>> _sendFcmPushIsolate(Map<String, dynamic> args) asyn
       return {'ok': false, 'error': 'No access_token in OAuth response: ${oauthResp.body}'};
     }
 
-    // Build dataMap (strict Map<String, String>) and coerce any extra values to strings,
-    // but detect nested Maps/Lists and return a helpful error listing offending keys.
-    final Map<String, String> dataMap = {
+    // Build a permissive data map (values may be dynamic initially)
+    final Map<String, dynamic> dataMap = {
       'click_action': 'FLUTTER_NOTIFICATION_CLICK',
       'title': args['title']?.toString() ?? '',
       'body': args['body']?.toString() ?? '',
     };
 
-    // Add extraData safely: coerce keys and values to strings, collect problematic entries
     final rawExtra = args['extraData'];
+    // ignore: avoid_print
+    print('DEBUG: extraData runtimeType=${rawExtra?.runtimeType} sample=${_shortSample(rawExtra, 300)}');
+
     final List<Map<String, dynamic>> problems = [];
+
+    // Coerce extraData into strings consistently
     if (rawExtra is Map) {
-      rawExtra.forEach((key, value) {
-        final k = key?.toString() ?? '';
+      rawExtra.forEach((rawKey, rawValue) {
+        final k = rawKey?.toString() ?? '';
         if (k.isEmpty) return;
 
-        if (value == null) {
-          dataMap[k] = '';
-          return;
-        }
-
-        // Allowed primitive types
-        if (value is String || value is num || value is bool) {
-          dataMap[k] = value.toString();
-          return;
-        }
-
-        // If value is a Map or Iterable (nested), that's likely the cause of your runtime error.
-        if (value is Map || value is Iterable) {
-          // Record problem with sample (truncated)
-          String sample;
-          try {
-            sample = jsonEncode(value);
-            if (sample.length > 200) sample = sample.substring(0, 200) + '...';
-          } catch (_) {
-            sample = value.toString();
-            if (sample.length > 200) sample = sample.substring(0, 200) + '...';
-          }
-          problems.add({'key': k, 'type': value.runtimeType.toString(), 'sample': sample});
-          return;
-        }
-
-        // For any other non-primitive value try to jsonEncode; if it fails, record as problem
         try {
-          dataMap[k] = jsonEncode(value);
-        } catch (e) {
-          problems.add({'key': k, 'type': value.runtimeType.toString(), 'sample': value.toString()});
+          String s;
+          if (rawValue == null) {
+            s = '';
+          } else if (rawValue is String || rawValue is num || rawValue is bool) {
+            s = rawValue.toString();
+          } else {
+            try {
+              s = jsonEncode(rawValue); // Try JSON encoding for complex objects
+            } catch (eJson) {
+              try {
+                s = rawValue.toString(); // Fallback to toString
+                problems.add({
+                  'key': k,
+                  'type': rawValue.runtimeType.toString(),
+                  'note': 'jsonEncode failed; used toString() fallback',
+                  'valueSample': _shortSample(rawValue),
+                  'error': eJson.toString()
+                });
+                // ignore: avoid_print
+                print('DEBUG: jsonEncode failed for key=$k type=${rawValue.runtimeType} sample=${_shortSample(rawValue)} error=$eJson');
+              } catch (eToString) {
+                problems.add({
+                  'key': k,
+                  'type': rawValue.runtimeType.toString(),
+                  'error': 'jsonEncode failed and toString failed: ${eToString.toString()}',
+                  'valueSample': _shortSample(rawValue),
+                });
+                s = '';
+              }
+            }
+          }
+
+          // assign string value
+          dataMap[k] = s;
+        } catch (e, st) {
+          problems.add({
+            'key': rawKey?.toString() ?? '<unknown>',
+            'type': rawValue?.runtimeType.toString(),
+            'error': e.toString(),
+            'stack': st.toString(),
+            'valueSample': _shortSample(rawValue),
+          });
+          // ignore: avoid_print
+          print('DEBUG: Exception while coercing extraData key=$rawKey type=${rawValue?.runtimeType} sample=${_shortSample(rawValue)} error=$e');
         }
       });
 
       if (problems.isNotEmpty) {
+        // ignore: avoid_print
+        print('DEBUG: extraData problems detected: ${jsonEncode(problems)}');
         return {
           'ok': false,
-          'error': 'extraData contains nested objects which cannot be used as FCM data values.',
+          'error': 'extraData contains entries which had issues converting to strings.',
           'badExtra': problems,
         };
       }
@@ -305,41 +362,96 @@ Future<Map<String, dynamic>> _sendFcmPushIsolate(Map<String, dynamic> args) asyn
       };
     }
 
-    // Build FCM message (HTTP v1)
-    final message = <String, dynamic>{
-      'token': args['fcmToken']?.toString(),
-      'data': dataMap,
-      'android': {'priority': 'high'},
-      'apns': {
-        'headers': {
-          'apns-priority': '10',
-          'apns-push-type': (args['notification'] as bool) ? 'alert' : 'background',
-        },
-        'payload': (args['notification'] as bool)
-            ? {
-                'aps': {
-                  'alert': {'title': args['title']?.toString(), 'body': args['body']?.toString()},
-                  'sound': 'default',
-                }
-              }
-            : {
-                'aps': {'content-available': 1}
-              },
+    // ----- Ensure every value in finalData is a String -----
+// ----- Ensure every value in finalData is a String -----
+final Map<String, String> finalData = {};
+String? lastKey;
+dynamic lastVal;
+
+try {
+  for (final entry in dataMap.entries) {
+    final rawKey = entry.key;
+    final rawVal = entry.value;
+    lastKey = rawKey?.toString();
+    lastVal = rawVal;
+
+    if (rawKey == null) continue;
+    final k = rawKey.toString();
+    String s;
+    if (rawVal == null) {
+      s = '';
+    } else if (rawVal is String) {
+      s = rawVal;
+    } else if (rawVal is num || rawVal is bool) {
+      s = rawVal.toString();
+    } else {
+      try {
+        s = jsonEncode(rawVal); // Try JSON encoding
+      } catch (_) {
+        try {
+          s = rawVal.toString(); // Fallback
+        } catch (_) {
+          s = ''; // Ultimate fallback
+        }
+      }
+    }
+    finalData[k] = s;
+  }
+} catch (e, st) {
+  print(
+    'DEBUG: Failed to coerce dataMap entry: key=$lastKey, '
+    'value=${_shortSample(lastVal)}, error=$e',
+  );
+  return {
+    'ok': false,
+    'error': 'Failed to coerce data map to strings: ${e.toString()}',
+    'stack': st.toString()
+  };
+}
+
+    // Build the message without using conditional expressions inside map literal
+    final Map<String, dynamic> message = {};
+    if (args['topic'] != null && (args['topic'] as String).isNotEmpty) {
+      message['topic'] = args['topic']?.toString();
+    } else {
+      message['token'] = args['fcmToken']?.toString();
+    }
+
+    message['data'] = finalData;
+    message['android'] = {'priority': 'high'};
+    message['apns'] = {
+      'headers': {
+        'apns-priority': '10',
+        'apns-push-type': (args['notification'] as bool) ? 'alert' : 'background',
       },
+      'payload': (args['notification'] as bool)
+          ? {
+              'aps': {
+                'alert': {
+                  'title': args['title']?.toString(),
+                  'body': args['body']?.toString(),
+                },
+                'sound': 'default',
+              }
+            }
+          : {
+              'aps': {'content-available': 1}
+            },
     };
 
     if (args['notification'] as bool) {
       message['notification'] = {'title': args['title']?.toString(), 'body': args['body']?.toString()};
       final android = (message['android'] as Map<String, dynamic>);
-      android['notification'] = {
-        if (args['androidChannelId'] != null) 'channel_id': args['androidChannelId']?.toString(),
-        'sound': 'default',
-        'click_action': 'FLUTTER_NOTIFICATION_CLICK',
-      };
+      final Map<String, dynamic> androidNotification = {};
+      if (args['androidChannelId'] != null) {
+        androidNotification['channel_id'] = args['androidChannelId']?.toString();
+      }
+      androidNotification['sound'] = 'default';
+      androidNotification['click_action'] = 'FLUTTER_NOTIFICATION_CLICK';
+      android['notification'] = androidNotification;
       if (args['ttlSeconds'] != null) android['ttl'] = '${args['ttlSeconds']}s';
     }
 
-    // Encode & send
     String requestBody;
     try {
       requestBody = jsonEncode({'message': message});
@@ -373,6 +485,8 @@ Future<Map<String, dynamic>> _sendFcmPushIsolate(Map<String, dynamic> args) asyn
       return {'ok': false, 'error': 'FCM failed: ${fcmResp.statusCode} ${fcmResp.body}'};
     }
   } catch (e, st) {
+    // ignore: avoid_print
+    print('DEBUG: unexpected error in _sendFcmPushIsolateSafe: $e\n$st');
     return {'ok': false, 'error': e.toString(), 'stack': st.toString()};
   }
 }

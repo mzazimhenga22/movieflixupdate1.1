@@ -277,7 +277,6 @@ class MessagesController extends ChangeNotifier {
         final readStatus = data['readStatus'] as Map<dynamic, dynamic>? ?? {};
         unreadForUser = readStatus[uid] != true;
       } else {
-        // unknown - we'll fetch last message and inspect readBy
         unreadForUser = false;
       }
       unreadCountForUI = unreadForUser ? 1 : 0;
@@ -293,15 +292,58 @@ class MessagesController extends ChangeNotifier {
       try {
         final userIds = List<dynamic>.from(data['userIds'] ?? []);
         otherId = userIds.firstWhere((e) => e != uid, orElse: () => null) as String?;
+
         if (otherId != null) {
-          // try to read cached user info inside doc if present
-          if (data.containsKey('otherUser')) {
-            otherUser = Map<String, dynamic>.from(data['otherUser']);
-            otherUser['id'] = otherId;
-          } else {
-            // lazy: set minimal map (UI will show username later by fetching users collection as needed)
-            otherUser = {'id': otherId};
+          // Prefer per-user cached object if present and keyed by otherId
+          if (data.containsKey('cachedUsers')) {
+            try {
+              final rawCached = data['cachedUsers'];
+              if (rawCached is Map) {
+                // cachedUsers might be Map<String, dynamic> or Map<dynamic, dynamic>
+                final entry = rawCached[otherId] ?? rawCached[otherId.toString()];
+                if (entry is Map) {
+                  otherUser = Map<String, dynamic>.from(entry);
+                  // ensure id is present and correct
+                  otherUser['id'] = otherId;
+                }
+              }
+            } catch (_) {
+              // ignore parse problems and fallthrough to otherUser handling
+            }
           }
+
+          // If no valid cachedUsers entry, try legacy 'otherUser' field BUT only accept it
+          // if it already corresponds to otherId. Otherwise prefer to fetch the profile.
+          if (otherUser == null && data.containsKey('otherUser')) {
+            try {
+              final raw = data['otherUser'];
+              if (raw is Map) {
+                final mapRaw = Map<String, dynamic>.from(raw);
+                // If the doc stored an id that matches otherId, use it.
+                if (mapRaw.containsKey('id')) {
+                  final storedId = mapRaw['id']?.toString();
+                  if (storedId == otherId) {
+                    otherUser = mapRaw;
+                    otherUser['id'] = otherId;
+                  } else {
+                    // legacy mismatch: stored otherUser is not for this otherId (ignore)
+                    otherUser = {'id': otherId};
+                  }
+                } else {
+                  // raw has no id: not trustworthy (could be cached from creator's view).
+                  // Use minimal placeholder and fetch profile below.
+                  otherUser = {'id': otherId};
+                }
+              } else {
+                otherUser = {'id': otherId};
+              }
+            } catch (_) {
+              otherUser = {'id': otherId};
+            }
+          }
+
+          // If still null, set minimal placeholder so UI can fetch profile
+          otherUser ??= {'id': otherId};
         }
       } catch (_) {}
     }
@@ -369,6 +411,7 @@ class MessagesController extends ChangeNotifier {
       });
     }
   }
+
 
   /// Fetch a user profile and apply to the in-memory chat summary (if present).
   Future<void> _fetchAndApplyProfile(String userId, String chatId, bool isGroup) async {
@@ -749,6 +792,20 @@ class MessagesController extends ChangeNotifier {
       final otherId = otherUser['id'] as String;
       final chatId = getChatId(uid, otherId);
 
+      // Build per-user cached info to avoid "wrong otherUser" being read on the other side.
+      final cachedUsers = <String, Map<String, dynamic>>{
+        uid: {
+          'id': uid,
+          'username': currentUser['username'] ?? '',
+          'photoUrl': currentUser['photoUrl'] ?? '',
+        },
+        otherId: {
+          'id': otherId,
+          'username': otherUser['username'] ?? '',
+          'photoUrl': otherUser['photoUrl'] ?? '',
+        },
+      };
+
       await FirebaseFirestore.instance.collection('chats').doc(chatId).set({
         'userIds': [uid, otherId],
         'lastMessage': '',
@@ -756,11 +813,8 @@ class MessagesController extends ChangeNotifier {
         'unreadBy': [],
         'deletedBy': [],
         'isGroup': false,
-        // optionally include small cached otherUser info for list UI
-        'otherUser': {
-          'username': otherUser['username'] ?? '',
-          'photoUrl': otherUser['photoUrl'] ?? '',
-        },
+        // store per-user cached profiles to be unambiguous for both participants
+        'cachedUsers': cachedUsers,
       }, SetOptions(merge: true));
 
       // navigate (use captured navigator)
@@ -781,6 +835,7 @@ class MessagesController extends ChangeNotifier {
       debugPrint('[MessagesController] openOrCreateDirectChat error: $e');
     }
   }
+
 
   /// Create group flow
   Future<void> navigateToNewGroupChat(BuildContext ctx) async {

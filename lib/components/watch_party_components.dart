@@ -1,3 +1,4 @@
+// watch_party_components.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:movie_app/components/movie_card.dart';
@@ -15,6 +16,10 @@ Widget buildDirectStreamSearchView(BuildContext context,
       backgroundColor: Colors.black87,
       elevation: 0,
       actions: [buildTrialTicketCounter(context, state)],
+      bottom: state.isLoading ? PreferredSize(
+        preferredSize: const Size.fromHeight(4),
+        child: LinearProgressIndicator(color: Provider.of<SettingsProvider>(context).accentColor),
+      ) : null,
     ),
     body: Stack(
       children: [
@@ -32,18 +37,28 @@ Widget buildDirectStreamSearchView(BuildContext context,
                 padding: const EdgeInsets.all(12.0),
                 child: TextField(
                   controller: searchController,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     hintText: "Search movies",
-                    prefixIcon: Icon(Icons.search, color: Colors.white70),
-                    border: OutlineInputBorder(
+                    prefixIcon: const Icon(Icons.search, color: Colors.white70),
+                    border: const OutlineInputBorder(
                       borderRadius: BorderRadius.all(Radius.circular(12)),
                     ),
                     filled: true,
                     fillColor: Colors.black54,
-                    hintStyle: TextStyle(color: Colors.white70),
+                    hintStyle: const TextStyle(color: Colors.white70),
+                    suffixIcon: state.isSearching
+                        ? Padding(
+                            padding: const EdgeInsets.all(12.0),
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Provider.of<SettingsProvider>(context).accentColor),
+                            ),
+                          )
+                        : null,
                   ),
                   style: const TextStyle(color: Colors.white),
-                  onSubmitted: (value) => searchMovies(value, state),
+                  onSubmitted: state.isLoading ? null : (value) => searchMovies(value, state),
                 ),
               ),
               Expanded(
@@ -75,7 +90,7 @@ Widget buildDirectStreamSearchView(BuildContext context,
                               final movie = state.searchResults[index];
                               return MovieCard.fromJson(
                                 movie,
-                                onTap: () => state.startMoviePlayback(movie),
+                                onTap: state.isLoading ? null : () => state.startMoviePlayback(movie),
                               );
                             },
                           ),
@@ -96,20 +111,48 @@ Widget buildDirectStreamSearchView(BuildContext context,
 
 Widget buildCreatorSetupView(BuildContext context, WatchPartyScreenState state,
     TextEditingController searchController) {
+  final settings = Provider.of<SettingsProvider>(context);
   return Scaffold(
     appBar: AppBar(
       title: const Text("Create Watch Party"),
       backgroundColor: Colors.black87,
       elevation: 0,
       actions: [
+        // share button only when party created
         IconButton(
           icon: const Icon(Icons.share, color: Colors.white),
-          onPressed: state.partyCode != null
-              ? () => showPartyCode(context, state)
-              : null,
+          onPressed: state.partyCode != null ? () => showPartyCode(context, state) : null,
         ),
+        // cancel button only when party created (creator)
+        if (state.partyCode != null)
+          IconButton(
+            icon: const Icon(Icons.cancel, color: Colors.redAccent),
+            tooltip: 'Cancel Party',
+            onPressed: () async {
+              // extra confirmation
+              final confirmed = await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  backgroundColor: Colors.black87,
+                  title: const Text('Cancel Party'),
+                  content: const Text('Are you sure you want to cancel and delete this party?'),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('No')),
+                    ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Yes')),
+                  ],
+                ),
+              );
+              if (confirmed == true) {
+                await state.cancelCreatedParty();
+              }
+            },
+          ),
         buildTrialTicketCounter(context, state),
       ],
+      bottom: state.isLoading ? PreferredSize(
+        preferredSize: const Size.fromHeight(4),
+        child: LinearProgressIndicator(color: settings.accentColor),
+      ) : null,
     ),
     body: Stack(
       children: [
@@ -138,7 +181,7 @@ Widget buildCreatorSetupView(BuildContext context, WatchPartyScreenState state,
                     hintStyle: TextStyle(color: Colors.white70),
                   ),
                   style: const TextStyle(color: Colors.white),
-                  onSubmitted: (value) => searchMovies(value, state),
+                  onSubmitted: state.isLoading ? null : (value) => searchMovies(value, state),
                 ),
               ),
               Expanded(
@@ -170,19 +213,60 @@ Widget buildCreatorSetupView(BuildContext context, WatchPartyScreenState state,
                               final movie = state.searchResults[index];
                               return MovieCard.fromJson(
                                 movie,
-                                onTap: () =>
-                                    showScheduleDialog(context, movie, state),
+                                onTap: state.isLoading ? null : () => showScheduleDialog(context, movie, state),
                               );
                             },
                           ),
               ),
+              // Party info & cancel CTA for creators
               if (state.partyCode != null)
                 Padding(
                   padding: const EdgeInsets.all(12.0),
-                  child: Text(
-                    "Party Code: ${state.partyCode}\nParticipants: ${state.inviteJoinCount}/5",
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.white70, fontSize: 16),
+                  child: Column(
+                    children: [
+                      Text(
+                        "Party Code: ${state.partyCode}\nParticipants: ${state.inviteJoinCount}/5",
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white70, fontSize: 16),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: settings.accentColor,
+                            ),
+                            onPressed: () => showPartyCode(context, state),
+                            icon: const Icon(Icons.share, color: Colors.black),
+                            label: const Text('Share', style: TextStyle(color: Colors.black)),
+                          ),
+                          const SizedBox(width: 12),
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.redAccent,
+                            ),
+                            onPressed: () async {
+                              final confirmed = await showDialog<bool>(
+                                context: context,
+                                builder: (ctx) => AlertDialog(
+                                  backgroundColor: Colors.black87,
+                                  title: const Text('Cancel Party'),
+                                  content: const Text('Are you sure you want to cancel and delete this party?'),
+                                  actions: [
+                                    TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('No')),
+                                    ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Yes')),
+                                  ],
+                                ),
+                              );
+                              if (confirmed == true) await state.cancelCreatedParty();
+                            },
+                            icon: const Icon(Icons.cancel, color: Colors.black),
+                            label: const Text('Cancel Party', style: TextStyle(color: Colors.black)),
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
                 ),
             ],
@@ -190,8 +274,13 @@ Widget buildCreatorSetupView(BuildContext context, WatchPartyScreenState state,
         ),
         if (state.isLoading)
           Center(
-            child: CircularProgressIndicator(
-              color: Provider.of<SettingsProvider>(context).accentColor,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(color: settings.accentColor),
+                const SizedBox(height: 12),
+                const Text("Working...", style: TextStyle(color: Colors.white70)),
+              ],
             ),
           ),
       ],
@@ -695,4 +784,3 @@ class PopcornProgressBar extends StatelessWidget {
     );
   }
 }
-

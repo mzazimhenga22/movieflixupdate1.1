@@ -1,14 +1,5 @@
 // watch_party_screen.dart
 // Watch party UI + controller logic (accepts an optional `post` parameter)
-//
-// This file is a minimal, drop-in update to fix the "undefined_named_parameter: post"
-// error by allowing WatchPartyScreen to accept an optional `post` payload (Map).
-//
-// The rest of your watch-party helpers (showRoleSelection, fetchStreamingLinks, startControlsTimer,
-// buildCreatorSetupView, buildInviteeWaitingView, buildPartyView, etc.) are expected to live in the
-// other files you referenced (watch_party_components.dart, watch_party_utils.dart, watch_party_flow.dart).
-// Keep those helpers in place — this file just ensures the screen can receive a `post` argument
-// (so `Navigator.push(..., builder: (_) => WatchPartyScreen(post: post))` compiles).
 
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -71,6 +62,10 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
   // Firestore instance
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
+  // Create flow cancellation flags & state
+  bool _creating = false;
+  bool _createCancelled = false;
+
   // Getters
   bool get isSearching => _isSearching;
   List<Map<String, dynamic>> get searchResults => _searchResults;
@@ -113,8 +108,11 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
     if (widget.post != null) {
       final p = widget.post!;
       // Safely extract title and video/media url if present
-      final suppliedTitle = (p['title'] as String?) ?? (p['movieTitle'] as String?);
-      final suppliedMedia = (p['media'] as String?) ?? (p['mediaUrl'] as String?) ?? (p['video'] as String?);
+      final suppliedTitle =
+          (p['title'] as String?) ?? (p['movieTitle'] as String?);
+      final suppliedMedia = (p['media'] as String?) ??
+          (p['mediaUrl'] as String?) ??
+          (p['video'] as String?);
       if (suppliedTitle != null && suppliedTitle.isNotEmpty) {
         _title = suppliedTitle;
       }
@@ -129,14 +127,14 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
     // Start auto-hide controls timer (helper in watch_party_utils.dart)
     startControlsTimer(this);
 
-    // Start listening to playback/participant changes only once partyCode is set/created
-    _listenToPlaybackState();
-    _listenToParticipants();
+    // IMPORTANT: do NOT attach Party listeners here.
+    // They will be attached once a party code exists (after create or join).
   }
 
-  // Save party to Firestore
+  // Save party to Firestore (used by schedule flow)
   Future<void> savePartyToFirestore(
       String code, Map<String, dynamic> movie, int delayMinutes) async {
+    if (_createCancelled) return; // respect cancellation
     final partyData = {
       'code': code,
       'movieTitle': movie['title'] ?? "Untitled",
@@ -146,67 +144,67 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
       'maxParticipants': 5,
       'createdAt': FieldValue.serverTimestamp(),
       'isActive': true,
-      'expiryTime': DateTime.now().add(const Duration(hours: 24)).toIso8601String(),
+      'expiryTime':
+          DateTime.now().add(const Duration(hours: 24)).toIso8601String(),
     };
     await _firestore.collection('watch_parties').doc(code).set(partyData);
   }
 
-  // Listen to participant updates and messages
+  // Listen to participant updates and messages (attach after partyCode is assigned)
   void _listenToParticipants() {
-    if (_partyCode != null) {
-      _firestore.collection('watch_parties').doc(_partyCode).snapshots().listen(
-        (snapshot) {
-          if (snapshot.exists && mounted) {
-            setState(() {
-              _inviteJoinCount = snapshot.data()?['participants'] ?? 0;
-            });
-          }
-        },
-        onError: (error) =>
-            showError(context, "Error syncing participants: $error"),
-      );
-      _firestore
-          .collection('watch_parties')
-          .doc(_partyCode)
-          .collection('messages')
-          .orderBy('timestamp', descending: true)
-          .snapshots()
-          .listen(
-        (snapshot) {
-          if (mounted) {
-            setState(() {
-              _messages =
-                  snapshot.docs.map((doc) => doc['message'] as String).toList();
-            });
-          }
-        },
-        onError: (error) =>
-            showError(context, "Error syncing messages: $error"),
-      );
-    }
+    if (_partyCode == null) return;
+    // participants summary doc
+    _firestore.collection('watch_parties').doc(_partyCode).snapshots().listen(
+      (snapshot) {
+        if (snapshot.exists && mounted) {
+          setState(() {
+            _inviteJoinCount = snapshot.data()?['participants'] ?? 0;
+          });
+        }
+      },
+      onError: (error) =>
+          showError(context, "Error syncing participants: $error"),
+    );
+
+    // messages subcollection
+    _firestore
+        .collection('watch_parties')
+        .doc(_partyCode)
+        .collection('messages')
+        .orderBy('timestamp', descending: true)
+        .snapshots()
+        .listen(
+      (snapshot) {
+        if (mounted) {
+          setState(() {
+            _messages =
+                snapshot.docs.map((doc) => doc['message'] as String).toList();
+          });
+        }
+      },
+      onError: (error) => showError(context, "Error syncing messages: $error"),
+    );
   }
 
-  // Listen to playback state
+  // Listen to playback state (attach after partyCode is assigned)
   void _listenToPlaybackState() {
-    if (_partyCode != null) {
-      _firestore.collection('watch_parties').doc(_partyCode).snapshots().listen(
-        (snapshot) {
-          if (snapshot.exists && mounted) {
-            final playbackState = snapshot.data()?['playbackState'];
-            setState(() {
-              _isPlaying = playbackState == 'playing';
-              if (_isPlaying) {
-                _curtainController.forward();
-              } else {
-                _curtainController.reverse();
-              }
-            });
-          }
-        },
-        onError: (error) =>
-            showError(context, "Error syncing playback: $error"),
-      );
-    }
+    if (_partyCode == null) return;
+    _firestore.collection('watch_parties').doc(_partyCode).snapshots().listen(
+      (snapshot) {
+        if (snapshot.exists && mounted) {
+          final playbackState = snapshot.data()?['playbackState'];
+          setState(() {
+            _isPlaying = playbackState == 'playing';
+            if (_isPlaying) {
+              _curtainController.forward();
+            } else {
+              _curtainController.reverse();
+            }
+          });
+        }
+      },
+      onError: (error) => showError(context, "Error syncing playback: $error"),
+    );
   }
 
   void startMoviePlayback(Map<String, dynamic> movie) {
@@ -223,22 +221,23 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
       _searchResults = [];
     });
     fetchStreamingLinks(movie, this).then((_) {
-      if (mounted) {
-        _curtainController.forward();
-        _isPlaying = true;
-        if (_partyCode != null) {
-          _firestore.collection('watch_parties').doc(_partyCode).update({
-            'playbackState': 'playing',
-            'timestamp': DateTime.now().millisecondsSinceEpoch / 1000,
-          });
-        }
-        startPartyTimer(() {
-          if (mounted && _remainingMinutes <= 0) {
-            endParty();
-          }
+      if (!mounted) return;
+      _curtainController.forward();
+      _isPlaying = true;
+      if (_partyCode != null) {
+        _firestore.collection('watch_parties').doc(_partyCode).update({
+          'playbackState': 'playing',
+          'timestamp': DateTime.now().millisecondsSinceEpoch / 1000,
         });
-        showSuccess(context, "Starting $_title");
       }
+      startPartyTimer(() {
+        if (mounted && _remainingMinutes <= 0) {
+          endParty();
+        }
+      });
+      showSuccess(context, "Starting $_title");
+    }).catchError((e) {
+      if (mounted) showError(context, "Failed to start playback: $e");
     });
   }
 
@@ -252,7 +251,6 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
     });
     Future.delayed(const Duration(seconds: 3), () {
       if (mounted) {
-        // remove the oldest reaction (simple cleanup strategy)
         if (_emojiReactions.isNotEmpty) {
           setState(() => _emojiReactions.removeAt(0));
         }
@@ -412,29 +410,188 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
     }
   }
 
+  /// Cancelable create flow:
+  /// This shows a confirmation then a cancellable progress dialog while the party doc is being created.
   void authorizeCreator() async {
+    if (!mounted) return;
+
+    // Ask the user for confirmation first (so they can cancel before starting)
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        final settings = Provider.of<SettingsProvider>(ctx, listen: false);
+        return AlertDialog(
+          backgroundColor: Colors.black87,
+          title: const Text('Create Watch Party'),
+          content: const Text('Create a new watch party? You can cancel while creating.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: settings.accentColor),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Create', style: TextStyle(color: Colors.black)),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) return;
+
+    // Start creating
     setState(() {
       _isLoading = true;
+      _creating = true;
+      _createCancelled = false;
     });
-    final code = generateSecurePartyCode();
+
+    // Show progress dialog with cancel option
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StatefulBuilder(builder: (context, setStateDialog) {
+          return AlertDialog(
+            backgroundColor: Colors.black87,
+            title: const Text('Creating party...'),
+            content: const SizedBox(height: 48, child: Center(child: CircularProgressIndicator())),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  // set cancellation flag; the ongoing create logic will respect this
+                  _createCancelled = true;
+                  setStateDialog(() {});
+                  try {
+                    Navigator.of(ctx).pop(); // dismiss progress dialog
+                  } catch (_) {}
+                },
+                child: const Text('Cancel', style: TextStyle(color: Colors.red)),
+              ),
+            ],
+          );
+        });
+      },
+    );
+
+    // Attempt creation (generate code, ensure non-collision); respect cancel flag
     try {
-      final existingParty =
-          await _firestore.collection('watch_parties').doc(code).get();
-      if (existingParty.exists) {
-        showError(context, "Party code already exists, try again.");
-        return;
+      final codeAttempt = generateSecurePartyCode();
+      if (_createCancelled) throw Exception('Create cancelled');
+
+      final existing = await _firestore.collection('watch_parties').doc(codeAttempt).get();
+      if (_createCancelled) throw Exception('Create cancelled');
+
+      if (existing.exists) {
+        // If collision, try up to a few times
+        String? successCode;
+        for (var i = 0; i < 5 && !_createCancelled; i++) {
+          final next = generateSecurePartyCode();
+          final existsNext = await _firestore.collection('watch_parties').doc(next).get();
+          if (!existsNext.exists) {
+            successCode = next;
+            break;
+          }
+        }
+        if (_createCancelled) throw Exception('Create cancelled');
+        if (successCode == null) {
+          throw Exception('Failed to generate unique code. Try again.');
+        } else {
+          // use successCode
+          await _firestore.collection('watch_parties').doc(successCode).set({
+            'code': successCode,
+            'movieTitle': _title,
+            'startTime': DateTime.now().toIso8601String(),
+            'participants': 1,
+            'maxParticipants': 5,
+            'createdAt': FieldValue.serverTimestamp(),
+            'isActive': true,
+            'expiryTime': DateTime.now().add(const Duration(hours: 24)).toIso8601String(),
+          });
+          if (_createCancelled) throw Exception('Create cancelled');
+          if (!mounted) return;
+          setState(() {
+            _isAuthorized = true;
+            _isCreator = true;
+            _partyCode = successCode;
+          });
+          // attach listeners now that partyCode exists
+          _listenToParticipants();
+          _listenToPlaybackState();
+          showSuccess(context, "Party created! Code: $successCode");
+        }
+      } else {
+        // use codeAttempt
+        await _firestore.collection('watch_parties').doc(codeAttempt).set({
+          'code': codeAttempt,
+          'movieTitle': _title,
+          'startTime': DateTime.now().toIso8601String(),
+          'participants': 1,
+          'maxParticipants': 5,
+          'createdAt': FieldValue.serverTimestamp(),
+          'isActive': true,
+          'expiryTime': DateTime.now().add(const Duration(hours: 24)).toIso8601String(),
+        });
+        if (_createCancelled) throw Exception('Create cancelled');
+        if (!mounted) return;
+        setState(() {
+          _isAuthorized = true;
+          _isCreator = true;
+          _partyCode = codeAttempt;
+        });
+        _listenToParticipants();
+        _listenToPlaybackState();
+        showSuccess(context, "Party created! Code: $codeAttempt");
       }
-      setState(() {
-        _isAuthorized = true;
-        _isCreator = true;
-        _partyCode = code;
-      });
-      _listenToParticipants();
-      showSuccess(context, "Party created! Code: $code");
     } catch (e) {
-      showError(context, "Failed to create party: $e");
+      if (!_createCancelled && mounted) {
+        showError(context, e.toString());
+      }
     } finally {
-      setState(() => _isLoading = false);
+      // Ensure progress dialog is dismissed
+      try {
+        Navigator.of(context, rootNavigator: true).pop(); // pop possible progress dialog
+      } catch (_) {}
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _creating = false;
+        });
+      }
+    }
+  }
+
+  /// Cancel an already-created party (creator only).
+  Future<void> cancelCreatedParty() async {
+    if (_partyCode == null || !_isCreator) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.black87,
+        title: const Text('Cancel Party'),
+        content: const Text('Are you sure you want to cancel and delete this party?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('No')),
+          ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Yes')),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+    try {
+      await _firestore.collection('watch_parties').doc(_partyCode).delete();
+    } catch (e) {
+      debugPrint('Failed to delete party doc: $e');
+    } finally {
+      if (!mounted) return;
+      setState(() {
+        _partyCode = null;
+        _isCreator = false;
+        _isAuthorized = false;
+        _inviteJoinCount = 0;
+        _messages = [];
+      });
+      showSuccess(context, 'Party cancelled');
     }
   }
 
@@ -468,13 +625,16 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
           await _firestore.collection('watch_parties').doc(partyCode).update({
             'participants': FieldValue.increment(1),
           });
+          if (!mounted) return;
           setState(() {
             _isAuthorized = true;
             _partyCode = partyCode;
             _userSeats["User$_inviteJoinCount"] = seat;
             _inviteJoinCount = currentParticipants + 1;
           });
+          // Attach listeners now
           _listenToParticipants();
+          _listenToPlaybackState();
           showSuccess(context, "Joined party successfully!");
         } else {
           showError(context, "Party is full!");
@@ -485,7 +645,7 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
     } catch (e) {
       showError(context, "Failed to join party: $e");
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -512,11 +672,16 @@ class WatchPartyScreenState extends State<WatchPartyScreen>
 
   void endParty() async {
     if (_partyCode != null) {
-      await _firestore.collection('watch_parties').doc(_partyCode).update({
-        'isActive': false,
-        'playbackState': 'paused',
-      });
+      try {
+        await _firestore.collection('watch_parties').doc(_partyCode).update({
+          'isActive': false,
+          'playbackState': 'paused',
+        });
+      } catch (e) {
+        debugPrint('Failed to mark party inactive: $e');
+      }
     }
+    if (!mounted) return;
     setState(() {
       _partyStartTime = null;
       _videoPath = "";

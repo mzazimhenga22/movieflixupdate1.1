@@ -1,7 +1,9 @@
+// reels_section.dart
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:movie_app/tmdb_api.dart';
 import 'package:shimmer/shimmer.dart';
+import 'package:movie_app/tmdb_api.dart';
 import '../reel_player_screen.dart';
 import '../models/reel.dart';
 
@@ -16,29 +18,45 @@ class _ReelsSectionState extends State<ReelsSection>
     with SingleTickerProviderStateMixin, AutomaticKeepAliveClientMixin {
   static List<dynamic> _cachedReels = [];
   List<dynamic> reelsData = [];
-  late AnimationController _controller;
-  late Animation<double> _shineAnimation;
+  List<Reel> reelModels = [];
+
+  // small shine animation — kept lightweight
+  late final AnimationController _controller;
+  late final Animation<double> _shineAnimation;
+
+  // Scroll controller to prefetch thumbnails near the viewport
+  final ScrollController _scrollController = ScrollController();
+  Timer? _prefetchDebounce;
+
   bool _isInitialized = false;
 
+  static const double _itemWidth = 160.0;
+  static const double _itemHorizontalPadding = 20.0; // left+right combined per item
+  static const int _initialPrecacheCount = 6;
+  static const int _dynamicPrefetchRange = 5;
+
   static final _loadingWidget = Shimmer.fromColors(
-    baseColor: Colors.grey[800]!,
-    highlightColor: Colors.grey[600]!,
-    child: ListView.builder(
-      scrollDirection: Axis.horizontal,
-      itemCount: 3,
-      itemBuilder: (context, index) {
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 20.0),
-          child: Container(
-            width: 160,
-            height: 320,
-            decoration: BoxDecoration(
-              color: Colors.grey[800],
-              borderRadius: BorderRadius.circular(20),
+    baseColor: Color.fromARGB(255, 48, 48, 48),
+    highlightColor: Color.fromARGB(255, 66, 66, 66),
+    child: SizedBox(
+      height: 360,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        itemCount: 3,
+        itemBuilder: (context, index) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 20.0),
+            child: Container(
+              width: _itemWidth,
+              height: 320,
+              decoration: BoxDecoration(
+                color: Colors.grey,
+                borderRadius: BorderRadius.circular(20),
+              ),
             ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     ),
   );
 
@@ -48,17 +66,22 @@ class _ReelsSectionState extends State<ReelsSection>
   @override
   void initState() {
     super.initState();
+
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
-    )..forward();
+    )..repeat(reverse: true);
     _shineAnimation = Tween<double>(begin: 0, end: 1).animate(
       CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
     );
+
     _isInitialized = true;
+
+    _scrollController.addListener(_onScrollForPrefetch);
+
     if (_cachedReels.isNotEmpty) {
       reelsData = _cachedReels;
-      setState(() {});
+      _prepareModels();
     } else {
       fetchReels();
     }
@@ -69,6 +92,7 @@ class _ReelsSectionState extends State<ReelsSection>
       if (reelsData != _cachedReels) {
         setState(() {
           reelsData = _cachedReels;
+          _prepareModels();
         });
       }
       return;
@@ -76,22 +100,71 @@ class _ReelsSectionState extends State<ReelsSection>
 
     try {
       final fetchedReels = await TMDBApi.fetchReels();
-      if (mounted) {
-        setState(() {
-          reelsData = fetchedReels;
-          _cachedReels = fetchedReels;
-          for (var r in reelsData) {
-            precacheImage(NetworkImage(r['thumbnail_url']), context);
-          }
-        });
+      if (!mounted) return;
+
+      // keep the full list, but only precache a small number of thumbnails eagerly
+      setState(() {
+        reelsData = fetchedReels;
+        _cachedReels = fetchedReels;
+        _prepareModels();
+      });
+
+      // precache first N thumbnails only — lightweight and prevents startup jank
+      final toPrecache = fetchedReels.take(_initialPrecacheCount);
+      for (var r in toPrecache) {
+        final thumb = r['thumbnail_url'] as String?;
+        if (thumb != null && thumb.isNotEmpty) {
+          // don't await; fire-and-forget
+          precacheImage(NetworkImage(thumb), context);
+        }
       }
     } catch (e) {
-      debugPrint("Error fetching reels: $e");
+      debugPrint('Error fetching reels: $e');
     }
+  }
+
+  void _prepareModels() {
+    // map once, not inside itemBuilder.
+    reelModels = reelsData.map<Reel>((r) {
+      return Reel(
+        videoUrl: (r['videoUrl'] as String?) ?? '',
+        movieTitle: (r['title'] as String?) ?? 'Reel',
+        movieDescription: 'Watch the trailer',
+      );
+    }).toList();
+  }
+
+  void _onScrollForPrefetch() {
+    // debounce prefetching to avoid firing many precache operations while user is actively dragging
+    _prefetchDebounce?.cancel();
+    _prefetchDebounce = Timer(const Duration(milliseconds: 200), () {
+      if (!mounted || reelModels.isEmpty) return;
+
+      final offset = _scrollController.offset;
+      final viewportWidth = MediaQuery.of(context).size.width;
+
+      // approximate the first visible index
+      final itemSpacing = _itemWidth + _itemHorizontalPadding;
+      int firstVisible = (offset / itemSpacing).floor();
+      firstVisible = firstVisible.clamp(0, reelModels.length - 1);
+
+      final end = (firstVisible + _dynamicPrefetchRange).clamp(0, reelModels.length - 1);
+
+      for (int i = firstVisible; i <= end; i++) {
+        final thumb = (reelsData[i]['thumbnail_url'] as String?) ?? '';
+        if (thumb.isNotEmpty) {
+          // fire-and-forget; don't await
+          precacheImage(NetworkImage(thumb), context);
+        }
+      }
+    });
   }
 
   @override
   void dispose() {
+    _prefetchDebounce?.cancel();
+    _scrollController.removeListener(_onScrollForPrefetch);
+    _scrollController.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -99,100 +172,67 @@ class _ReelsSectionState extends State<ReelsSection>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
           padding: const EdgeInsets.only(left: 16.0, bottom: 10.0),
-          child: _isInitialized
-              ? AnimatedBuilder(
-                  animation: _shineAnimation,
-                  builder: (context, child) {
-                    return ShaderMask(
-                      shaderCallback: (rect) {
-                        return LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            Colors.red
-                                .withOpacity(0.8 - _shineAnimation.value * 0.4),
-                            Colors.redAccent
-                                .withOpacity(0.8 + _shineAnimation.value * 0.4),
-                            Colors.red
-                                .withOpacity(0.8 - _shineAnimation.value * 0.4),
-                          ],
-                          stops: [
-                            0.0,
-                            0.5 + _shineAnimation.value * 0.5,
-                            1.0,
-                          ],
-                        ).createShader(rect);
-                      },
-                      child: const Text(
-                        "Movie Reels",
-                        style: TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.red,
-                          shadows: [
-                            Shadow(
-                              color: Colors.red,
-                              blurRadius: 10,
-                              offset: Offset(0, 0),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                )
-              : const Text(
-                  "Movie Reels",
+          child: AnimatedBuilder(
+            animation: _shineAnimation,
+            builder: (context, child) {
+              return ShaderMask(
+                shaderCallback: (rect) {
+                  return LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Colors.red.withOpacity(0.8 - _shineAnimation.value * 0.4),
+                      Colors.redAccent.withOpacity(0.8 + _shineAnimation.value * 0.4),
+                      Colors.red.withOpacity(0.8 - _shineAnimation.value * 0.4),
+                    ],
+                    stops: [0.0, 0.5 + _shineAnimation.value * 0.5, 1.0],
+                  ).createShader(rect);
+                },
+                child: const Text(
+                  'Movie Reels',
                   style: TextStyle(
                     fontSize: 24,
                     fontWeight: FontWeight.bold,
                     color: Colors.red,
                   ),
                 ),
+              );
+            },
+          ),
         ),
         SizedBox(
           height: 360,
-          child: reelsData.isEmpty
+          child: reelModels.isEmpty
               ? _loadingWidget
               : ListView.builder(
+                  controller: _scrollController,
                   scrollDirection: Axis.horizontal,
-                  itemCount: reelsData.length,
-                  cacheExtent: 1000,
+                  itemCount: reelModels.length,
+                  cacheExtent: 300, // keep this small to limit offscreen work
                   itemBuilder: (context, index) {
-                    final reel = reelsData[index];
-                    final title = reel['title'] as String? ?? "Reel";
-                    final thumbnailUrl = reel['thumbnail_url'] as String? ?? "";
-                    final List<Reel> reels = reelsData.map<Reel>((r) {
-                      return Reel(
-                        videoUrl: r['videoUrl'] as String? ?? "",
-                        movieTitle: r['title'] as String? ?? "Reel",
-                        movieDescription: "Watch the trailer",
-                      );
-                    }).toList();
+                    final model = reelModels[index];
+                    final thumbnailUrl = (reelsData[index]['thumbnail_url'] as String?) ?? '';
 
+                    // keep the item build cheap and mostly const
                     return Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10.0, vertical: 20.0),
+                      padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 20.0),
                       child: GestureDetector(
-                        key: ValueKey(thumbnailUrl),
                         onTap: () {
                           Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (context) => ReelPlayerScreen(
-                                reels: reels,
-                                initialIndex: index,
-                              ),
+                              builder: (_) => ReelPlayerScreen(reels: reelModels, initialIndex: index),
                             ),
                           );
                         },
                         child: Container(
-                          width: 160,
+                          width: _itemWidth,
                           decoration: BoxDecoration(
                             color: Colors.black.withOpacity(0.5),
                             borderRadius: BorderRadius.circular(20),
@@ -213,31 +253,24 @@ class _ReelsSectionState extends State<ReelsSection>
                                   child: CachedNetworkImage(
                                     imageUrl: thumbnailUrl,
                                     fit: BoxFit.cover,
-                                    placeholder: (context, url) =>
-                                        const ColoredBox(
+                                    placeholder: (context, url) => const ColoredBox(
                                       color: Color.fromRGBO(33, 33, 33, 1),
-                                      child: Center(
-                                          child: CircularProgressIndicator()),
+                                      child: Center(child: CircularProgressIndicator()),
                                     ),
-                                    errorWidget: (context, url, error) =>
-                                        const ColoredBox(
+                                    errorWidget: (context, url, error) => const ColoredBox(
                                       color: Color.fromRGBO(33, 33, 33, 1),
-                                      child: Icon(Icons.error,
-                                          color: Colors.red, size: 40),
+                                      child: Icon(Icons.error, color: Colors.red, size: 40),
                                     ),
                                   ),
                                 ),
                               ),
-                              Positioned.fill(
-                                child: Container(
-                                  decoration: const BoxDecoration(
+                              const Positioned.fill(
+                                child: DecoratedBox(
+                                  decoration: BoxDecoration(
                                     gradient: LinearGradient(
                                       begin: Alignment.topCenter,
                                       end: Alignment.bottomCenter,
-                                      colors: [
-                                        Colors.transparent,
-                                        Color.fromRGBO(0, 0, 0, 0.7),
-                                      ],
+                                      colors: [Colors.transparent, Color.fromRGBO(0, 0, 0, 0.7)],
                                     ),
                                   ),
                                 ),
@@ -250,18 +283,11 @@ class _ReelsSectionState extends State<ReelsSection>
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(
-                                      title,
+                                      model.movieTitle,
                                       style: const TextStyle(
                                         color: Colors.white,
                                         fontSize: 14,
                                         fontWeight: FontWeight.w700,
-                                        shadows: [
-                                          Shadow(
-                                            color: Colors.black,
-                                            blurRadius: 4,
-                                            offset: Offset(1, 1),
-                                          ),
-                                        ],
                                       ),
                                       maxLines: 2,
                                       overflow: TextOverflow.ellipsis,
@@ -274,14 +300,6 @@ class _ReelsSectionState extends State<ReelsSection>
                                         decoration: const BoxDecoration(
                                           shape: BoxShape.circle,
                                           color: Colors.deepPurpleAccent,
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: Color.fromRGBO(
-                                                  103, 58, 183, 0.5),
-                                              blurRadius: 8,
-                                              spreadRadius: 2,
-                                            ),
-                                          ],
                                         ),
                                         child: const Icon(
                                           Icons.play_arrow,
@@ -305,5 +323,3 @@ class _ReelsSectionState extends State<ReelsSection>
     );
   }
 }
-
-

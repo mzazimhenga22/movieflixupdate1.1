@@ -132,23 +132,39 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       // Best-effort: show the incoming call UI (Android may allow this from background)
       await FlutterCallkitIncoming.showCallkitIncoming(params);
     } catch (e, st) {
-      // Keep this benign: log error but do not perform temporary FS writes here.
       debugPrint('[BG] CallKit show failed (headless): $e\n$st');
     }
   }
 }
 
+// Single, entry-point downloader callback (used by FlutterDownloader)
+@pragma('vm:entry-point')
+void downloadCallback(String id, int status, int progress) {
+  // send primitive types across the IsolateNameServer port
+  final SendPort? send = IsolateNameServer.lookupPortByName('downloader_send_port');
+  send?.send({
+    'id': id,
+    // status is an int index supplied by the plugin; we forward the raw int
+    'status': status,
+    'progress': progress,
+  });
+}
+
 /// Register downloader callback safely (plugin may throw if already registered)
 Future<void> _safeRegisterDownloaderCallback() async {
+  // register the main isolate's ReceivePort under 'downloader_send_port' if not already registered
   try {
-    IsolateNameServer.registerPortWithName(_port.sendPort, 'downloader_send_port');
-  } catch (_) {
-    // already registered - ignore
-  }
-  try {
-    FlutterDownloader.registerCallback(downloadCallback);
+    if (IsolateNameServer.lookupPortByName('downloader_send_port') == null) {
+      IsolateNameServer.registerPortWithName(_port.sendPort, 'downloader_send_port');
+    }
   } catch (_) {
     // ignore
+  }
+  try {
+    // register the native callback (the function above)
+    FlutterDownloader.registerCallback(downloadCallback);
+  } catch (_) {
+    // ignore (plugin may throw if callback already registered)
   }
 }
 
@@ -211,14 +227,12 @@ void main() async {
     // Activate Firebase App Check (debug provider in non-release, production providers in release)
     try {
       if (kReleaseMode) {
-        // production: use Play Integrity / DeviceCheck
         await FirebaseAppCheck.instance.activate(
           androidProvider: AndroidProvider.playIntegrity,
           appleProvider: AppleProvider.deviceCheck,
         );
         debugPrint('✅ Firebase App Check activated (release providers)');
       } else {
-        // debug/dev: use the debug provider for local testing
         await FirebaseAppCheck.instance.activate(
           androidProvider: AndroidProvider.debug,
           appleProvider: AppleProvider.debug,
@@ -227,7 +241,6 @@ void main() async {
       }
     } catch (e, st) {
       debugPrint('⚠️ Firebase App Check activation failed: $e\n$st');
-      // proceed; we'll still try to continue, but FCM requests may fail until App Check active
     }
 
     // Initialize auth db safely (handles permission race)
@@ -265,11 +278,39 @@ void main() async {
   if (enableSksl) debugPrint('✅ Enabling SKSL shader warm-up');
   if (useSoftwareRendering) debugPrint('✅ Using software rendering');
 
-  // Listen for download updates
+  // Listen for download updates on main isolate port.
+  // Note: downloads UI (DownloadsScreen) also registers the 'downloader_send_port'
+  // and will update itself — here we only log and optionally perform app-level actions.
   _port.listen((dynamic message) {
-    final status = message['status'] as DownloadTaskStatus;
-    if (status == DownloadTaskStatus.complete) {
-      DownloadsScreenState.refreshCallback?.call();
+    try {
+      final taskId = message['id']?.toString() ?? '<unknown>';
+      // message['status'] might be an int (plugin) or something else; normalize to int
+      final rawStatus = message['status'];
+      int statusInt;
+      if (rawStatus is int) {
+        statusInt = rawStatus;
+      } else if (rawStatus is String) {
+        statusInt = int.tryParse(rawStatus) ?? -1;
+      } else if (rawStatus is DownloadTaskStatus) {
+        statusInt = rawStatus.index;
+      } else {
+        statusInt = -1;
+      }
+
+      final DownloadTaskStatus status = (statusInt >= 0 && statusInt < DownloadTaskStatus.values.length)
+          ? DownloadTaskStatus.values[statusInt]
+          : DownloadTaskStatus.undefined;
+
+      final progress = (message['progress'] is int) ? message['progress'] as int : int.tryParse(message['progress']?.toString() ?? '0') ?? 0;
+
+      debugPrint('[Downloader] task=$taskId status=$status progress=$progress');
+
+      // If you want to trigger app-level behavior when downloads complete, do it here.
+      // But don't tightly-couple to DownloadsScreenState; the DownloadsScreen already listens
+      // to the same port and will update itself. If you need to notify DownloadsScreen specifically,
+      // prefer a shared event bus or a top-level StreamController that the UI subscribes to.
+    } catch (e, st) {
+      debugPrint('[Downloader] parse error: $e\n$st');
     }
   });
 
@@ -338,16 +379,13 @@ void main() async {
 
   // ---------------------------
   // Request CallKit permissions
-  // (Per your request: after Firebase init and before runApp)
   // ---------------------------
   try {
-    // Request notification permission for CallKit
     await FlutterCallkitIncoming.requestNotificationPermission({
       "title": "Notification permission",
       "rationaleMessagePermission": "Notification permission is required to show incoming call notifications.",
       "postNotificationMessageRequired": "Please enable notifications in Settings to receive incoming calls."
     });
-    // On Android, check SDK version and request full-intent permission for SDK 34+
     if (Platform.isAndroid) {
       final deviceInfo = DeviceInfoPlugin();
       final androidInfo = await deviceInfo.androidInfo;
@@ -371,17 +409,6 @@ void main() async {
       child: const MyApp(),
     ),
   );
-}
-
-/// This is invoked by the native downloader isolate when status/progress changes.
-@pragma('vm:entry-point')
-void downloadCallback(String id, int status, int progress) {
-  final SendPort? send = IsolateNameServer.lookupPortByName('downloader_send_port');
-  send?.send({
-    'id': id,
-    'status': DownloadTaskStatus.values[status],
-    'progress': progress,
-  });
 }
 
 class MyApp extends StatefulWidget {

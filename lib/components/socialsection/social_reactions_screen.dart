@@ -45,10 +45,33 @@ import 'package:movie_app/components/watch_party_screen.dart';
 import 'post_review_screen.dart';
 import 'algo.dart';
 
+// Import the stories components you asked for
+import 'storiecomponents.dart';
+
 /// ----------------- Utility / Constants -----------------
 const _kPostsPerPage = 10;
 const _kPrefMutedUsers = 'muted_users';
 const _kPrefSavedPosts = 'saved_posts';
+
+/// ----------------- Reusable frosted decoration helper -----------------
+/// Use this wherever you previously used a semi-opaque black panel.
+/// Keeps a subtle "glass" look on dark backgrounds without using BackdropFilter.
+BoxDecoration frostedPanelDecoration(Color accentColor, {double radius = 18}) {
+  return BoxDecoration(
+    // faint white tint reads like glass over a dark background
+    color: Colors.white.withOpacity(0.03),
+    borderRadius: BorderRadius.all(Radius.circular(radius)),
+    border: Border.all(color: accentColor.withOpacity(0.06)),
+    boxShadow: [
+      BoxShadow(
+        color: Colors.black.withOpacity(0.32),
+        blurRadius: 14,
+        spreadRadius: 0,
+        offset: const Offset(0, 8),
+      ),
+    ],
+  );
+}
 
 /// ----------------- SimpleVideoPlayer (lazy init, guarded) -----------------
 class SimpleVideoPlayer extends StatefulWidget {
@@ -79,18 +102,21 @@ class _SimpleVideoPlayerState extends State<SimpleVideoPlayer>
   @override
   void initState() {
     super.initState();
-    // Do not initialize immediately to save resources; wait until built.
+    // Do NOT initialize controllers for every instance by default.
+    // Initialize only when autoPlay is true (rare) to avoid mass allocation.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && !_initRequested) _initController();
+      if (mounted && !_initRequested && widget.autoPlay) {
+        _initController();
+      }
     });
   }
 
   Future<void> _initController() async {
+    if (_initRequested) return;
     _initRequested = true;
     try {
-      _controller =
-          vp.VideoPlayerController.network(widget.videoUrl)
-            ..setLooping(true);
+      _controller = vp.VideoPlayerController.network(widget.videoUrl)
+        ..setLooping(true);
       await _controller!.initialize();
       if (!mounted) return;
       setState(() {
@@ -116,7 +142,12 @@ class _SimpleVideoPlayerState extends State<SimpleVideoPlayer>
   @override
   bool get wantKeepAlive => true;
 
-  void _togglePlay() {
+  void _togglePlay() async {
+    if (!_initialized && !_initRequested) {
+      // lazy-init on first user interaction if needed (rare path)
+      await _initController();
+      if (!mounted || _controller == null) return;
+    }
     if (!_initialized || _controller == null) return;
     setState(() {
       if (_isPlaying) {
@@ -132,7 +163,8 @@ class _SimpleVideoPlayerState extends State<SimpleVideoPlayer>
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    final height = widget.height ?? (MediaQuery.of(context).size.width * 9 / 16).clamp(160.0, 420.0);
+    final height =
+        (widget.height ?? (MediaQuery.of(context).size.width * 9 / 16)).clamp(160.0, 420.0);
     return GestureDetector(
       onTap: widget.onTap ?? _togglePlay,
       child: AnimatedContainer(
@@ -274,6 +306,10 @@ class PostCardWidget extends StatefulWidget {
   final Future<void> Function(Map<String, dynamic> post) onRetweet;
   final Future<void> Function(Map<String, dynamic> post) onSave;
 
+  // performance: receive muted state + toggle callback from parent (no per-item prefs)
+  final bool muted;
+  final Future<void> Function(String userId) onToggleMute;
+
   const PostCardWidget({
     super.key,
     required this.post,
@@ -289,6 +325,8 @@ class PostCardWidget extends StatefulWidget {
     required this.onShare,
     required this.onRetweet,
     required this.onSave,
+    required this.muted,
+    required this.onToggleMute,
   });
 
   @override
@@ -310,37 +348,21 @@ class _PostCardWidgetState extends State<PostCardWidget> {
     final currentUserId = (widget.currentUser?['id'] as String?) ?? '';
     isLiked = likedBy.contains(currentUserId);
     final userId = (widget.post['userId'] as String?) ?? '';
-    final userRecord = widget.users.firstWhere((u) => (u['id'] as String?) == userId, orElse: () => {'username': widget.post['user'] ?? 'Unknown', 'avatar': ''});
+    final userRecord = widget.users.firstWhere((u) => (u['id'] as String?) == userId,
+        orElse: () => {'username': widget.post['user'] ?? 'Unknown', 'avatar': ''});
     _username = (userRecord['username'] as String?) ?? 'Unknown';
     _avatarUrl = (userRecord['avatar'] as String?) ?? '';
-    _loadMuted();
+    _muted = widget.muted;
   }
 
-  Future<void> _loadMuted() async {
+  Future<void> _toggleMuteLocal() async {
+    setState(() => _muted = !_muted);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final muted = prefs.getStringList(_kPrefMutedUsers) ?? <String>[];
-      setState(() {
-        _muted = muted.contains(widget.post['userId']?.toString() ?? '');
-      });
-    } catch (_) {}
-  }
-
-  Future<void> _toggleMute() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final muted = prefs.getStringList(_kPrefMutedUsers) ?? <String>[];
-      final uid = widget.post['userId']?.toString() ?? '';
-      if (_muted) {
-        muted.remove(uid);
-      } else {
-        muted.add(uid);
-      }
-      await prefs.setStringList(_kPrefMutedUsers, muted);
-      setState(() => _muted = !_muted);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_muted ? 'User muted' : 'User unmuted')));
+      await widget.onToggleMute(widget.post['userId']?.toString() ?? '');
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_muted ? 'User muted' : 'User unmuted')));
     } catch (e) {
       debugPrint('mute error: $e');
+      setState(() => _muted = !_muted); // revert on failure
     }
   }
 
@@ -375,7 +397,7 @@ class _PostCardWidgetState extends State<PostCardWidget> {
     setState(() => _saving = true);
     try {
       await widget.onSave(widget.post);
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved')));
     } catch (e) {
       debugPrint('save failed: $e');
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Save failed: $e')));
@@ -404,7 +426,6 @@ class _PostCardWidgetState extends State<PostCardWidget> {
 
     // Precache image for better UX (non-blocking)
     if (mediaType == 'photo' && isValidImageUrl(media)) {
-      // schedule precache, don't await here
       WidgetsBinding.instance.addPostFrameCallback((_) {
         try {
           precacheImage(CachedNetworkImageProvider(media), context);
@@ -412,11 +433,31 @@ class _PostCardWidgetState extends State<PostCardWidget> {
       });
     }
 
-    // display height based on width
-    final screenWidth = MediaQuery.of(context).size.width;
-    final imageHeight = (screenWidth * 9 / 16).clamp(160.0, 420.0);
+    // display height based on screen height: make feed media occupy ~70% of screen height
+    final screenHeight = MediaQuery.of(context).size.height;
+    final imageHeight = ((screenHeight * 0.70).clamp(160.0, screenHeight * 0.85));
 
     final borderRadius = BorderRadius.circular(14.0);
+
+    // Build a frosted gradient background that respects accent color.
+    final gradientDecoration = BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          widget.accentColor.withOpacity(0.22),
+          widget.accentColor.withOpacity(0.10),
+        ],
+        stops: const [0.0, 1.0],
+      ),
+    );
+
+    final innerDecoration = BoxDecoration(
+      color: Colors.white.withOpacity(0.03),
+      borderRadius: borderRadius,
+      border: Border.all(color: widget.accentColor.withOpacity(0.10)),
+      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.28), blurRadius: 10, offset: const Offset(0, 6))],
+    );
 
     return RepaintBoundary(
       child: Padding(
@@ -424,26 +465,10 @@ class _PostCardWidgetState extends State<PostCardWidget> {
         child: ClipRRect(
           borderRadius: borderRadius,
           child: AnimatedContainer(
-            duration: const Duration(milliseconds: 280),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  widget.accentColor.withOpacity(0.06),
-                  Colors.black.withOpacity(0.34)
-                ],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-            ),
+            duration: const Duration(milliseconds: 260),
+            decoration: gradientDecoration,
             child: Container(
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.38),
-                borderRadius: borderRadius,
-                border: Border.all(color: Colors.white.withOpacity(0.06)),
-                boxShadow: [
-                  BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 8, offset: const Offset(0, 6))
-                ],
-              ),
+              decoration: innerDecoration,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -456,14 +481,17 @@ class _PostCardWidgetState extends State<PostCardWidget> {
                           radius: 20,
                           backgroundColor: widget.accentColor,
                           backgroundImage: _avatarUrl.isNotEmpty ? CachedNetworkImageProvider(_avatarUrl) : null,
-                          child: _avatarUrl.isEmpty ? Text(_username.isNotEmpty ? _username[0].toUpperCase() : '?', style: const TextStyle(color: Colors.white)) : null,
+                          child: _avatarUrl.isEmpty
+                              ? Text(_username.isNotEmpty ? _username[0].toUpperCase() : '?', style: const TextStyle(color: Colors.white))
+                              : null,
                         ),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                             Text(_username, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
                             const SizedBox(height: 2),
-                            Text(_friendlyTimeString(post['timestamp']?.toString() ?? DateTime.now().toIso8601String()), style: TextStyle(color: Colors.white70, fontSize: 12)),
+                            Text(_friendlyTimeString(post['timestamp']?.toString() ?? DateTime.now().toIso8601String()),
+                                style: TextStyle(color: Colors.white70, fontSize: 12)),
                           ]),
                         ),
                         // Follow / mute small actions
@@ -473,19 +501,27 @@ class _PostCardWidgetState extends State<PostCardWidget> {
                             showModalBottomSheet(context: context, backgroundColor: Colors.grey[900], builder: (ctx) {
                               return SafeArea(
                                 child: Column(mainAxisSize: MainAxisSize.min, children: [
-                                  ListTile(leading: const Icon(Icons.person_add, color: Colors.white), title: const Text('Follow/Unfollow', style: TextStyle(color: Colors.white)), onTap: () {
-                                    Navigator.pop(ctx);
-                                    // very simple follow feedback (implement following logic as needed)
-                                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Toggled follow for $_username')));
-                                  }),
-                                  ListTile(leading: Icon(_muted ? Icons.volume_off : Icons.volume_up, color: Colors.white), title: Text(_muted ? 'Unmute user' : 'Mute user', style: const TextStyle(color: Colors.white)), onTap: () {
-                                    Navigator.pop(ctx);
-                                    _toggleMute();
-                                  }),
-                                  ListTile(leading: const Icon(Icons.report, color: Colors.white), title: const Text('Report', style: TextStyle(color: Colors.white)), onTap: () {
-                                    Navigator.pop(ctx);
-                                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Reported')));
-                                  }),
+                                  ListTile(
+                                      leading: const Icon(Icons.person_add, color: Colors.white),
+                                      title: const Text('Follow/Unfollow', style: TextStyle(color: Colors.white)),
+                                      onTap: () {
+                                        Navigator.pop(ctx);
+                                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Toggled follow for $_username')));
+                                      }),
+                                  ListTile(
+                                      leading: Icon(_muted ? Icons.volume_off : Icons.volume_up, color: Colors.white),
+                                      title: Text(_muted ? 'Unmute user' : 'Mute user', style: const TextStyle(color: Colors.white)),
+                                      onTap: () {
+                                        Navigator.pop(ctx);
+                                        _toggleMuteLocal();
+                                      }),
+                                  ListTile(
+                                      leading: const Icon(Icons.report, color: Colors.white),
+                                      title: const Text('Report', style: TextStyle(color: Colors.white)),
+                                      onTap: () {
+                                        Navigator.pop(ctx);
+                                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Reported')));
+                                      }),
                                 ]),
                               );
                             });
@@ -531,12 +567,20 @@ class _PostCardWidgetState extends State<PostCardWidget> {
                                   videoUrl: media,
                                   autoPlay: false,
                                   onTap: () {
-                                    final videoPosts = widget.allPosts.where((p) => (p['mediaType'] as String?) == 'video' && (p['media'] as String?)!.isNotEmpty).map((p) => Reel(videoUrl: (p['media'] as String?) ?? '', movieTitle: (p['title'] as String?) ?? 'Video', movieDescription: (p['post'] as String?) ?? '')).toList();
+                                    final videoPosts = widget.allPosts
+                                        .where((p) => (p['mediaType'] as String?) == 'video' && (p['media'] as String?)!.isNotEmpty)
+                                        .map((p) => Reel(videoUrl: (p['media'] as String?) ?? '', movieTitle: (p['title'] as String?) ?? 'Video', movieDescription: (p['post'] as String?) ?? ''))
+                                        .toList();
                                     final idx = videoPosts.indexWhere((r) => r.videoUrl == media);
                                     if (idx != -1) {
                                       Navigator.push(context, MaterialPageRoute(builder: (_) => FeedReelPlayerScreen(reels: videoPosts, initialIndex: idx)));
                                     } else {
-                                      Navigator.push(context, MaterialPageRoute(builder: (_) => FeedReelPlayerScreen(reels: [Reel(videoUrl: media, movieTitle: title, movieDescription: message)], initialIndex: 0)));
+                                      Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                              builder: (_) => FeedReelPlayerScreen(
+                                                  reels: [Reel(videoUrl: media, movieTitle: title, movieDescription: message)],
+                                                  initialIndex: 0)));
                                     }
                                   },
                                 ),
@@ -560,7 +604,8 @@ class _PostCardWidgetState extends State<PostCardWidget> {
                       Text(message, style: const TextStyle(fontSize: 15, color: Colors.white70)),
                       const SizedBox(height: 8),
                       Row(children: [
-                        if (title.isNotEmpty) Expanded(child: Text('Movie: $title', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white60, fontStyle: FontStyle.italic))),
+                        if (title.isNotEmpty)
+                          Expanded(child: Text('Movie: $title', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white60, fontStyle: FontStyle.italic))),
                         if (season.isNotEmpty) Padding(padding: const EdgeInsets.only(left: 6.0), child: Text('S:$season', style: const TextStyle(color: Colors.white60, fontStyle: FontStyle.italic))),
                         if (episode.isNotEmpty) Padding(padding: const EdgeInsets.only(left: 6.0), child: Text('E:$episode', style: const TextStyle(color: Colors.white60, fontStyle: FontStyle.italic))),
                       ]),
@@ -691,6 +736,11 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
   final ScrollController _mainScrollController = ScrollController();
   final PageStorageKey _feedKey = const PageStorageKey('feed-list');
 
+  // hiding stories on scroll:
+  bool _showStories = true;
+  double _lastScrollOffset = 0.0;
+  static const double _storyHeight = 110.0;
+
   // Algorithm / feed mode state
   List<String> _recentlySeenTags = [];
   String _feedMode = 'for_everyone';
@@ -703,6 +753,9 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
   // guard for init
   bool _initialized = false;
 
+  // performance: cached muted users to avoid per-item prefs calls
+  Set<String> _mutedUsers = {};
+
   @override
   void initState() {
     super.initState();
@@ -712,6 +765,16 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
   }
 
   void _onScrollThrottled() {
+    if (!_mainScrollController.hasClients) return;
+    final offset = _mainScrollController.position.pixels;
+    final delta = offset - _lastScrollOffset;
+    if (delta > 30 && _showStories) {
+      setState(() => _showStories = false);
+    } else if (delta < -30 && !_showStories) {
+      setState(() => _showStories = true);
+    }
+    _lastScrollOffset = offset.clamp(0.0, double.infinity);
+
     // pagination trigger (small threshold)
     final feed = Provider.of<FeedProvider>(context, listen: false);
     if (_mainScrollController.position.pixels >= _mainScrollController.position.maxScrollExtent - 120 && !feed.isLoading && feed.hasMorePosts) {
@@ -760,9 +823,11 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
       final storiesString = prefs.getString('stories') ?? '[]';
       final movieStreak = prefs.getInt('movieStreak') ?? 0;
       final saved = prefs.getStringList(_kPrefSavedPosts) ?? <String>[];
+      final muted = prefs.getStringList(_kPrefMutedUsers) ?? <String>[];
       _stories = List<Map<String, dynamic>>.from(jsonDecode(storiesString));
       _movieStreak = movieStreak;
       _savedPosts = saved.toSet();
+      _mutedUsers = muted.toSet();
       if (mounted) setState(() {});
     } catch (e) {
       debugPrint('Error loading local data: $e');
@@ -774,6 +839,7 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
     await prefs.setString('stories', jsonEncode(_stories));
     await prefs.setInt('movieStreak', _movieStreak);
     await prefs.setStringList(_kPrefSavedPosts, _savedPosts.toList());
+    await prefs.setStringList(_kPrefMutedUsers, _mutedUsers.toList());
   }
 
   Future<void> _loadUserData() async {
@@ -991,16 +1057,71 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
     _cachedForSourceId = feed.feedPosts.map((p) => (p['id'] ?? '').toString()).join('|').hashCode ^ _feedMode.hashCode;
   }
 
+  // Toggle mute helper (centralized)
+  Future<void> _toggleMuteForUser(String userId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final muted = prefs.getStringList(_kPrefMutedUsers) ?? <String>[];
+      if (_mutedUsers.contains(userId)) {
+        muted.remove(userId);
+        _mutedUsers.remove(userId);
+      } else {
+        muted.add(userId);
+        _mutedUsers.add(userId);
+      }
+      await prefs.setStringList(_kPrefMutedUsers, muted);
+      if (mounted) setState(() {});
+    } catch (e) {
+      debugPrint('toggle mute central error: $e');
+      rethrow;
+    }
+  }
+
   Widget _buildFeedTab() {
     return Consumer<FeedProvider>(builder: (context, feedProvider, child) {
       final rankedPosts = _getCachedRanked(feedProvider.feedPosts);
+
+      // Use the local _stories as source for the StoriesRow; stories are maps as loaded earlier.
+      final storiesForRow = _stories;
+
       return Column(children: [
-        Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), child: ElevatedButton.icon(
+        // Animated stories area (hide on scroll down, show on scroll up)
+        AnimatedSize(
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+          child: SizedBox(
+            height: _showStories ? _storyHeight : 0,
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200),
+              opacity: _showStories ? 1.0 : 0.0,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 10),
+                child:
+                // Use StoriesRow's built-in navigation/grouping behavior:
+                StoriesRow(
+                  stories: storiesForRow,
+                  currentUserAvatar: _currentUser?['avatar']?.toString(),
+                  // Give the StoriesRow the full current user map so it can navigate to PostStoryScreen
+                  currentUser: _currentUser,
+                  // pass accent color so PostStoryScreen and gradient rings match your theme
+                  accentColor: widget.accentColor,
+                  // Add story navigation forced to PostStoryScreen by default
+                  forceNavigateOnAdd: true,
+                  height: 100,
+                ),
+              ),
+            ),
+          ),
+        ),
+
+        // Post Movie Review button (kept visible even when stories are hidden)
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: ElevatedButton.icon(
           style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor, minimumSize: const Size(double.infinity, 48)),
           onPressed: _postMovieReview,
           icon: const Icon(Icons.rate_review, size: 20),
           label: const Text('Post Movie Review', style: TextStyle(fontSize: 16)),
         )),
+
         Expanded(
           child: RefreshIndicator(
             onRefresh: () async {
@@ -1016,139 +1137,133 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
                     return feedProvider.hasMorePosts ? const Padding(padding: EdgeInsets.all(12), child: Center(child: CircularProgressIndicator())) : const SizedBox.shrink();
                   }
                   final item = rankedPosts[index];
-                  // skip rendering posts from muted users (quick filter)
-                  final mutedListFuture = SharedPreferences.getInstance();
-                  return FutureBuilder<SharedPreferences>(
-                    future: mutedListFuture,
-                    builder: (context, snapshot) {
-                      if (snapshot.hasData) {
-                        final muted = snapshot.data!.getStringList(_kPrefMutedUsers) ?? <String>[];
-                        if (muted.contains((item['userId'] ?? '').toString())) {
-                          // show a placeholder for muted content with an unmute button
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 12),
-                            child: Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(12)),
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Expanded(child: Text('Muted content', style: TextStyle(color: Colors.white.withOpacity(0.8)))),
-                                  TextButton(onPressed: () async {
-                                    final prefs = snapshot.data!;
-                                    final list = prefs.getStringList(_kPrefMutedUsers) ?? <String>[];
-                                    list.remove((item['userId'] ?? '').toString());
-                                    await prefs.setStringList(_kPrefMutedUsers, list);
-                                    setState(() {});
-                                  }, child: const Text('Unmute'))
-                                ],
-                              ),
-                            ),
-                          );
-                        }
+
+                  // QUICK check for muted users using cached set (no FutureBuilder)
+                  final isMuted = _mutedUsers.contains((item['userId'] ?? '').toString());
+                  if (isMuted) {
+                    // show a placeholder for muted content with an unmute button
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 12),
+                      child: Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(12)),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(child: Text('Muted content', style: TextStyle(color: Colors.white.withOpacity(0.8)))),
+                            TextButton(onPressed: () async {
+                              await _toggleMuteForUser((item['userId'] ?? '').toString());
+                            }, child: const Text('Unmute'))
+                          ],
+                        ),
+                      ),
+                    );
+                  }
+
+                  return PostCardWidget(
+                    key: ValueKey(item['id']),
+                    post: item,
+                    allPosts: rankedPosts,
+                    currentUser: _currentUser,
+                    users: _users,
+                    accentColor: widget.accentColor,
+                    muted: isMuted,
+                    onToggleMute: (userId) async {
+                      await _toggleMuteForUser(userId);
+                    },
+                    onDelete: (id) async {
+                      try {
+                        await FirebaseFirestore.instance.collection('feeds').doc(id).delete();
+                        feedProvider.removePost(id);
+                        _refreshRankedCache();
+                      } catch (e) {
+                        debugPrint('delete post error: $e');
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to delete post: $e')));
                       }
-                      return PostCardWidget(
-                        key: ValueKey(item['id']),
-                        post: item,
-                        allPosts: rankedPosts,
-                        currentUser: _currentUser,
-                        users: _users,
-                        accentColor: widget.accentColor,
-                        onDelete: (id) async {
-                          try {
-                            await FirebaseFirestore.instance.collection('feeds').doc(id).delete();
-                            feedProvider.removePost(id);
-                            _refreshRankedCache();
-                          } catch (e) {
-                            debugPrint('delete post error: $e');
-                            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to delete post: $e')));
-                          }
-                        },
-                        onLike: (id, wasLiked) async {
-                          try {
-                            final ref = FirebaseFirestore.instance.collection('feeds').doc(id);
-                            if (wasLiked) {
-                              await ref.update({'likedBy': FieldValue.arrayRemove([_currentUser?['id'] ?? ''])});
-                            } else {
-                              await ref.update({'likedBy': FieldValue.arrayUnion([_currentUser?['id'] ?? ''])});
-                            }
-                          } catch (e) {
-                            debugPrint('like error: $e');
-                            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to like post: $e')));
-                          }
-                        },
-                        onComment: _showComments,
-                        onWatchParty: (post) {
-                          Navigator.push(context, MaterialPageRoute(builder: (_) => WatchPartyScreen(post: post)));
-                        },
-                        onSend: (post) {
-                          final code = (100000 + Random().nextInt(900000)).toString();
-                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Started Watch Party: Code $code')));
-                          setState(() {
-                            _notifications.add('${_currentUser?['username'] ?? 'User'} started a watch party with code $code');
-                          });
-                        },
-                        onShare: (post) async {
-                          try {
-                            final shareText = '${post['post']}\n\nShared from MovieFlix';
-                            if (post['media'] != null && (post['media'] as String).isNotEmpty) {
-                              await Share.share('${post['post']}\n${post['media']}\n\nShared from MovieFlix');
-                            } else {
-                              await Share.share(shareText);
-                            }
-                          } catch (e) {
-                            debugPrint('share error: $e');
-                            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to share: $e')));
-                          }
-                        },
-                        onRetweet: (post) async {
-                          if (_currentUser == null) {
-                            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User data not loaded')));
-                            return;
-                          }
-                          try {
-                            final originalId = post['id'] as String? ?? '';
-                            final newPost = {
-                              'user': _currentUser?['username'] ?? 'User',
-                              'userId': _currentUser?['id']?.toString() ?? '',
-                              'post': 'Retweeted: ${post['post'] ?? ''}',
-                              'type': 'retweet',
-                              'likedBy': [],
-                              'title': post['title'] ?? '',
-                              'season': post['season'] ?? '',
-                              'episode': post['episode'] ?? '',
-                              'media': post['media'] ?? '',
-                              'mediaType': post['mediaType'] ?? '',
-                              'timestamp': DateTime.now().toIso8601String(),
-                              'originalPostId': originalId,
-                            };
+                    },
+                    onLike: (id, wasLiked) async {
+                      try {
+                        final ref = FirebaseFirestore.instance.collection('feeds').doc(id);
+                        if (wasLiked) {
+                          await ref.update({'likedBy': FieldValue.arrayRemove([_currentUser?['id'] ?? ''])});
+                        } else {
+                          await ref.update({'likedBy': FieldValue.arrayUnion([_currentUser?['id'] ?? ''])});
+                        }
+                      } catch (e) {
+                        debugPrint('like error: $e');
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to like post: $e')));
+                      }
+                    },
+                    onComment: _showComments,
+                    onWatchParty: (post) {
+                      Navigator.push(context, MaterialPageRoute(builder: (_) => WatchPartyScreen(post: post)));
+                    },
+                    onSend: (post) {
+                      final code = (100000 + Random().nextInt(900000)).toString();
+                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Started Watch Party: Code $code')));
+                      setState(() {
+                        _notifications.add('${_currentUser?['username'] ?? 'User'} started a watch party with code $code');
+                      });
+                    },
+                    onShare: (post) async {
+                      try {
+                        final shareText = '${post['post']}\n\nShared from MovieFlix';
+                        if (post['media'] != null && (post['media'] as String).isNotEmpty) {
+                          await Share.share('${post['post']}\n${post['media']}\n\nShared from MovieFlix');
+                        } else {
+                          await Share.share(shareText);
+                        }
+                      } catch (e) {
+                        debugPrint('share error: $e');
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to share: $e')));
+                      }
+                    },
+                    onRetweet: (post) async {
+                      if (_currentUser == null) {
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User data not loaded')));
+                        return;
+                      }
+                      try {
+                        final originalId = post['id'] as String? ?? '';
+                        final newPost = {
+                          'user': _currentUser?['username'] ?? 'User',
+                          'userId': _currentUser?['id']?.toString() ?? '',
+                          'post': 'Retweeted: ${post['post'] ?? ''}',
+                          'type': 'retweet',
+                          'likedBy': [],
+                          'title': post['title'] ?? '',
+                          'season': post['season'] ?? '',
+                          'episode': post['episode'] ?? '',
+                          'media': post['media'] ?? '',
+                          'mediaType': post['mediaType'] ?? '',
+                          'timestamp': DateTime.now().toIso8601String(),
+                          'originalPostId': originalId,
+                        };
 
-                            final docRef = await FirebaseFirestore.instance.collection('feeds').add(newPost);
-                            newPost['id'] = docRef.id;
-                            if (originalId.isNotEmpty) {
-                              final originalRef = FirebaseFirestore.instance.collection('feeds').doc(originalId);
-                              await originalRef.update({'retweetCount': FieldValue.increment(1)});
-                            }
+                        final docRef = await FirebaseFirestore.instance.collection('feeds').add(newPost);
+                        newPost['id'] = docRef.id;
+                        if (originalId.isNotEmpty) {
+                          final originalRef = FirebaseFirestore.instance.collection('feeds').doc(originalId);
+                          await originalRef.update({'retweetCount': FieldValue.increment(1)});
+                        }
 
-                            Provider.of<FeedProvider>(context, listen: false).addPost(newPost);
-                            _refreshRankedCache();
-                          } catch (e) {
-                            debugPrint('retweet error: $e');
-                            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to repost: $e')));
-                          }
-                        },
-                        onSave: (post) async {
-                          try {
-                            final id = (post['id'] as String?) ?? '';
-                            if (id.isEmpty) throw Exception('Invalid id');
-                            _savedPosts.add(id);
-                            await _saveLocalData();
-                          } catch (e) {
-                            debugPrint('save post error: $e');
-                            rethrow;
-                          }
-                        },
-                      );
+                        Provider.of<FeedProvider>(context, listen: false).addPost(newPost);
+                        _refreshRankedCache();
+                      } catch (e) {
+                        debugPrint('retweet error: $e');
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to repost: $e')));
+                      }
+                    },
+                    onSave: (post) async {
+                      try {
+                        final id = (post['id'] as String?) ?? '';
+                        if (id.isEmpty) throw Exception('Invalid id');
+                        _savedPosts.add(id);
+                        await _saveLocalData();
+                      } catch (e) {
+                        debugPrint('save post error: $e');
+                        rethrow;
+                      }
                     },
                   );
                 }, childCount: rankedPosts.length + (feedProvider.hasMorePosts ? 1 : 0))),
@@ -1350,6 +1465,8 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
     ];
 
     return Scaffold(
+      // make scaffold transparent so our gradient shows through everywhere (including behind appbar)
+      backgroundColor: Colors.transparent,
       extendBodyBehindAppBar: true,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
@@ -1380,10 +1497,24 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
         ],
       ),
       body: Stack(children: [
-        // Background layers (static) - cheap
-        Container(color: const Color(0xFF0B1220)),
-        Container(decoration: BoxDecoration(gradient: RadialGradient(center: const Alignment(-0.2, -0.6), radius: 1.3, colors: [widget.accentColor.withAlpha((0.35 * 255).round()), Colors.transparent], stops: const [0.0, 0.9]))),
-        // Main frosted panel (NO blur)
+        // FULL-SCREEN GRADIENT BACKGROUND (covers area behind AppBar too)
+        Positioned.fill(
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  widget.accentColor.withOpacity(0.18),
+                  const Color(0xFF0B1220),
+                ],
+                stops: const [0.0, 1.0],
+              ),
+            ),
+          ),
+        ),
+
+        // Main frosted panel (NO blur) - using frostedPanelDecoration
         Positioned.fill(
           top: kToolbarHeight + MediaQuery.of(context).padding.top,
           child: Padding(
@@ -1395,7 +1526,7 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
                 boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.6), blurRadius: 16, spreadRadius: 2, offset: const Offset(0, 8))],
               ),
               child: Container(
-                decoration: BoxDecoration(color: Colors.black.withOpacity(0.45), borderRadius: const BorderRadius.all(Radius.circular(18)), border: Border.all(color: Colors.white.withOpacity(0.04))),
+                decoration: frostedPanelDecoration(widget.accentColor, radius: 18),
                 child: Theme(
                   data: ThemeData.dark().copyWith(scaffoldBackgroundColor: Colors.transparent, textTheme: ThemeData.dark().textTheme),
                   child: IndexedStack(index: _selectedIndex, children: tabs),
@@ -1460,7 +1591,7 @@ class NewChatScreenState extends State<NewChatScreen> {
               child: ClipRRect(
                 borderRadius: const BorderRadius.all(Radius.circular(16)),
                 child: Container(
-                  decoration: BoxDecoration(color: Colors.black.withOpacity(0.45), borderRadius: const BorderRadius.all(Radius.circular(16)), border: Border.all(color: Colors.white.withOpacity(0.04))),
+                  decoration: frostedPanelDecoration(widget.accentColor, radius: 16),
                   child: ListView.separated(
                     padding: const EdgeInsets.all(16),
                     itemCount: widget.otherUsers.length,

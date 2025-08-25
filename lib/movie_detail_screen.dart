@@ -2,8 +2,9 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
-import 'dart:ui' show ImageFilter;
-import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart' show kIsWeb, compute;
 import 'package:flutter/material.dart';
 import 'package:flutter/widgets.dart';
 import 'package:provider/provider.dart';
@@ -11,9 +12,10 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-// hide DownloadProgress from cached_network_image to avoid ambiguous_import
 import 'package:cached_network_image/cached_network_image.dart' hide DownloadProgress;
 import 'package:shimmer/shimmer.dart';
+import 'package:path/path.dart' as p;
+
 import 'package:movie_app/main_videoplayer.dart';
 import 'package:movie_app/components/trailer_section.dart';
 import 'package:movie_app/components/similar_movies_section.dart';
@@ -22,7 +24,7 @@ import 'package:movie_app/tmdb_api.dart' as tmdb;
 import 'package:movie_app/streaming_service.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import 'package:movie_app/settings_provider.dart';
-import 'package:movie_app/tv_show_episodes_section.dart'; // <- use the external implementation
+import 'package:movie_app/tv_show_episodes_section.dart';
 
 /// Full MovieDetailScreen (uses TVShowEpisodesSection from tvshow_episodes_section.dart).
 /// Centralized modal helpers (showModalLoading/dismissModalLoading) to avoid
@@ -191,7 +193,7 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
               }
               return;
             }
-            _downloadMovie(details, resolution: resolution, subtitles: subtitles);
+            _downloadMovie(details, resolution: resolution, subtitles: subtitles, mergeSegments: true);
           },
         );
       },
@@ -263,7 +265,7 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
   Future<void> _startDownload(Map<String, dynamic> details, String resolution, bool subtitles) async {
     final tmdbId = details['id']?.toString() ?? '';
     final seasonNumber = details['season'] != null ? (details['season'] as num).toInt() : null;
-    final episodeNumber = details['episode'] != null ? (details['episode'] as num).toInt() : null;
+    final episodeNumber = details['episode'] != null ? (details['episode'] as num?)?.toInt() : null;
     final idSuffix = (seasonNumber != null && episodeNumber != null) ? '_s${seasonNumber}_e${episodeNumber}' : '';
     final key = 'download_${tmdbId}${idSuffix}';
 
@@ -277,18 +279,18 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
 
     _activeDownloads.add(key);
     try {
-      await _downloadMovie(details, resolution: resolution, subtitles: subtitles);
+      await _downloadMovie(details, resolution: resolution, subtitles: subtitles, mergeSegments: true);
     } finally {
       _activeDownloads.remove(key);
     }
   }
 
   // Core download function for movies and episodes (works with StreamingService + OfflineDownloader)
-  Future<void> _downloadMovie(Map<String, dynamic> details, {required String resolution, required bool subtitles}) async {
+  Future<void> _downloadMovie(Map<String, dynamic> details, {required String resolution, required bool subtitles, bool mergeSegments = true}) async {
     final tmdbId = details['id']?.toString() ?? '';
     final title = details['title']?.toString() ?? details['name']?.toString() ?? 'Untitled';
     final seasonNumber = details['season'] != null ? (details['season'] as num).toInt() : null;
-    final episodeNumber = details['episode'] != null ? (details['episode'] as num).toInt() : null;
+    final episodeNumber = details['episode'] != null ? (details['episode'] as num?)?.toInt() : null;
     final idSuffix = (seasonNumber != null && episodeNumber != null) ? '_s${seasonNumber}_e${episodeNumber}' : '';
 
     Map<String, String> streamingInfo;
@@ -335,12 +337,12 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
     _showDownloadProgressDialog(cancelToken);
 
     try {
-      // call your OfflineDownloader (in streaming_service.dart)
+      // IMPORTANT: ask OfflineDownloader to NOT merge segments — we will handle finalization separately
       result = await OfflineDownloader.downloadAnyStream(
         streamInfo: streamingInfo,
         id: downloadId,
         preferredResolution: resolution,
-        mergeSegments: true,
+        mergeSegments: false, // <<-- changed: do segments download only
         concurrency: 6,
         onProgress: (p) {
           // publish progress to the notifier so dialog updates
@@ -353,7 +355,7 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
       if (e.toString().toLowerCase().contains('cancel')) {
         if (mounted) {
           try {
-            Navigator.of(context, rootNavigator: true).pop(); // close dialog if open
+            Navigator.of(context, rootNavigator: true).pop(); // close progress dialog if open
           } catch (_) {}
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download cancelled.')));
         }
@@ -361,13 +363,13 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
       }
       if (mounted) {
         try {
-          Navigator.of(context, rootNavigator: true).pop(); // close dialog if open
+          Navigator.of(context, rootNavigator: true).pop(); // close progress dialog if open
         } catch (_) {}
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Download failed: $e')));
       }
       return;
     } finally {
-      // Ensure progress dialog is closed if still open
+      // Ensure progress dialog is closed if still open (we will present finalizing dialog next)
       if (mounted) {
         try {
           Navigator.of(context, rootNavigator: true).pop();
@@ -381,54 +383,199 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
     final res = result;
 
     // Determine playable path (merged ts > file (mp4) > playlist)
-    final playablePath = res['merged'] ?? res['file'] ?? res['playlist'] ?? '';
+    final playablePathBeforeMerge = res['merged'] ?? res['file'] ?? res['playlist'] ?? '';
 
-    if (playablePath.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download finished but no playable file found.')));
-      }
+    // If it was an mp4 non-HLS, we're done
+    if (res['type'] == 'mp4' && res['file'] != null) {
+      // Save download metadata to SharedPreferences
+      final record = {
+        'id': downloadId,
+        'tmdbId': tmdbId,
+        'title': title,
+        'path': res['file']!,
+        'type': res['type'] ?? urlType,
+        'resolution': resolution,
+        'subtitle': res['subtitle'] ?? streamingInfo['subtitleUrl'] ?? '',
+        'timestamp': DateTime.now().toIso8601String(),
+      };
+      await _saveDownloadRecord(record);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Download finished: ${details['title'] ?? details['name']}'),
+          action: SnackBarAction(
+            label: 'Play',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => MainVideoPlayer(
+                    videoPath: res['file']!,
+                    title: title,
+                    releaseYear: _releaseYear ?? 1970,
+                    isFullSeason: seasonNumber != null && episodeNumber != null,
+                    episodeFiles: const [],
+                    similarMovies: _similarMovies,
+                    subtitleUrl: res['subtitle'] ?? streamingInfo['subtitleUrl'],
+                    isHls: false,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      );
       return;
     }
 
-    // Save download metadata to SharedPreferences
-    final record = {
-      'id': downloadId,
-      'tmdbId': tmdbId,
-      'title': title,
-      'path': playablePath,
-      'type': res['type'] ?? urlType,
-      'resolution': resolution,
-      'subtitle': res['subtitle'] ?? streamingInfo['subtitleUrl'] ?? '',
-      'timestamp': DateTime.now().toIso8601String(),
-    };
-    await _saveDownloadRecord(record);
+    // If it's HLS (m3u8), we likely need to finalize (rewrite playlist + optional merge)
+    if (res['type'] == 'm3u8' && res['playlist'] != null && res['playlist']!.isNotEmpty) {
+      final playlistPath = res['playlist']!;
+      final outDir = p.dirname(playlistPath);
 
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Download finished: ${details['title'] ?? details['name']}'),
-        action: SnackBarAction(
-          label: 'Play',
-          onPressed: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => MainVideoPlayer(
-                  videoPath: playablePath,
-                  title: title,
-                  releaseYear: _releaseYear ?? 1970,
-                  isFullSeason: seasonNumber != null && episodeNumber != null,
-                  episodeFiles: const [],
-                  similarMovies: _similarMovies,
-                  subtitleUrl: res['subtitle'] ?? streamingInfo['subtitleUrl'],
-                  isHls: (res['type'] ?? urlType) == 'm3u8',
-                ),
+      // Prepare the merge worker args
+      final workerArgs = <String, String>{
+        'playlist': playlistPath,
+        'outDir': outDir,
+        'id': downloadId,
+        'title': title,
+        'resolution': resolution,
+        'subtitle': res['subtitle'] ?? streamingInfo['subtitleUrl'] ?? '',
+      };
+
+      // Create the merge compute future (does heavy file I/O off the UI isolate)
+      Future<String> mergeFuture;
+      try {
+        mergeFuture = compute(mergeSegmentsWorker, workerArgs);
+      } catch (e) {
+        // compute may throw on web or restricted platforms, fallback to direct merge (still non-ideal)
+        mergeFuture = Future<String>(() async {
+          return await _mergeSegmentsOnMainIsolate(playlistPath, outDir, downloadId);
+        });
+      }
+
+      // Show a finalizing dialog giving the user a choice to wait or run in background.
+      // This dialog will auto-close when the mergeFuture completes (if the user chose to wait).
+      final runInBackground = await _showFinalizingDialog(mergeFuture);
+
+      if (runInBackground) {
+        // User asked to run in background -> attach callbacks to notify when done
+        mergeFuture.then((mergedPath) async {
+          final record = {
+            'id': downloadId,
+            'tmdbId': tmdbId,
+            'title': title,
+            'path': mergedPath.isNotEmpty ? mergedPath : playlistPath,
+            'type': 'm3u8',
+            'resolution': resolution,
+            'subtitle': res['subtitle'] ?? streamingInfo['subtitleUrl'] ?? '',
+            'timestamp': DateTime.now().toIso8601String(),
+          };
+          try {
+            await _saveDownloadRecord(record);
+          } catch (e) {
+            debugPrint('Failed to save download record after background merge: $e');
+          }
+
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Finalizing finished: ${details['title'] ?? details['name']}'),
+              action: SnackBarAction(
+                label: 'Play',
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => MainVideoPlayer(
+                        videoPath: mergedPath.isNotEmpty ? mergedPath : playlistPath,
+                        title: title,
+                        releaseYear: _releaseYear ?? 1970,
+                        isFullSeason: seasonNumber != null && episodeNumber != null,
+                        episodeFiles: const [],
+                        similarMovies: _similarMovies,
+                        subtitleUrl: res['subtitle'] ?? streamingInfo['subtitleUrl'],
+                        isHls: true,
+                      ),
+                    ),
+                  );
+                },
               ),
-            );
-          },
-        ),
-      ),
-    );
+            ),
+          );
+        }).catchError((e) {
+          debugPrint('Background merge failed: $e');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Finalizing failed: $e')));
+          }
+        });
+
+        // Let user continue; we already dismissed the finalizing dialog (it returns true when user taps Run in background)
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Finalizing will continue in background.')));
+        }
+        return;
+      } else {
+        // User chose to wait — mergeFuture was awaited by _showFinalizingDialog (which only returns after completion or user-run-in-background)
+        // The dialog returned false to indicate it completed waiting; we need the merge result to save record & show "finished"
+        String mergedPath = '';
+        try {
+          mergedPath = await mergeFuture;
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Finalizing failed: $e')));
+          }
+          return;
+        }
+
+        // Save download metadata to SharedPreferences
+        final record = {
+          'id': downloadId,
+          'tmdbId': tmdbId,
+          'title': title,
+          'path': mergedPath.isNotEmpty ? mergedPath : playlistPath,
+          'type': 'm3u8',
+          'resolution': resolution,
+          'subtitle': res['subtitle'] ?? streamingInfo['subtitleUrl'] ?? '',
+          'timestamp': DateTime.now().toIso8601String(),
+        };
+        await _saveDownloadRecord(record);
+
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Download finished: ${details['title'] ?? details['name']}'),
+            action: SnackBarAction(
+              label: 'Play',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => MainVideoPlayer(
+                      videoPath: mergedPath.isNotEmpty ? mergedPath : playlistPath,
+                      title: title,
+                      releaseYear: _releaseYear ?? 1970,
+                      isFullSeason: seasonNumber != null && episodeNumber != null,
+                      episodeFiles: const [],
+                      similarMovies: _similarMovies,
+                      subtitleUrl: res['subtitle'] ?? streamingInfo['subtitleUrl'],
+                      isHls: true,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+        return;
+      }
+    }
+
+    // fallback: unknown type
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download finished but no playable file found.')));
+    }
   }
 
   // ---------- DOWNLOAD HELPERS ----------
@@ -453,31 +600,63 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
                 final percent = (total > 0) ? (downloaded / total) : null;
                 final percentStr = percent != null ? (percent * 100).toStringAsFixed(1) + '%' : _bytesToReadable(bytes);
 
+                final isFinalizing = progress?.finalizing ?? false;
+                final message = progress?.message;
+
                 return Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text('Downloading...', style: TextStyle(color: Colors.white)),
+                    Text(isFinalizing ? 'Finalizing...' : 'Downloading...', style: const TextStyle(color: Colors.white)),
                     const SizedBox(height: 12),
-                    LinearProgressIndicator(value: percent),
+                    // Show determinate progress only while segment downloading, otherwise indeterminate
+                    isFinalizing
+                        ? const LinearProgressIndicator()
+                        : LinearProgressIndicator(value: percent),
                     const SizedBox(height: 8),
-                    Text(
-                      total > 0 ? '$downloaded / $total segments ($percentStr)' : percentStr,
-                      style: const TextStyle(color: Colors.white70),
-                    ),
+                    if (isFinalizing && (message != null && message.isNotEmpty))
+                      Text(message, style: const TextStyle(color: Colors.white70))
+                    else
+                      Text(
+                        total > 0 ? '$downloaded / $total segments (${percentStr})' : percentStr,
+                        style: const TextStyle(color: Colors.white70),
+                      ),
                     const SizedBox(height: 8),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.end,
                       children: [
-                        TextButton(
-                          onPressed: () {
-                            // Cancel download
-                            cancelToken.cancel();
-                            try {
-                              Navigator.of(context, rootNavigator: true).pop();
-                            } catch (_) {}
-                          },
-                          child: const Text('Cancel', style: TextStyle(color: Colors.red)),
-                        )
+                        if (!isFinalizing) ...[
+                          TextButton(
+                            onPressed: () {
+                              // Cancel download
+                              cancelToken.cancel();
+                              try {
+                                Navigator.of(context, rootNavigator: true).pop();
+                              } catch (_) {}
+                            },
+                            child: const Text('Cancel', style: TextStyle(color: Colors.red)),
+                          ),
+                        ] else ...[
+                          TextButton(
+                            onPressed: () {
+                              // Allow user to run finalization in background.
+                              // We'll dismiss progress dialog and the caller will handle background merge.
+                              try {
+                                Navigator.of(context, rootNavigator: true).pop(true);
+                              } catch (_) {}
+                            },
+                            child: const Text('Run in background', style: TextStyle(color: Colors.orange)),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              // If user chooses to "Wait", we dismiss this progress dialog and open the finalizing dialog
+                              // which will remain visible until merge completes (or user runs it in background).
+                              try {
+                                Navigator.of(context, rootNavigator: true).pop(false);
+                              } catch (_) {}
+                            },
+                            child: const Text('Wait', style: TextStyle(color: Colors.white)),
+                          ),
+                        ]
                       ],
                     )
                   ],
@@ -487,7 +666,80 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
           ),
         );
       },
+    ).then((value) {
+      // When user dismissed the dialog using the finalizing options, .then(value) will be called.
+      // We don't need to do anything here — upstream logic in _downloadMovie handles choices by showing
+      // the finalizing dialog and the mergeFuture work.
+      return;
+    });
+  }
+
+  /// Display a finalizing dialog and return true if the user chose to run in background.
+  /// This dialog will auto-close when [mergeFuture] completes (and return false).
+  Future<bool> _showFinalizingDialog(Future<String> mergeFuture) async {
+    if (!mounted) return true;
+
+    // We show a dialog that listens to the progress notifier for messages.
+    // The dialog has a "Run in background" button. If user presses it, dialog returns true.
+    // If the mergeFuture completes while the dialog is open, we programmatically pop the dialog with false.
+    // The returned boolean is:
+    //  - true: user pressed "Run in background" (we should let merge continue and notify later)
+    //  - false: merge finished while user waited (or merge completed and we auto-closed)
+
+    // Start the dialog
+    final dialogFuture = showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      useRootNavigator: true,
+      builder: (context) {
+        final settings = Provider.of<SettingsProvider>(context);
+        return AlertDialog(
+          backgroundColor: Colors.black87,
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ValueListenableBuilder<DownloadProgress?>(
+              valueListenable: _downloadProgressNotifier,
+              builder: (context, progress, _) {
+                final message = progress?.message ?? 'Finalizing download...';
+                final bytes = progress?.bytesDownloaded ?? 0;
+                return Column(mainAxisSize: MainAxisSize.min, children: [
+                  CircularProgressIndicator(color: settings.accentColor),
+                  const SizedBox(height: 12),
+                  Text(message, style: const TextStyle(color: Colors.white), textAlign: TextAlign.center),
+                  const SizedBox(height: 8),
+                  Text(_bytesToReadable(bytes), style: const TextStyle(color: Colors.white70)),
+                ]);
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                // run in background: pop(true)
+                Navigator.of(context, rootNavigator: true).pop(true);
+              },
+              child: const Text('Run in background', style: TextStyle(color: Colors.orange)),
+            ),
+          ],
+        );
+      },
     );
+
+    // If merge completes while dialog is open, close it with false.
+    mergeFuture.then((_) {
+      try {
+        Navigator.of(context, rootNavigator: true).pop(false);
+      } catch (_) {
+        // dialog already closed by user (Run in background) — ignore
+      }
+    }).catchError((e) {
+      try {
+        Navigator.of(context, rootNavigator: true).pop(false);
+      } catch (_) {}
+    });
+
+    final res = await dialogFuture;
+    return res ?? false;
   }
 
   /// Save simple download record to SharedPreferences under key 'downloads'
@@ -837,26 +1089,64 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
   }
 
   // Glass container used for Trailers & Similar sections
+  // NOTE: replaced expensive BackdropFilter blur with a lightweight "frosted" look
+  // using translucent gradients, subtle border and shadow. This reduces GPU usage
+  // while keeping a similar visual style.
   Widget _GlassContainer({required Widget child, EdgeInsets padding = const EdgeInsets.all(12)}) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(14),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-          child: Container(
-            padding: padding,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [Colors.white.withOpacity(0.04), Colors.white.withOpacity(0.02)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: Colors.white.withOpacity(0.06)),
-              color: Colors.black.withOpacity(0.04),
+        child: Container(
+          padding: padding,
+          decoration: BoxDecoration(
+            // subtle frosted look: a semi-transparent color + soft gradient
+            gradient: LinearGradient(
+              colors: [
+                Colors.white.withOpacity(0.035),
+                Colors.white.withOpacity(0.02),
+              ],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
             ),
-            child: child,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white.withOpacity(0.06)),
+            color: Colors.black.withOpacity(0.04),
+            boxShadow: [
+              // give a little lift without heavy blur operations
+              BoxShadow(
+                color: Colors.black.withOpacity(0.45),
+                blurRadius: 6,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Stack(
+            children: [
+              // optional subtle noise / grain overlay using a low-cost Container with
+              // a slightly transparent radial gradient to emulate the soft scattering
+              // of light that blur would produce.
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      gradient: RadialGradient(
+                        center: const Alignment(-0.2, -0.4),
+                        radius: 1.3,
+                        colors: [
+                          Colors.white.withOpacity(0.007),
+                          Colors.transparent,
+                        ],
+                        stops: const [0.0, 0.6],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              // content
+              child,
+            ],
           ),
         ),
       ),
@@ -1387,3 +1677,77 @@ class EpisodeLoadingDialog extends StatelessWidget {
     );
   }
 }
+
+// =============================
+// Merge helper run on isolate
+// =============================
+
+/// Worker called via `compute` to merge TS segments and rewrite a local playlist.
+/// Input: Map<String, String> with keys 'playlist', 'outDir', 'id'
+/// Returns: merged file path (empty string on failure)
+Future<String> mergeSegmentsWorker(Map<String, String> args) async {
+  final playlistPath = args['playlist'] ?? '';
+  final outDir = args['outDir'] ?? '';
+  final id = args['id'] ?? 'merged';
+  if (playlistPath.isEmpty || outDir.isEmpty) return '';
+
+  try {
+    final playlistFile = File(playlistPath);
+    if (!await playlistFile.exists()) return '';
+
+    final lines = (await playlistFile.readAsString()).replaceAll('\r\n', '\n').split('\n');
+    final rewritten = <String>[];
+    final mergedFilePath = p.join(outDir, '$id-merged.ts');
+    final mergedFile = File(mergedFilePath);
+
+    // Ensure merged file is new
+    if (await mergedFile.exists()) {
+      try {
+        await mergedFile.delete();
+      } catch (_) {}
+    }
+
+    final raf = mergedFile.openSync(mode: FileMode.write);
+    try {
+      for (var line in lines) {
+        final trimmed = line.trim();
+        if (trimmed.isEmpty) continue;
+        if (trimmed.startsWith('#EXT-X-KEY')) {
+          // remove keys for local file
+          rewritten.add('#EXT-X-KEY:METHOD=NONE');
+        } else if (trimmed.startsWith('#')) {
+          rewritten.add(trimmed);
+        } else {
+          // resolved: treat trimmed as filename or relative path already resolved by downloader
+          final segPath = p.join(outDir, p.basename(trimmed));
+          final segFile = File(segPath);
+          if (!await segFile.exists()) {
+            // If not present, skip (but still continue)
+            continue;
+          }
+          final bytes = await segFile.readAsBytes();
+          raf.writeFromSync(bytes);
+          rewritten.add(p.basename(trimmed));
+        }
+      }
+    } finally {
+      await raf.close();
+    }
+
+    // Write local playlist referencing local segment filenames
+    final localPlaylistPath = p.join(outDir, '$id-local.m3u8');
+    await File(localPlaylistPath).writeAsString(rewritten.join('\n'));
+
+    return mergedFilePath;
+  } catch (e) {
+    // swallow errors and return empty string to signal failure
+    debugPrint('mergeSegmentsWorker failed: $e');
+    return '';
+  }
+}
+
+/// Fallback merge on main isolate if compute isn't available
+Future<String> _mergeSegmentsOnMainIsolate(String playlistPath, String outDir, String id) async {
+  return await mergeSegmentsWorker({'playlist': playlistPath, 'outDir': outDir, 'id': id});
+}
+

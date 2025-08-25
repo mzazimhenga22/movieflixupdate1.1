@@ -100,6 +100,27 @@ class _FeedReelPlayerScreenState extends State<FeedReelPlayerScreen> {
     }
   }
 
+  // --------------------
+  // Helper for safe id access
+  // --------------------
+  /// Safely attempt to extract an `id` from a `Reel` instance.
+  /// Returns `null` if the `Reel` instance doesn't expose `.id`.
+  String? _getReelId(Reel r) {
+    try {
+      final dyn = r as dynamic;
+      final id = dyn.id;
+      if (id == null) return null;
+      return id.toString();
+    } on NoSuchMethodError {
+      // Reel doesn't have an 'id' getter — that's fine, return null.
+      return null;
+    } catch (e) {
+      // Any other unexpected error, treat as no id.
+      debugPrint('Unexpected error reading reel id: $e');
+      return null;
+    }
+  }
+
   // Ranking algorithm: combine recency, likes, comments, views and a small random seed.
   // Promotes new videos (ageBoost window) and trending videos; supports feed modes.
   void _applyRankingAndShuffle() {
@@ -108,7 +129,7 @@ class _FeedReelPlayerScreenState extends State<FeedReelPlayerScreen> {
 
     // Extract metadata if available (some reels may not have id or live meta)
     final metaForReel = (Reel r) {
-      final id = (r as dynamic).id?.toString();
+      final id = _getReelId(r);
       if (id != null && _liveMetaById.containsKey(id)) return _liveMetaById[id]!;
       return <String, dynamic>{};
     };
@@ -202,7 +223,7 @@ class _FeedReelPlayerScreenState extends State<FeedReelPlayerScreen> {
     for (int i = start; i <= end; i++) {
       if (i >= 0 && i < _orderedReels.length) {
         final reel = _orderedReels[i];
-        final String? id = (reel as dynamic).id?.toString();
+        final String? id = _getReelId(reel);
         if (id == null || id.isEmpty) continue;
         if (_metaSubs.containsKey(id)) continue;
 
@@ -256,7 +277,7 @@ class _FeedReelPlayerScreenState extends State<FeedReelPlayerScreen> {
     // subscribe/unsubscribe meta streams
     final activeIds = <String>{};
     for (var idx in active) {
-      final id = (_orderedReels[idx] as dynamic).id?.toString();
+      final id = _getReelId(_orderedReels[idx]);
       if (id != null) activeIds.add(id);
     }
     final subsKeys = _metaSubs.keys.toList();
@@ -276,7 +297,7 @@ class _FeedReelPlayerScreenState extends State<FeedReelPlayerScreen> {
   Future<void> _maybeIncrementViewForIndex(int index) async {
     if (index < 0 || index >= _orderedReels.length) return;
     final reel = _orderedReels[index];
-    final String? id = (reel as dynamic).id?.toString();
+    final String? id = _getReelId(reel);
     if (id == null || id.isEmpty) return;
     if (_authUser == null) return;
     final key = '${_authUser!.uid}::$id';
@@ -293,7 +314,7 @@ class _FeedReelPlayerScreenState extends State<FeedReelPlayerScreen> {
   Future<void> _toggleLikeForIndex(int index) async {
     if (index < 0 || index >= _orderedReels.length) return;
     final reel = _orderedReels[index];
-    final String? id = (reel as dynamic).id?.toString();
+    final String? id = _getReelId(reel);
     if (id == null || id.isEmpty) return;
     final uid = _authUser?.uid;
     if (uid == null) {
@@ -320,7 +341,7 @@ class _FeedReelPlayerScreenState extends State<FeedReelPlayerScreen> {
   void _openCommentsSheet(int index) {
     if (index < 0 || index >= _orderedReels.length) return;
     final reel = _orderedReels[index];
-    final String? id = (reel as dynamic).id?.toString();
+    final String? id = _getReelId(reel);
     if (id == null || id.isEmpty) {
       _showLocalCommentsSheet(reel, id: null);
       return;
@@ -417,54 +438,63 @@ class _FeedReelPlayerScreenState extends State<FeedReelPlayerScreen> {
                       ),
                     ),
                     Expanded(
-                      child: StreamBuilder<QuerySnapshot>(
-                        stream: _fire.collection('feeds').doc(feedId).collection('comments').orderBy('timestamp', descending: true).snapshots(),
-                        builder: (context, snapshot) {
-                          if (snapshot.hasError) {
+                      child: StreamBuilder<DocumentSnapshot>(
+                        stream: _fire.collection('feeds').doc(feedId).snapshots(),
+                        builder: (context, feedSnap) {
+                          if (feedSnap.hasError) {
                             return Center(child: Text('Failed to load comments', style: TextStyle(color: Colors.white70)));
                           }
-                          if (!snapshot.hasData) {
-                            return const Center(child: CircularProgressIndicator());
-                          }
-                          final docs = snapshot.data!.docs;
-                          if (docs.isEmpty) {
-                            return Center(child: Text('No comments yet — be the first!', style: TextStyle(color: Colors.white54)));
-                          }
-                          return ListView.separated(
-                            controller: scrollController,
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            itemCount: docs.length,
-                            separatorBuilder: (_, __) => const Divider(color: Colors.white10),
-                            itemBuilder: (context, i) {
-                              final d = docs[i];
-                              final data = d.data() as Map<String, dynamic>? ?? {};
-                              final username = data['username'] ?? 'User';
-                              final text = data['text'] ?? '';
-                              final avatar = data['userAvatar'] ?? '';
-                              final ts = data['timestamp'];
-                              String timeText = '';
-                              try {
-                                DateTime t;
-                                if (ts is Timestamp) t = ts.toDate();
-                                else if (ts is String) t = DateTime.parse(ts);
-                                else t = DateTime.now();
-                                final diff = DateTime.now().difference(t);
-                                if (diff.inMinutes < 1) timeText = 'just now';
-                                else if (diff.inHours < 1) timeText = '${diff.inMinutes}m';
-                                else if (diff.inDays < 1) timeText = '${diff.inHours}h';
-                                else timeText = '${diff.inDays}d';
-                              } catch (_) {
-                                timeText = '';
+                          // show nested comments collection stream
+                          return StreamBuilder<QuerySnapshot>(
+                            stream: _fire.collection('feeds').doc(feedId).collection('comments').orderBy('timestamp', descending: true).snapshots(),
+                            builder: (context, snapshot) {
+                              if (snapshot.hasError) {
+                                return Center(child: Text('Failed to load comments', style: TextStyle(color: Colors.white70)));
                               }
-                              return ListTile(
-                                leading: CircleAvatar(
-                                  backgroundColor: Colors.grey[800],
-                                  backgroundImage: avatar != null && avatar.toString().isNotEmpty ? NetworkImage(avatar) : null,
-                                  child: (avatar == null || avatar.toString().isEmpty) ? Text(username.isNotEmpty ? username[0].toUpperCase() : 'U') : null,
-                                ),
-                                title: Text(username, style: const TextStyle(color: Colors.white)),
-                                subtitle: Text(text, style: const TextStyle(color: Colors.white70)),
-                                trailing: Text(timeText, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                              if (!snapshot.hasData) {
+                                return const Center(child: CircularProgressIndicator());
+                              }
+                              final docs = snapshot.data!.docs;
+                              if (docs.isEmpty) {
+                                return Center(child: Text('No comments yet — be the first!', style: TextStyle(color: Colors.white54)));
+                              }
+                              return ListView.separated(
+                                controller: scrollController,
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                itemCount: docs.length,
+                                separatorBuilder: (_, __) => const Divider(color: Colors.white10),
+                                itemBuilder: (context, i) {
+                                  final d = docs[i];
+                                  final data = d.data() as Map<String, dynamic>? ?? {};
+                                  final username = data['username'] ?? 'User';
+                                  final text = data['text'] ?? '';
+                                  final avatar = data['userAvatar'] ?? '';
+                                  final ts = data['timestamp'];
+                                  String timeText = '';
+                                  try {
+                                    DateTime t;
+                                    if (ts is Timestamp) t = ts.toDate();
+                                    else if (ts is String) t = DateTime.parse(ts);
+                                    else t = DateTime.now();
+                                    final diff = DateTime.now().difference(t);
+                                    if (diff.inMinutes < 1) timeText = 'just now';
+                                    else if (diff.inHours < 1) timeText = '${diff.inMinutes}m';
+                                    else if (diff.inDays < 1) timeText = '${diff.inHours}h';
+                                    else timeText = '${diff.inDays}d';
+                                  } catch (_) {
+                                    timeText = '';
+                                  }
+                                  return ListTile(
+                                    leading: CircleAvatar(
+                                      backgroundColor: Colors.grey[800],
+                                      backgroundImage: avatar != null && avatar.toString().isNotEmpty ? NetworkImage(avatar) : null,
+                                      child: (avatar == null || avatar.toString().isEmpty) ? Text(username.isNotEmpty ? username[0].toUpperCase() : 'U') : null,
+                                    ),
+                                    title: Text(username, style: const TextStyle(color: Colors.white)),
+                                    subtitle: Text(text, style: const TextStyle(color: Colors.white70)),
+                                    trailing: Text(timeText, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                                  );
+                                },
                               );
                             },
                           );
@@ -563,7 +593,7 @@ class _FeedReelPlayerScreenState extends State<FeedReelPlayerScreen> {
   // build right-side icon column with live counts
   Widget _buildRightActionColumn(int index) {
     final reel = _orderedReels[index];
-    final id = (reel as dynamic).id?.toString();
+    final id = _getReelId(reel);
     final meta = id != null ? _liveMetaById[id] : null;
     final likedBy = meta != null && meta['likedBy'] is List ? List<String>.from(meta['likedBy']) : <String>[];
     final likesCount = likedBy.length;

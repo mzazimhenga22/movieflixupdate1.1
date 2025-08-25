@@ -1,3 +1,4 @@
+// reel_player_screen.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:youtube_player_flutter/youtube_player_flutter.dart';
@@ -18,72 +19,109 @@ class ReelPlayerScreen extends StatefulWidget {
 }
 
 class _ReelPlayerScreenState extends State<ReelPlayerScreen> {
-  late PageController _pageController;
+  late final PageController _pageController;
   int currentIndex = 0;
+
+  // Keep only a small window of controllers in memory
   final Map<int, YoutubePlayerController> _controllers = {};
+  static const int _preloadRange = 1; // current ±1 — keep low for smoothness
 
   @override
   void initState() {
     super.initState();
-    currentIndex = widget.initialIndex;
-    _pageController =
-        PageController(initialPage: currentIndex, viewportFraction: 1.0);
-    _updateControllers(currentIndex);
-    _controllers[currentIndex]?.play();
-    _pageController.addListener(() {
-      final nextIndex = _pageController.page?.round();
-      if (nextIndex != null && nextIndex != currentIndex) {
-        _controllers[nextIndex]?.load(
-            YoutubePlayer.convertUrlToId(widget.reels[nextIndex].videoUrl) ??
-                "");
-      }
+    currentIndex = widget.initialIndex.clamp(0, widget.reels.length - 1);
+    _pageController = PageController(initialPage: currentIndex, viewportFraction: 1.0);
+
+    // create controllers for the initial window (lazily)
+    _ensureControllersFor(currentIndex);
+
+    // After first frame, play the focused item if ready
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _playIndex(currentIndex);
     });
   }
 
-  void _updateControllers(int newIndex) {
-    final activeIndices = <int>{
-      newIndex - 2,
-      newIndex - 1,
-      newIndex,
-      newIndex + 1,
-      newIndex + 2
-    };
+  /// Ensure controllers exist for indices in [index - _preloadRange .. index + _preloadRange].
+  /// Controllers outside that window are disposed.
+  void _ensureControllersFor(int index) {
+    final minIndex = (index - _preloadRange).clamp(0, widget.reels.length - 1);
+    final maxIndex = (index + _preloadRange).clamp(0, widget.reels.length - 1);
+    final active = <int>{for (var i = minIndex; i <= maxIndex; i++) i};
 
-    _controllers.keys.toList().forEach((index) {
-      if (!activeIndices.contains(index)) {
-        _controllers[index]?.dispose();
-        _controllers.remove(index);
-      }
+    // Dispose controllers outside the active window
+    final toRemove = _controllers.keys.where((k) => !active.contains(k)).toList();
+    for (var k in toRemove) {
+      try {
+        _controllers[k]?.pause();
+        _controllers[k]?.dispose();
+      } catch (_) {}
+      _controllers.remove(k);
+    }
+
+    // Create controllers for indices in the active window if missing
+    for (var i in active) {
+      if (_controllers.containsKey(i)) continue;
+      final reel = widget.reels[i];
+      final videoId = YoutubePlayer.convertUrlToId(reel.videoUrl) ?? "";
+      if (videoId.isEmpty) continue;
+      final controller = YoutubePlayerController(
+        initialVideoId: videoId,
+        flags: const YoutubePlayerFlags(
+          autoPlay: false, // do not auto-play until focused
+          mute: true, // start muted
+          hideControls: true,
+          controlsVisibleAtStart: false,
+          enableCaption: false,
+        ),
+      );
+      _controllers[i] = controller;
+      // don't call play here — we'll play when page is focused
+    }
+  }
+
+  /// Pause & mute other controllers, unmute & play the focused controller.
+  void _playIndex(int index) {
+    // If controllers for index are not created yet, create the window and return.
+    if (!_controllers.containsKey(index)) {
+      _ensureControllersFor(index);
+      // playing will be attempted after controller is initialized or when user lands on it
+      return;
+    }
+
+    // Pause and mute other controllers
+    _controllers.forEach((k, c) {
+      if (k == index) return;
+      try {
+        c.pause();
+        c.mute(); // youtube_player_flutter: mute()
+      } catch (_) {}
     });
 
-    for (var index in activeIndices) {
-      if (index >= 0 &&
-          index < widget.reels.length &&
-          !_controllers.containsKey(index)) {
-        final reel = widget.reels[index];
-        final videoId = YoutubePlayer.convertUrlToId(reel.videoUrl) ?? "";
-        if (videoId.isNotEmpty) {
-          _controllers[index] = YoutubePlayerController(
-            initialVideoId: videoId,
-            flags: YoutubePlayerFlags(
-              autoPlay: newIndex == index,
-              mute: newIndex != index,
-              hideControls: true,
-              controlsVisibleAtStart: false,
-              enableCaption: false,
-            ),
-          );
-        }
-      }
+    final currentController = _controllers[index]!;
+    try {
+      currentController.unMute();
+      currentController.play();
+    } catch (_) {
+      // some timing errors can occur; ignore safely
     }
   }
 
   void _onPageChanged(int index) {
-    setState(() {
+    if (index == currentIndex) return;
+
+    // Pause previously playing controller (if any)
+    try {
       _controllers[currentIndex]?.pause();
+    } catch (_) {}
+
+    setState(() {
       currentIndex = index;
-      _updateControllers(currentIndex);
-      _controllers[currentIndex]?.play();
+      _ensureControllersFor(currentIndex);
+    });
+
+    // small delay so the PageView settling doesn't fight playback
+    Future.delayed(const Duration(milliseconds: 120), () {
+      _playIndex(currentIndex);
     });
   }
 
@@ -91,60 +129,97 @@ class _ReelPlayerScreenState extends State<ReelPlayerScreen> {
   void dispose() {
     _pageController.dispose();
     for (var controller in _controllers.values) {
-      controller.dispose();
+      try {
+        controller.dispose();
+      } catch (_) {}
     }
+    _controllers.clear();
     super.dispose();
+  }
+
+  Widget _buildPage(BuildContext context, int index) {
+    final reel = widget.reels[index];
+    var controller = _controllers[index];
+
+    // Create lazily if still missing (safe guard); keep creation cheap
+    if (controller == null) {
+      final videoId = YoutubePlayer.convertUrlToId(reel.videoUrl);
+      if (videoId != null && videoId.isNotEmpty) {
+        controller = YoutubePlayerController(
+          initialVideoId: videoId,
+          flags: const YoutubePlayerFlags(
+            autoPlay: false,
+            mute: true,
+            hideControls: true,
+            controlsVisibleAtStart: false,
+            enableCaption: false,
+          ),
+        );
+        _controllers[index] = controller;
+      } else {
+        return const Center(
+          child: Text('Invalid video', style: TextStyle(color: Colors.white70)),
+        );
+      }
+    }
+
+    // Show a very cheap UI — YoutubePlayer will render and show its own loader while buffer happens.
+    return ReelVideoPage(
+      key: ValueKey('reel_video_$index'),
+      reel: reel,
+      controller: controller,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          PageView.builder(
-            scrollDirection: Axis.vertical,
-            controller: _pageController,
-            itemCount: widget.reels.length,
-            onPageChanged: _onPageChanged,
-            physics: const ClampingScrollPhysics(),
-            allowImplicitScrolling: true,
-            itemBuilder: (context, index) {
-              final reel = widget.reels[index];
-              final controller = _controllers[index]!;
-              return ReelVideoPage(
-                reel: reel,
-                controller: controller,
-              );
-            },
-          ),
-          Positioned(
-            bottom: 20,
-            left: 0,
-            right: 0,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: List.generate(widget.reels.length, (index) {
-                return Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 4),
-                  width: currentIndex == index ? 12 : 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: currentIndex == index
-                        ? Colors.redAccent
-                        : Colors.white.withOpacity(0.5),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                );
-              }),
+      body: NotificationListener<OverscrollIndicatorNotification>(
+        onNotification: (overscroll) {
+          overscroll.disallowIndicator();
+          return true;
+        },
+        child: Stack(
+          children: [
+            PageView.builder(
+              scrollDirection: Axis.vertical,
+              controller: _pageController,
+              itemCount: widget.reels.length,
+              onPageChanged: _onPageChanged,
+              physics: const PageScrollPhysics(),
+              itemBuilder: (context, index) {
+                return _buildPage(context, index);
+              },
             ),
-          ),
-        ],
+            // simple, cheap page indicator
+            Positioned(
+              bottom: 18,
+              left: 0,
+              right: 0,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(widget.reels.length, (i) {
+                  return Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    width: currentIndex == i ? 12 : 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: currentIndex == i ? Colors.redAccent : Colors.white24,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  );
+                }),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
+/// A single reel page that uses YoutubePlayer and very simple overlays (no blur/shadow).
 class ReelVideoPage extends StatefulWidget {
   final Reel reel;
   final YoutubePlayerController controller;
@@ -159,8 +234,7 @@ class ReelVideoPage extends StatefulWidget {
   _ReelVideoPageState createState() => _ReelVideoPageState();
 }
 
-class _ReelVideoPageState extends State<ReelVideoPage>
-    with AutomaticKeepAliveClientMixin {
+class _ReelVideoPageState extends State<ReelVideoPage> with AutomaticKeepAliveClientMixin {
   bool isLiked = false;
   int likeCount = 42;
   List<String> comments = [
@@ -168,7 +242,7 @@ class _ReelVideoPageState extends State<ReelVideoPage>
     "Can’t wait to watch this!",
     "Epic scenes!"
   ];
-  TextEditingController commentController = TextEditingController();
+  final TextEditingController commentController = TextEditingController();
   bool _showControls = false;
   Timer? _hideControlTimer;
 
@@ -231,29 +305,17 @@ class _ReelVideoPageState extends State<ReelVideoPage>
             return Container(
               height: 400,
               decoration: BoxDecoration(
-                color: const Color.fromARGB(180, 17, 19, 40),
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(20)),
-                border: Border.all(color: Colors.white.withOpacity(0.2)),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.5),
-                    blurRadius: 10,
-                    offset: const Offset(0, -5),
-                  ),
-                ],
+                color: const Color.fromARGB(230, 17, 19, 40),
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                border: Border.all(color: Colors.white10),
               ),
               child: Column(
                 children: [
                   Padding(
-                    padding: const EdgeInsets.all(16.0),
+                    padding: const EdgeInsets.all(12.0),
                     child: Text(
                       "Comments (${comments.length})",
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
                     ),
                   ),
                   Expanded(
@@ -261,16 +323,13 @@ class _ReelVideoPageState extends State<ReelVideoPage>
                       itemCount: comments.length,
                       itemBuilder: (context, index) {
                         return ListTile(
-                          title: Text(
-                            comments[index],
-                            style: const TextStyle(color: Colors.white70),
-                          ),
+                          title: Text(comments[index], style: const TextStyle(color: Colors.white70)),
                         );
                       },
                     ),
                   ),
                   Padding(
-                    padding: const EdgeInsets.all(16.0),
+                    padding: const EdgeInsets.all(12.0),
                     child: Row(
                       children: [
                         Expanded(
@@ -279,26 +338,21 @@ class _ReelVideoPageState extends State<ReelVideoPage>
                             style: const TextStyle(color: Colors.white),
                             decoration: InputDecoration(
                               hintText: "Add a comment...",
-                              hintStyle: TextStyle(
-                                  color: Colors.white.withOpacity(0.5)),
+                              hintStyle: TextStyle(color: Colors.white54),
                               filled: true,
-                              fillColor: Colors.white.withOpacity(0.1),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide.none,
-                              ),
+                              fillColor: Colors.white10,
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
                             ),
                           ),
                         ),
                         const SizedBox(width: 8),
                         IconButton(
-                          icon: const Icon(Icons.send,
-                              color: Colors.deepPurpleAccent),
+                          icon: const Icon(Icons.send, color: Colors.deepPurpleAccent),
                           onPressed: () {
                             _addComment();
                             setModalState(() {});
                           },
-                        ),
+                        )
                       ],
                     ),
                   ),
@@ -314,7 +368,10 @@ class _ReelVideoPageState extends State<ReelVideoPage>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+
+    // YoutubePlayer shows its own buffering UI. We keep overlays simple and cheap.
     return GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: _toggleControls,
       child: Stack(
         fit: StackFit.expand,
@@ -330,10 +387,8 @@ class _ReelVideoPageState extends State<ReelVideoPage>
               child: IconButton(
                 iconSize: 64,
                 icon: Icon(
-                  widget.controller.value.isPlaying
-                      ? Icons.pause_circle
-                      : Icons.play_circle,
-                  color: Colors.white.withOpacity(0.8),
+                  widget.controller.value.isPlaying ? Icons.pause_circle : Icons.play_circle,
+                  color: Colors.white70,
                 ),
                 onPressed: () {
                   setState(() {
@@ -348,140 +403,55 @@ class _ReelVideoPageState extends State<ReelVideoPage>
                 },
               ),
             ),
+          // Top bar (lightweight)
           Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: Container(
-              padding: const EdgeInsets.only(
-                  top: 40, left: 16, right: 16, bottom: 16),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.black.withOpacity(0.7),
-                    Colors.transparent,
-                  ],
+            top: 20,
+            left: 8,
+            right: 8,
+            child: Row(
+              children: [
+                GestureDetector(
+                  onTap: () => Navigator.pop(context),
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                    child: const Icon(Icons.arrow_back, color: Colors.white),
+                  ),
                 ),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  GestureDetector(
-                    onTap: () => Navigator.pop(context),
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Colors.black.withOpacity(0.5),
-                        border:
-                            Border.all(color: Colors.white.withOpacity(0.2)),
-                      ),
-                      child: const Icon(Icons.arrow_back,
-                          color: Colors.white, size: 24),
-                    ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    widget.reel.movieTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.reel.movieTitle,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                            shadows: [
-                              Shadow(
-                                  blurRadius: 4,
-                                  color: Colors.black87,
-                                  offset: Offset(2, 2)),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          widget.reel.movieDescription,
-                          style: const TextStyle(
-                            color: Colors.white70,
-                            fontSize: 14,
-                            shadows: [
-                              Shadow(
-                                  blurRadius: 2,
-                                  color: Colors.black87,
-                                  offset: Offset(1, 1)),
-                            ],
-                          ),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
+          // Right side actions (cheap)
           Positioned(
-            bottom: 80,
-            right: 16,
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.5),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white.withOpacity(0.2)),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Column(
-                    children: [
-                      IconButton(
-                        icon: Icon(
-                          isLiked ? Icons.favorite : Icons.favorite_border,
-                          color: isLiked ? Colors.redAccent : Colors.white,
-                          size: 32,
-                        ),
-                        onPressed: _toggleLike,
-                      ),
-                      Text(
-                        likeCount.toString(),
-                        style: const TextStyle(
-                            color: Colors.white70, fontSize: 12),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Column(
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.comment,
-                            color: Colors.white, size: 32),
-                        onPressed: _showComments,
-                      ),
-                      Text(
-                        comments.length.toString(),
-                        style: const TextStyle(
-                            color: Colors.white70, fontSize: 12),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  IconButton(
-                    icon:
-                        const Icon(Icons.share, color: Colors.white, size: 32),
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                            content: Text("Shared: ${widget.reel.movieTitle}")),
-                      );
-                    },
-                  ),
-                ],
-              ),
+            bottom: 70,
+            right: 12,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  onPressed: _toggleLike,
+                  icon: Icon(isLiked ? Icons.favorite : Icons.favorite_border, color: isLiked ? Colors.redAccent : Colors.white),
+                ),
+                const SizedBox(height: 8),
+                IconButton(onPressed: _showComments, icon: const Icon(Icons.comment, color: Colors.white)),
+                const SizedBox(height: 8),
+                IconButton(
+                  onPressed: () {
+                    // simple share action
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Shared: ${widget.reel.movieTitle}')));
+                  },
+                  icon: const Icon(Icons.share, color: Colors.white),
+                ),
+              ],
             ),
           ),
         ],
@@ -489,4 +459,3 @@ class _ReelVideoPageState extends State<ReelVideoPage>
     );
   }
 }
-

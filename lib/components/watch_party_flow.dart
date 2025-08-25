@@ -1,3 +1,4 @@
+// watch_party_flow.dart
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -32,7 +33,11 @@ void showRoleSelection(BuildContext context, WatchPartyScreenState state) {
             shape: const RoundedRectangleBorder(
                 borderRadius: BorderRadius.all(Radius.circular(8))),
           ),
-          onPressed: () => handleCreatorFlow(dialogContext, state),
+          onPressed: () {
+            // Close the role dialog first, then start the create flow which shows its own dialogs.
+            Navigator.pop(dialogContext);
+            state.authorizeCreator();
+          },
           child:
               const Text("Create Party", style: TextStyle(color: Colors.black)),
         ),
@@ -52,9 +57,9 @@ void handleInviteeFlow(BuildContext context, WatchPartyScreenState state) {
 }
 
 void handleCreatorFlow(BuildContext context, WatchPartyScreenState state) {
-  state.authorizeCreator();
+  // keep this helper for other call-sites – pop then create
   Navigator.pop(context);
-  showPartyCode(context, state);
+  state.authorizeCreator();
 }
 
 void handleAdminFlow(BuildContext context, WatchPartyScreenState state) {
@@ -112,7 +117,7 @@ void showCodeEntryDialog(BuildContext context, WatchPartyScreenState state) {
   String? selectedSeat;
   showDialog(
     context: context,
-    barrierDismissible: false,
+    barrierDismissible: true, // allow cancelling
     builder: (dialogContext) => AlertDialog(
       title: const Text("Join Watch Party"),
       content: Column(
@@ -144,6 +149,10 @@ void showCodeEntryDialog(BuildContext context, WatchPartyScreenState state) {
           borderRadius: BorderRadius.all(Radius.circular(12))),
       backgroundColor: Colors.black87,
       actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text("Cancel", style: TextStyle(color: Colors.white)),
+        ),
         ElevatedButton(
           style: ElevatedButton.styleFrom(
             backgroundColor:
@@ -153,11 +162,12 @@ void showCodeEntryDialog(BuildContext context, WatchPartyScreenState state) {
                 borderRadius: BorderRadius.all(Radius.circular(8))),
           ),
           onPressed: () async {
-            final isValid = await validatePartyCode(controller.text, state);
+            final codeText = controller.text.trim();
+            final isValid = await validatePartyCode(codeText, state);
             if (!context.mounted) return;
             if (isValid && selectedSeat != null) {
-              state.joinParty(controller.text, selectedSeat!);
               Navigator.pop(dialogContext);
+              state.joinParty(codeText, selectedSeat!);
               showSuccess(context, "Successfully joined party");
               if (state.inviteJoinCount % 2 == 0) {
                 showTriviaDialog(context, state);
@@ -197,8 +207,26 @@ void scheduleParty(int delayMinutes, Map<String, dynamic> movie,
     state.doorsController.forward();
     return;
   }
+
+  // If there is no party yet, try to create one first.
+  if (state.partyCode == null) {
+    // This will show confirm/create dialogs; if creation canceled, abort.
+    state.authorizeCreator();
+    // wait briefly for partyCode assignment (authorizeCreator updates state)
+    var waited = 0;
+    while (state.partyCode == null && waited < 10) {
+      await Future.delayed(const Duration(milliseconds: 300));
+      waited++;
+    }
+    if (state.partyCode == null) {
+      showError(state.context, "Party creation cancelled; scheduling aborted.");
+      return;
+    }
+  }
+
   try {
     state.startPartyScheduling(delayMinutes);
+    // Save to Firestore using the existing partyCode (should exist now)
     await state.savePartyToFirestore(state.partyCode!, movie, delayMinutes);
     await fetchStreamingLinks(movie, state);
     if (!state.mounted) return;
@@ -271,8 +299,8 @@ void showScheduleDialog(BuildContext context, Map<String, dynamic> movie,
           onPressed: () {
             final minutes = int.tryParse(controller.text) ?? 5;
             state.setMovieTitle(movie['title'] as String? ?? "Untitled");
-            scheduleParty(minutes, movie, state);
             Navigator.pop(dialogContext);
+            scheduleParty(minutes, movie, state);
             controller.dispose();
           },
           child: const Text("Schedule", style: TextStyle(color: Colors.black)),

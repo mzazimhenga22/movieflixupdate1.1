@@ -1,3 +1,4 @@
+// watch_party_utils.dart
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -6,15 +7,26 @@ import 'package:movie_app/settings_provider.dart';
 import 'package:movie_app/streaming_service.dart';
 import 'package:movie_app/tmdb_api.dart' as tmdb;
 import 'watch_party_screen.dart';
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 
 void startControlsTimer(WatchPartyScreenState state) {
   state.hideControlsTimer();
 }
 
+/// Stronger alphanumeric party code (cryptographically seeded)
 String generateSecurePartyCode() {
-  const codeLength = 6;
-  final random = Random.secure();
-  return List.generate(codeLength, (_) => random.nextInt(10)).join();
+  const length = 6;
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // avoid ambiguous chars like I, O, 0, 1
+  final rnd = Random.secure();
+  final bytes = List<int>.generate(length, (_) => rnd.nextInt(256));
+  // produce deterministic mapping to allowed chars
+  final buffer = StringBuffer();
+  for (var b in bytes) {
+    buffer.write(chars[b % chars.length]);
+  }
+  return buffer.toString();
 }
 
 Future<void> fetchStreamingLinks(
@@ -81,6 +93,7 @@ Future<void> searchMovies(String query, WatchPartyScreenState state) async {
 }
 
 void showSuccess(BuildContext context, String message) {
+  if (!context.mounted) return; // ✅ prevents error
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
       content: Text(message),
@@ -88,12 +101,14 @@ void showSuccess(BuildContext context, String message) {
       behavior: SnackBarBehavior.floating,
       margin: const EdgeInsets.all(12),
       shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(8))),
+        borderRadius: BorderRadius.all(Radius.circular(8)),
+      ),
     ),
   );
 }
 
 void showError(BuildContext context, String message) {
+  if (!context.mounted) return; // ✅ prevents error
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
       content: Text(message),
@@ -101,7 +116,8 @@ void showError(BuildContext context, String message) {
       behavior: SnackBarBehavior.floating,
       margin: const EdgeInsets.all(12),
       shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(8))),
+        borderRadius: BorderRadius.all(Radius.circular(8)),
+      ),
     ),
   );
 }
@@ -112,8 +128,7 @@ void showPartyCode(BuildContext context, WatchPartyScreenState state) {
     final referralLink = "https://watchparty.app/join/${state.partyCode}";
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(
-            "Your party code: ${state.partyCode}\nReferral: $referralLink"),
+        content: Text("Your party code: ${state.partyCode}\nReferral: $referralLink"),
         duration: const Duration(seconds: 5),
         backgroundColor: settings.accentColor,
         behavior: SnackBarBehavior.floating,
@@ -123,6 +138,8 @@ void showPartyCode(BuildContext context, WatchPartyScreenState state) {
           textColor: Colors.black,
           onPressed: () {
             showSuccess(context, "Referral link shared!");
+            // NOTE: granting trial tickets on share should be server-verified,
+            // but we keep a local bonus here for UX. Replace with server call later.
             if (!state.isPremium) {
               state.addTrialTicket();
               showSuccess(context, "Bonus trial ticket earned!");
