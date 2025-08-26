@@ -136,7 +136,6 @@ flutter:
     - assets/icon/premierticket.jpg
     - assets/icon/movieposter.jpg
     - assets/cinema.jpg
-    - assets/account_service.json
 
 flutter_launcher_icons:
   android: true
