@@ -535,7 +535,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
           // sendFcmPush signature used in chat_screen: fcmToken, projectId, title, body, extraData
           unawaited(sendFcmPush(
             fcmToken: token,
-            projectId: _fcmProjectId,
+           
             title: title,
             body: body,
             extraData: extraData,

@@ -353,7 +353,7 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
 
       unawaited(sendFcmPush(
         fcmToken: fcmToken,
-        projectId: projectId,
+        
         title: title,
         body: body,
         extraData: extraData,

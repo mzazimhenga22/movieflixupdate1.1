@@ -32,6 +32,9 @@ import 'package:movie_app/components/socialsection/VideoCallScreen_1to1.dart';
 import 'package:movie_app/webrtc/rtc_manager.dart';
 import 'package:movie_app/services/fcm_sender.dart'; // optional server-side helper
 
+// NEW: import ChatScreen so we can open it from notifications
+import 'package:movie_app/components/socialsection/chat_screen.dart';
+
 // A port to receive messages from the background isolate
 final ReceivePort _port = ReceivePort();
 
@@ -87,10 +90,12 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   }
 
   final data = message.data ?? <String, dynamic>{};
+  debugPrint('[BG] background message received data=$data');
 
-  // Handle incoming call data-only pushes
-  if (data['type'] == 'incoming_call') {
+  // Handle incoming call data-only pushes (background)
+  if ((data['type'] ?? '') == 'incoming_call') {
     try {
+      // Build CallKit params from the data payload
       final params = CallKitParams.fromJson({
         'id': data['callId'] ?? '',
         'nameCaller': data['callerName'] ?? 'Unknown',
@@ -100,7 +105,7 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
         'type': (data['callType'] ?? '') == 'video' ? 1 : 0,
         'textAccept': 'Accept',
         'textDecline': 'Decline',
-        'duration': 30000,
+        'duration': (data['duration'] is int) ? data['duration'] : 30000,
         'extra': {'userId': data['receiverId'] ?? '', 'callerId': data['callerId'] ?? ''},
         'android': {
           'isCustomNotification': true,
@@ -129,11 +134,15 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
           'ringtonePath': 'system_ringtone_default',
         },
       });
-      // Best-effort: show the incoming call UI (Android may allow this from background)
+
+      debugPrint('[BG] showing CallKit incoming (background) for callId=${data['callId']}');
       await FlutterCallkitIncoming.showCallkitIncoming(params);
     } catch (e, st) {
       debugPrint('[BG] CallKit show failed (headless): $e\n$st');
     }
+  } else {
+    // Not an incoming_call - ignore or log other types
+    debugPrint('[BG] background message is not incoming_call; type=${data['type']}');
   }
 }
 
@@ -208,6 +217,23 @@ Future<void> _safeAuthDatabaseInitialize({int maxRetries = 6}) async {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // ---- Configure FcmSender to use your backend (Render) and include API key ----
+  // The API key can be provided via a compile-time define: --dart-define=PUSH_API_KEY=@yourkey
+  // OR it will fall back to the literal below for development/testing.
+  const _fallbackKey = '@Mzazimhenga02'; // <-- dev fallback (replace if you want)
+  final pushApiKey = const String.fromEnvironment('PUSH_API_KEY', defaultValue: _fallbackKey).trim();
+
+  try {
+    FcmSender.configure(
+      baseUrl: 'https://moviflxpro.onrender.com/sendPush',
+      apiKey: pushApiKey.isNotEmpty ? pushApiKey : null,
+    );
+    debugPrint('[main] FcmSender configured to use backend: ${FcmSender.baseUrl} (api key ${pushApiKey.isNotEmpty ? 'provided' : 'not provided'})');
+  } catch (e, st) {
+    debugPrint('[main] FcmSender.configure failed: $e\n$st');
+  }
+  // ------------------------------------------------------------------------------------
+
   // dart-define flags
   const enableImpeller = bool.fromEnvironment('ENABLE_IMPELLER', defaultValue: false);
   const enableSksl = bool.fromEnvironment('ENABLE_SKSL', defaultValue: false);
@@ -279,12 +305,9 @@ void main() async {
   if (useSoftwareRendering) debugPrint('✅ Using software rendering');
 
   // Listen for download updates on main isolate port.
-  // Note: downloads UI (DownloadsScreen) also registers the 'downloader_send_port'
-  // and will update itself — here we only log and optionally perform app-level actions.
   _port.listen((dynamic message) {
     try {
       final taskId = message['id']?.toString() ?? '<unknown>';
-      // message['status'] might be an int (plugin) or something else; normalize to int
       final rawStatus = message['status'];
       int statusInt;
       if (rawStatus is int) {
@@ -304,11 +327,6 @@ void main() async {
       final progress = (message['progress'] is int) ? message['progress'] as int : int.tryParse(message['progress']?.toString() ?? '0') ?? 0;
 
       debugPrint('[Downloader] task=$taskId status=$status progress=$progress');
-
-      // If you want to trigger app-level behavior when downloads complete, do it here.
-      // But don't tightly-couple to DownloadsScreenState; the DownloadsScreen already listens
-      // to the same port and will update itself. If you need to notify DownloadsScreen specifically,
-      // prefer a shared event bus or a top-level StreamController that the UI subscribes to.
     } catch (e, st) {
       debugPrint('[Downloader] parse error: $e\n$st');
     }
@@ -427,6 +445,130 @@ class _MyAppState extends State<MyApp> {
     _setupFcmTokenAndHandlers();
   }
 
+  /// Opens ChatScreen from notification data.
+  Future<void> _openChatFromNotification(Map<String, dynamic> data) async {
+    try {
+      if (data == null) return;
+      final possibleChatId = data['chatId'] ?? data['chat_id'] ?? data['chatid'];
+      if (possibleChatId == null || possibleChatId.toString().trim().isEmpty) {
+        debugPrint('[notif->chat] no chatId in notification data: $data');
+        return;
+      }
+      final chatId = possibleChatId.toString();
+
+      final supaUser = Supabase.instance.client.auth.currentUser;
+      if (supaUser == null) {
+        debugPrint('[notif->chat] no authenticated user found - cannot open chat');
+        return;
+      }
+      final currentUserId = supaUser.id;
+
+      // Fetch current user's Firestore doc
+      final curUserDoc = await FirebaseFirestore.instance.collection('users').doc(currentUserId).get();
+      if (!curUserDoc.exists) {
+        debugPrint('[notif->chat] current user doc not found for id=$currentUserId');
+        return;
+      }
+      final Map<String, dynamic> currentUserMap = {...curUserDoc.data()!, 'id': curUserDoc.id};
+
+      // Try to load the chat doc to determine the other participant
+      final chatDocSnap = await FirebaseFirestore.instance.collection('chats').doc(chatId).get();
+      String? otherUserId;
+      if (chatDocSnap.exists) {
+        final chatData = chatDocSnap.data()!;
+        final userIds = List<String>.from(chatData['userIds'] ?? []);
+        otherUserId = userIds.firstWhere((id) => id != currentUserId, orElse: () => '');
+        if (otherUserId == '') otherUserId = data['senderId'] ?? data['sender_id'] ?? null;
+      } else {
+        // fallback to senderId from notification
+        otherUserId = data['senderId'] ?? data['sender_id'] ?? null;
+      }
+
+      if (otherUserId == null || otherUserId.toString().isEmpty) {
+        debugPrint('[notif->chat] could not determine other user id for chatId=$chatId');
+        return;
+      }
+
+      // Fetch otherUser doc (best-effort)
+      final otherDoc = await FirebaseFirestore.instance.collection('users').doc(otherUserId.toString()).get();
+      final Map<String, dynamic> otherUserMap =
+          otherDoc.exists ? {...otherDoc.data()!, 'id': otherDoc.id} : {'id': otherUserId.toString()};
+
+      final List<dynamic> storyInteractions = [];
+
+      // Ensure navigator is ready
+      if (navigatorKey.currentState == null) {
+        debugPrint('[notif->chat] navigatorKey.currentState is null - aborting openChat');
+        return;
+      }
+
+      // Push ChatScreen
+      navigatorKey.currentState!.push(MaterialPageRoute(
+        builder: (_) => ChatScreen(
+          chatId: chatId,
+          currentUser: currentUserMap,
+          otherUser: otherUserMap,
+          authenticatedUser: currentUserMap,
+          storyInteractions: storyInteractions,
+          accentColor: Theme.of(context).colorScheme.primary,
+        ),
+      ));
+
+      debugPrint('[notif->chat] pushed ChatScreen for chatId=$chatId');
+    } catch (e, st) {
+      debugPrint('[notif->chat] failed to open chat from notification: $e\n$st');
+    }
+  }
+
+  /// Show native incoming call UI in the foreground (or whenever we want to trigger call UI)
+  Future<void> _showIncomingCallUIFromData(Map<String, dynamic> data) async {
+    try {
+      final params = CallKitParams.fromJson({
+        'id': data['callId'] ?? '',
+        'nameCaller': data['callerName'] ?? 'Unknown',
+        'appName': 'MovieApp',
+        'avatar': data['avatar'] ?? '',
+        'handle': data['callerId'] ?? '',
+        'type': (data['callType'] ?? '') == 'video' ? 1 : 0,
+        'textAccept': 'Accept',
+        'textDecline': 'Decline',
+        'duration': (data['duration'] is int) ? data['duration'] : 30000,
+        'extra': {'userId': data['receiverId'] ?? '', 'callerId': data['callerId'] ?? ''},
+        'android': {
+          'isCustomNotification': true,
+          'isShowLogo': false,
+          'ringtonePath': 'system_ringtone_default',
+          'backgroundColor': '#0955fa',
+          'actionColor': '#4CAF50',
+          'incomingCallNotificationChannelName': 'Incoming Call',
+          'missedCallNotificationChannelName': 'Missed Call',
+          'isShowCallID': false,
+        },
+        'ios': {
+          'iconName': 'CallKitLogo',
+          'handleType': 'generic',
+          'supportsVideo': true,
+          'maximumCallGroups': 2,
+          'maximumCallsPerCallGroup': 1,
+          'audioSessionMode': 'default',
+          'audioSessionActive': true,
+          'audioSessionPreferredSampleRate': 44100.0,
+          'audioSessionPreferredIOBufferDuration': 0.005,
+          'supportsDTMF': true,
+          'supportsHolding': true,
+          'supportsGrouping': false,
+          'supportsUngrouping': false,
+          'ringtonePath': 'system_ringtone_default',
+        },
+      });
+
+      debugPrint('[FG] showing CallKit incoming (foreground) for callId=${data['callId']}');
+      await FlutterCallkitIncoming.showCallkitIncoming(params);
+    } catch (e, st) {
+      debugPrint('[FG] showCallkitIncoming failed: $e\n$st');
+    }
+  }
+
   Future<void> _setupFcmTokenAndHandlers() async {
     try {
       final userId = Supabase.instance.client.auth.currentUser?.id;
@@ -464,21 +606,71 @@ class _MyAppState extends State<MyApp> {
         });
 
         FirebaseMessaging.onMessage.listen((RemoteMessage msg) {
-          debugPrint('[FCM] onMessage: ${msg.messageId} data=${msg.data}');
-          // Optionally show in-app banner / routing here
-        });
+          debugPrint('[FCM] onMessage: ${msg.messageId} data=${msg.data} notification=${msg.notification}');
 
-        FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-          final data = message.data;
-          if (data['type'] == 'incoming_call') {
-            _handleIncomingCallTap(data);
+          // If it's an incoming_call in the foreground, show native call UI immediately.
+          try {
+            final data = msg.data ?? <String, dynamic>{};
+            if ((data['type'] ?? '') == 'incoming_call') {
+              // show native incoming call UI in foreground
+              _showIncomingCallUIFromData(data);
+              return;
+            }
+
+            // Show a simple in-app SnackBar for foreground messages with an "Open" action
+            final ctx = navigatorKey.currentState?.context;
+            if (ctx != null) {
+              final title = msg.notification?.title ?? msg.data['title'] ?? '';
+              final body = msg.notification?.body ?? msg.data['body'] ?? '';
+              ScaffoldMessenger.of(ctx).showSnackBar(
+                SnackBar(
+                  behavior: SnackBarBehavior.floating,
+                  content: Text('$title\n${body.length > 80 ? body.substring(0, 80) + '…' : body}'),
+                  action: SnackBarAction(
+                    label: 'Open',
+                    onPressed: () {
+                      if ((msg.data['type'] ?? '') == 'message') {
+                        _openChatFromNotification(msg.data);
+                      } else if ((msg.data['type'] ?? '') == 'incoming_call') {
+                        _handleIncomingCallTap(msg.data);
+                      }
+                    },
+                  ),
+                  duration: const Duration(seconds: 6),
+                ),
+              );
+            }
+          } catch (e, st) {
+            debugPrint('[FCM] onMessage processing error: $e\n$st');
           }
         });
 
+        // If user taps notification while app is in background/foreground -> this fires
+        FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+          final data = message.data;
+          debugPrint('[FCM] onMessageOpenedApp data=$data');
+          if ((data['type'] ?? '') == 'incoming_call') {
+            _handleIncomingCallTap(data);
+            return;
+          }
+          if ((data['type'] ?? '') == 'message') {
+            _openChatFromNotification(data);
+            return;
+          }
+        });
+
+        // If app was launched from a terminated state via notification (cold start)
         final initialMessage = await FirebaseMessaging.instance.getInitialMessage();
         if (initialMessage?.data != null) {
           final data = initialMessage!.data;
-          if (data['type'] == 'incoming_call') _handleIncomingCallTap(data);
+          debugPrint('[FCM] getInitialMessage data=$data');
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if ((data['type'] ?? '') == 'incoming_call') {
+              _handleIncomingCallTap(data);
+            } else if ((data['type'] ?? '') == 'message') {
+              _openChatFromNotification(data);
+            }
+          });
         }
       }
     } catch (e) {

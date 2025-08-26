@@ -13,33 +13,54 @@ import 'package:uuid/uuid.dart';
 /// - Use debugShowTestBanner(...) to manually show a test call screen.
 class CallOverlayService extends ChangeNotifier {
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sub;
+  StreamSubscription<dynamic>? _callKitEventSub;
   final Duration _callTimeout = const Duration(seconds: 30);
   GlobalKey<NavigatorState>? _navigatorKey;
   String? _userId;
   bool _initialized = false;
 
+  /// Track which callIds we've already shown the native UI for to avoid duplicates.
+  final Set<String> _shownCallIds = <String>{};
+
   Future<void> init(String userId, GlobalKey<NavigatorState> navigatorKey) async {
     debugPrint('[CallOverlayService] init: userId=$userId');
 
+    // Avoid re-registering listeners for the same user repeatedly
     if (_initialized && _userId == userId) return;
+
+    // Clean up prior subscriptions if any (re-init scenario)
+    await _callKitEventSub?.cancel();
+    _callKitEventSub = null;
+    await _sub?.cancel();
+    _sub = null;
+    _shownCallIds.clear();
 
     _initialized = true;
     _userId = userId;
     _navigatorKey = navigatorKey;
 
-    // Initialize CallKit event listener
-    FlutterCallkitIncoming.onEvent.listen(_handleCallKitEvent);
+    // Initialize CallKit event listener (store subscription so we can cancel on dispose)
+    try {
+      _callKitEventSub = FlutterCallkitIncoming.onEvent.listen(_handleCallKitEvent, onError: (e, st) {
+        debugPrint('[CallOverlayService] CallKit onEvent error: $e\n$st');
+      });
+    } catch (e, st) {
+      debugPrint('[CallOverlayService] Failed to subscribe to CallKit events: $e\n$st');
+    }
 
-    // Listen for Firestore call updates
-    await _sub?.cancel();
-    _sub = FirebaseFirestore.instance
-        .collection('calls')
-        .where('receiverId', isEqualTo: userId)
-        .where('status', isEqualTo: 'ringing')
-        .snapshots()
-        .listen(_onCallsSnapshot, onError: (e, st) {
-      debugPrint('[CallOverlayService] snapshots error: $e\n$st');
-    });
+    // Listen for Firestore call updates (ringing)
+    try {
+      _sub = FirebaseFirestore.instance
+          .collection('calls')
+          .where('receiverId', isEqualTo: userId)
+          .where('status', isEqualTo: 'ringing')
+          .snapshots()
+          .listen(_onCallsSnapshot, onError: (e, st) {
+        debugPrint('[CallOverlayService] snapshots error: $e\n$st');
+      });
+    } catch (e, st) {
+      debugPrint('[CallOverlayService] Failed to subscribe to calls snapshots: $e\n$st');
+    }
   }
 
   /// For manual testing from UI
@@ -60,6 +81,7 @@ class CallOverlayService extends ChangeNotifier {
       return;
     }
 
+    // pick the first ringing call (you may want to pick by startedAt or priority)
     final doc = snap.docs.first;
     final data = doc.data();
     final callId = doc.id;
@@ -77,9 +99,23 @@ class CallOverlayService extends ChangeNotifier {
     String callType, {
     bool force = false,
   }) async {
-    // Query active call list first
-    final currentCalls = await FlutterCallkitIncoming.activeCalls();
-    if (currentCalls is List && currentCalls.isNotEmpty && !force) return;
+    // Deduplicate: don't show the same callId twice
+    if (!force && _shownCallIds.contains(callId)) {
+      debugPrint('[CallOverlayService] call $callId already shown - skipping');
+      return;
+    }
+
+    try {
+      // Query active call list first; if there's already a native call UI, skip (unless forced)
+      final currentCalls = await FlutterCallkitIncoming.activeCalls();
+      if (currentCalls is List && currentCalls.isNotEmpty && !force) {
+        debugPrint('[CallOverlayService] native call already active - skipping show for $callId');
+        return;
+      }
+    } catch (e, st) {
+      debugPrint('[CallOverlayService] activeCalls check failed: $e\n$st');
+      // continue - attempt to show anyway
+    }
 
     // Build params using the current package API
     final callKitParams = CallKitParams.fromJson({
@@ -122,58 +158,86 @@ class CallOverlayService extends ChangeNotifier {
       },
     });
 
-    // Show the native incoming call UI
-    await FlutterCallkitIncoming.showCallkitIncoming(callKitParams);
+    try {
+      debugPrint('[CallOverlayService] showing CallKit incoming for callId=$callId');
+      await FlutterCallkitIncoming.showCallkitIncoming(callKitParams);
+      _shownCallIds.add(callId);
+    } catch (e, st) {
+      debugPrint('[CallOverlayService] showCallkitIncoming failed for $callId: $e\n$st');
+    }
 
     // Auto-remove when status changes in Firestore
     FirebaseFirestore.instance.collection('calls').doc(callId).snapshots().firstWhere((s) {
       final status = s.data()?['status'] as String?;
       return status != 'ringing';
-    }).then((_) => _endCallScreen());
+    }).then((_) {
+      _shownCallIds.remove(callId);
+      _endCallScreen();
+    }).catchError((e, st) {
+      debugPrint('[CallOverlayService] status watch error for $callId: $e\n$st');
+    });
 
-    // Auto timeout
+    // Auto timeout - ensure the call doc is updated if still ringing
     Future.delayed(_callTimeout, () async {
-      final doc = await FirebaseFirestore.instance.collection('calls').doc(callId).get();
-      if (doc.exists && doc['status'] == 'ringing') {
-        await _handleDecline(callId, _userId ?? '');
-        _endCallScreen();
+      try {
+        final doc = await FirebaseFirestore.instance.collection('calls').doc(callId).get();
+        if (doc.exists && doc['status'] == 'ringing') {
+          await _handleDecline(callId, _userId ?? '');
+          _shownCallIds.remove(callId);
+          _endCallScreen();
+        }
+      } catch (e, st) {
+        debugPrint('[CallOverlayService] timeout handling error for $callId: $e\n$st');
       }
     });
   }
 
   Future<void> _endCallScreen() async {
-    await FlutterCallkitIncoming.endAllCalls();
+    try {
+      await FlutterCallkitIncoming.endAllCalls();
+    } catch (e, st) {
+      debugPrint('[CallOverlayService] endAllCalls error: $e\n$st');
+    }
   }
 
   // CallKit event handler
   void _handleCallKitEvent(dynamic event) async {
     if (event == null) return;
 
-    final data = event.body as Map<String, dynamic>;
-    final callId = data['id'] as String? ?? '';
-    final callerId = data['handle'] as String? ?? '';
-    final extra = data['extra'] as Map<String, dynamic>? ?? {};
-    final userId = extra['userId'] as String? ?? '';
-    final callType = data['type'] == 1 ? 'video' : 'voice';
+    try {
+      final data = event.body as Map<String, dynamic>;
+      final callId = data['id'] as String? ?? '';
+      final callerId = data['handle'] as String? ?? '';
+      final extra = data['extra'] as Map<String, dynamic>? ?? {};
+      final userId = extra['userId'] as String? ?? '';
+      final callType = data['type'] == 1 ? 'video' : 'voice';
 
-    switch (data['event']) {
-      case 'ACTION_CALL_ACCEPT':
-        await _handleAccept(callId, callerId, callType);
-        break;
-      case 'ACTION_CALL_DECLINE':
-      case 'ACTION_CALL_TIMEOUT':
-        await _handleDecline(callId, userId);
-        break;
-      default:
-        break;
+      switch (data['event']) {
+        case 'ACTION_CALL_ACCEPT':
+          await _handleAccept(callId, callerId, callType);
+          break;
+        case 'ACTION_CALL_DECLINE':
+        case 'ACTION_CALL_TIMEOUT':
+          await _handleDecline(callId, userId);
+          break;
+        default:
+          break;
+      }
+    } catch (e, st) {
+      debugPrint('[CallOverlayService] CallKit event processing error: $e\n$st');
     }
   }
 
   Future<void> _handleAccept(String callId, String callerId, String callType) async {
     // Answer the call at RTC layer
-    await RtcManager.answerCall(callId: callId, peerId: _userId ?? '');
+    try {
+      await RtcManager.answerCall(callId: callId, peerId: _userId ?? '');
+    } catch (e, st) {
+      debugPrint('[CallOverlayService] RtcManager.answerCall failed: $e\n$st');
+      // proceed to navigate anyway if possible
+    }
 
-    // Fetch caller/receiver data
+    // Fetch caller/receiver data (best-effort)
     Map<String, dynamic>? callerData;
     Map<String, dynamic>? receiverData;
     try {
@@ -183,7 +247,7 @@ class CallOverlayService extends ChangeNotifier {
       if (recDoc.exists) receiverData = {...recDoc.data()!, 'id': recDoc.id};
     } catch (_) {}
 
-    // Navigate to call screen
+    // Navigate to call screen if navigator available
     if (_navigatorKey?.currentState == null) return;
 
     if (callType == 'video') {
@@ -212,19 +276,30 @@ class CallOverlayService extends ChangeNotifier {
   }
 
   Future<void> _handleDecline(String callId, String peerId) async {
-    await RtcManager.rejectCall(callId: callId, peerId: peerId);
-    await _endCallScreen();
+    try {
+      await RtcManager.rejectCall(callId: callId, peerId: peerId);
+    } catch (e) {
+      debugPrint('[CallOverlayService] RtcManager.rejectCall failed: $e');
+    } finally {
+      await _endCallScreen();
+      _shownCallIds.remove(callId);
+    }
   }
 
   Future<void> disposeService() async {
     await _sub?.cancel();
+    _sub = null;
+    await _callKitEventSub?.cancel();
+    _callKitEventSub = null;
     await _endCallScreen();
     _initialized = false;
+    _shownCallIds.clear();
   }
 
   @override
   void dispose() {
     _sub?.cancel();
+    _callKitEventSub?.cancel();
     _endCallScreen();
     super.dispose();
   }
