@@ -56,6 +56,14 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
   // Modal loading guard (used by children to show a centralized loading dialog)
   bool _isModalLoadingVisible = false;
 
+  // Background download state (for "Run in background" flows)
+  CancelToken? _currentCancelToken;
+  bool _isBackgroundDownloading = false;
+  bool _backgroundCancelRequested = false;
+  String? _backgroundMessage;
+  Future<String>? _backgroundMergeFuture;
+  String? _backgroundTitle;
+
   @override
   void initState() {
     super.initState();
@@ -329,7 +337,13 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
     }
 
     final downloadId = 'movie_${tmdbId}${idSuffix}'; // unique folder id
-    final cancelToken = CancelToken();
+
+    // assign current cancel token so overlay can cancel if user tapped background cancel
+    _currentCancelToken = CancelToken();
+    final cancelToken = _currentCancelToken!;
+    _backgroundCancelRequested = false;
+    _backgroundMessage = null;
+
     bool finished = false;
     Map<String, String>? result;
 
@@ -345,7 +359,7 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
         mergeSegments: false, // <<-- changed: do segments download only
         concurrency: 6,
         onProgress: (p) {
-          // publish progress to the notifier so dialog updates
+          // publish progress to the notifier so dialog/overlay updates
           _downloadProgressNotifier.value = p;
         },
         cancelToken: cancelToken,
@@ -359,6 +373,8 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
           } catch (_) {}
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download cancelled.')));
         }
+        _currentCancelToken = null;
+        _isBackgroundDownloading = false;
         return;
       }
       if (mounted) {
@@ -367,6 +383,8 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
         } catch (_) {}
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Download failed: $e')));
       }
+      _currentCancelToken = null;
+      _isBackgroundDownloading = false;
       return;
     } finally {
       // Ensure progress dialog is closed if still open (we will present finalizing dialog next)
@@ -377,7 +395,11 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
       }
     }
 
-    if (!finished || result == null) return;
+    if (!finished || result == null) {
+      _currentCancelToken = null;
+      _isBackgroundDownloading = false;
+      return;
+    }
 
     // Make a non-nullable local copy
     final res = result;
@@ -399,6 +421,9 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
         'timestamp': DateTime.now().toIso8601String(),
       };
       await _saveDownloadRecord(record);
+
+      _currentCancelToken = null;
+      _isBackgroundDownloading = false;
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -461,6 +486,17 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
 
       if (runInBackground) {
         // User asked to run in background -> attach callbacks to notify when done
+        // show background UI
+        if (mounted) {
+          setState(() {
+            _isBackgroundDownloading = true;
+            _backgroundMergeFuture = mergeFuture;
+            _backgroundTitle = title;
+            _backgroundMessage = 'Finalizing in background...';
+            _backgroundCancelRequested = false;
+          });
+        }
+
         mergeFuture.then((mergedPath) async {
           final record = {
             'id': downloadId,
@@ -478,37 +514,52 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
             debugPrint('Failed to save download record after background merge: $e');
           }
 
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Finalizing finished: ${details['title'] ?? details['name']}'),
-              action: SnackBarAction(
-                label: 'Play',
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => MainVideoPlayer(
-                        videoPath: mergedPath.isNotEmpty ? mergedPath : playlistPath,
-                        title: title,
-                        releaseYear: _releaseYear ?? 1970,
-                        isFullSeason: seasonNumber != null && episodeNumber != null,
-                        episodeFiles: const [],
-                        similarMovies: _similarMovies,
-                        subtitleUrl: res['subtitle'] ?? streamingInfo['subtitleUrl'],
-                        isHls: true,
+          if (mounted) {
+            setState(() {
+              _isBackgroundDownloading = false;
+              _backgroundMergeFuture = null;
+              _backgroundMessage = null;
+              _backgroundTitle = null;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Finalizing finished: ${details['title'] ?? details['name']}'),
+                action: SnackBarAction(
+                  label: 'Play',
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => MainVideoPlayer(
+                          videoPath: mergedPath.isNotEmpty ? mergedPath : playlistPath,
+                          title: title,
+                          releaseYear: _releaseYear ?? 1970,
+                          isFullSeason: seasonNumber != null && episodeNumber != null,
+                          episodeFiles: const [],
+                          similarMovies: _similarMovies,
+                          subtitleUrl: res['subtitle'] ?? streamingInfo['subtitleUrl'],
+                          isHls: true,
+                        ),
                       ),
-                    ),
-                  );
-                },
+                    );
+                  },
+                ),
               ),
-            ),
-          );
+            );
+          }
         }).catchError((e) {
           debugPrint('Background merge failed: $e');
           if (mounted) {
+            setState(() {
+              _isBackgroundDownloading = false;
+              _backgroundMergeFuture = null;
+              _backgroundMessage = 'Finalizing failed';
+            });
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Finalizing failed: $e')));
           }
+        }).whenComplete(() {
+          // clear current token after finalization attempt
+          _currentCancelToken = null;
         });
 
         // Let user continue; we already dismissed the finalizing dialog (it returns true when user taps Run in background)
@@ -526,6 +577,8 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Finalizing failed: $e')));
           }
+          _currentCancelToken = null;
+          _isBackgroundDownloading = false;
           return;
         }
 
@@ -541,6 +594,9 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
           'timestamp': DateTime.now().toIso8601String(),
         };
         await _saveDownloadRecord(record);
+
+        _currentCancelToken = null;
+        _isBackgroundDownloading = false;
 
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -576,13 +632,16 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download finished but no playable file found.')));
     }
+    _currentCancelToken = null;
+    _isBackgroundDownloading = false;
   }
 
   // ---------- DOWNLOAD HELPERS ----------
   // Shows a cancellable progress dialog that listens to _downloadProgressNotifier.
+  // Updated to prefer bytes display and to show determinate progress when totalBytes (or segments) present.
   void _showDownloadProgressDialog(CancelToken cancelToken) {
     if (!mounted) return;
-    showDialog(
+    showDialog<bool>(
       context: context,
       barrierDismissible: false,
       useRootNavigator: true, // important: show above bottom sheet
@@ -594,32 +653,46 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
             child: ValueListenableBuilder<DownloadProgress?>(
               valueListenable: _downloadProgressNotifier,
               builder: (context, progress, _) {
-                final downloaded = progress?.downloadedSegments ?? 0;
-                final total = progress?.totalSegments ?? 0;
+                final downloadedSegments = progress?.downloadedSegments ?? 0;
+                final totalSegments = progress?.totalSegments ?? 0;
                 final bytes = progress?.bytesDownloaded ?? 0;
-                final percent = (total > 0) ? (downloaded / total) : null;
-                final percentStr = percent != null ? (percent * 100).toStringAsFixed(1) + '%' : _bytesToReadable(bytes);
-
+                final totalBytes = progress?.totalBytes;
                 final isFinalizing = progress?.finalizing ?? false;
-                final message = progress?.message;
+                final message = progress?.message ?? '';
+
+                // prefer bytes-based percent if totalBytes is available
+                double? fraction;
+                String progressLabel = _bytesToReadable(bytes);
+                if (totalBytes != null && totalBytes > 0) {
+                  fraction = bytes / totalBytes;
+                  final percentStr = (fraction * 100).toStringAsFixed(1) + '%';
+                  progressLabel = '${_bytesToReadable(bytes)} / ${_bytesToReadable(totalBytes)} ($percentStr)';
+                } else if (totalSegments > 0) {
+                  // fallback: show bytes downloaded and a compact segments hint (less prominent)
+                  final segPercent = (downloadedSegments / totalSegments) * 100;
+                  // Show bytes + small segments hint to help estimate progress
+                  progressLabel = '${_bytesToReadable(bytes)} • ${downloadedSegments}/${totalSegments} segs (${segPercent.toStringAsFixed(0)}%)';
+                  fraction = (totalSegments > 0) ? (downloadedSegments / totalSegments) : null;
+                } else {
+                  // nothing reliable — show bytes downloaded only
+                  progressLabel = _bytesToReadable(bytes);
+                  fraction = null;
+                }
 
                 return Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(isFinalizing ? 'Finalizing...' : 'Downloading...', style: const TextStyle(color: Colors.white)),
                     const SizedBox(height: 12),
-                    // Show determinate progress only while segment downloading, otherwise indeterminate
-                    isFinalizing
-                        ? const LinearProgressIndicator()
-                        : LinearProgressIndicator(value: percent),
+                    // determinate when we have a fraction, otherwise indeterminate
+                    (fraction != null)
+                        ? LinearProgressIndicator(value: fraction)
+                        : const LinearProgressIndicator(),
                     const SizedBox(height: 8),
-                    if (isFinalizing && (message != null && message.isNotEmpty))
+                    if (isFinalizing && (message.isNotEmpty))
                       Text(message, style: const TextStyle(color: Colors.white70))
                     else
-                      Text(
-                        total > 0 ? '$downloaded / $total segments (${percentStr})' : percentStr,
-                        style: const TextStyle(color: Colors.white70),
-                      ),
+                      Text(progressLabel, style: const TextStyle(color: Colors.white70)),
                     const SizedBox(height: 8),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.end,
@@ -1278,6 +1351,113 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
               const SliverToBoxAdapter(child: SizedBox(height: 48)),
             ],
           ),
+
+          // Background download overlay (floating card): appears when finalization runs in background
+          if (_isBackgroundDownloading)
+            Positioned(
+              right: 16,
+              bottom: 24,
+              child: GestureDetector(
+                onTap: () {
+                  // tap to expand/hide is intentionally simple: we open a small dialog with actions.
+                  showDialog(
+                    context: context,
+                    builder: (ctx) {
+                      final settings = Provider.of<SettingsProvider>(ctx);
+                      return AlertDialog(
+                        backgroundColor: Colors.black87,
+                        title: Text('Background download', style: TextStyle(color: settings.accentColor)),
+                        content: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (_backgroundTitle != null) Text(_backgroundTitle!, style: const TextStyle(color: Colors.white)),
+                            const SizedBox(height: 8),
+                            ValueListenableBuilder<DownloadProgress?>(
+                              valueListenable: _downloadProgressNotifier,
+                              builder: (c, p, _) {
+                                final bytes = p?.bytesDownloaded ?? 0;
+                                final totalBytes = p?.totalBytes;
+                                return Column(
+                                  children: [
+                                    CircularProgressIndicator(color: settings.accentColor),
+                                    const SizedBox(height: 8),
+                                    Text(_backgroundMessage ?? 'Finalizing...', style: const TextStyle(color: Colors.white70)),
+                                    const SizedBox(height: 8),
+                                    Text(totalBytes != null ? '${_bytesToReadable(bytes)} / ${_bytesToReadable(totalBytes)}' : _bytesToReadable(bytes), style: const TextStyle(color: Colors.white70)),
+                                  ],
+                                );
+                              },
+                            ),
+                          ],
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () {
+                              // Hide overlay (the merge still runs)
+                              Navigator.of(ctx).pop();
+                              setState(() {
+                                _isBackgroundDownloading = false;
+                              });
+                            },
+                            child: const Text('Hide', style: TextStyle(color: Colors.white)),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              // Attempt cancel: cancels segment downloads. compute cannot be cancelled.
+                              _backgroundCancelRequested = true;
+                              _currentCancelToken?.cancel();
+                              setState(() {
+                                _backgroundMessage = 'Cancel requested...';
+                              });
+                              Navigator.of(ctx).pop();
+                            },
+                            child: const Text('Cancel', style: TextStyle(color: Colors.red)),
+                          ),
+                        ],
+                      );
+                    },
+                  );
+                },
+                child: Card(
+                  color: Colors.black87,
+                  elevation: 8,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(
+                          width: 36,
+                          height: 36,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        const SizedBox(width: 12),
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(_backgroundTitle ?? 'Finalizing', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                            const SizedBox(height: 4),
+                            Text(_backgroundMessage ?? 'Running in background', style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                          ],
+                        ),
+                        const SizedBox(width: 12),
+                        IconButton(
+                          icon: const Icon(Icons.close, color: Colors.white70),
+                          onPressed: () {
+                            // hide overlay
+                            setState(() {
+                              _isBackgroundDownloading = false;
+                            });
+                          },
+                        )
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -1750,4 +1930,3 @@ Future<String> mergeSegmentsWorker(Map<String, String> args) async {
 Future<String> _mergeSegmentsOnMainIsolate(String playlistPath, String outDir, String id) async {
   return await mergeSegmentsWorker({'playlist': playlistPath, 'outDir': outDir, 'id': id});
 }
-
