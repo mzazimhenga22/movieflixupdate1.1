@@ -1,7 +1,8 @@
 // streaming_service.dart
-// Updated: return direct m3u8 when available — no heavy decoding/searching
-// Selection logic improved: prefer explicit hls/file streams, probe ambiguous URLs
-// to avoid handing HTML landing pages to the player.
+// Updated: prefer English-language m3u8 when possible; resolve master -> variant
+// and save resolved variant for download-mode so downloader doesn't re-fetch.
+// Selection logic: prefer explicit hls/file streams, probe ambiguous URLs,
+// prefer streams labeled 'en' at stream-level and inside master playlists.
 
 import 'dart:convert';
 import 'dart:async';
@@ -134,8 +135,7 @@ class StreamingService {
         throw StreamingNotAvailableException('No streams available. Response snippet: $snippet');
       }
 
-      // --------- REPLACEMENT SELECTION LOGIC ----------
-      // Build a prioritized list of candidate strings to inspect (playlist text, playlist URL, quality urls, url)
+      // --------- SELECTION LOGIC ----------
       String? chosenUrl;
       String? chosenPlaylistText;
       String streamType = 'm3u8';
@@ -148,16 +148,21 @@ class StreamingService {
         try {
           final String? typeField = s['type']?.toString();
 
+          // attempt to find stream-level language hints
+          final langHint = _extractStreamLanguageHint(s);
+
           // 1) raw playlist text (highest priority)
           final playlistField = s['playlist'];
           if (playlistField != null && playlistField is String && _looksLikePlaylist(playlistField)) {
-            candidates.add({'kind': 'playlistText', 'value': playlistField, 'origin': s, 'priority': 100});
-            // Don't continue; still collect other candidates from same stream (but playlistText is highest priority).
+            // If the stream claims to be English, boost priority
+            final priority = langHint == 'en' ? 120 : 100;
+            candidates.add({'kind': 'playlistText', 'value': playlistField, 'origin': s, 'priority': priority, 'lang': langHint});
           }
 
           // 2) explicit playlist URL
           if (playlistField != null && playlistField is String && (playlistField.startsWith('http://') || playlistField.startsWith('https://') || playlistField.startsWith('file://'))) {
-            candidates.add({'kind': 'playlistUrl', 'value': playlistField, 'origin': s, 'priority': 90});
+            final priority = langHint == 'en' ? 110 : 90;
+            candidates.add({'kind': 'playlistUrl', 'value': playlistField, 'origin': s, 'priority': priority, 'lang': langHint});
           }
 
           // 3) qualities map (collect top candidates)
@@ -169,9 +174,19 @@ class StreamingService {
               String? candidateUrl;
               if (qVal is String) candidateUrl = qVal;
               else if (qVal is Map && qVal['url'] != null) candidateUrl = qVal['url'].toString();
+
+              var qLangHint = langHint;
+              if (qVal is Map) {
+                final maybeLang = (qVal['language'] ?? qVal['lang'] ?? qVal['locale'])?.toString();
+                if (maybeLang != null) {
+                  qLangHint = _normalizeLang(maybeLang);
+                }
+              }
+
               if (candidateUrl != null && candidateUrl.isNotEmpty) {
-                final pr = candidateUrl.contains('.m3u8') ? 95 : (candidateUrl.contains('.mp4') ? 80 : 50);
-                candidates.add({'kind': 'quality', 'value': candidateUrl, 'origin': s, 'priority': pr, 'qualityKey': qKey});
+                final basePr = candidateUrl.contains('.m3u8') ? 95 : (candidateUrl.contains('.mp4') ? 80 : 50);
+                final pr = (qLangHint == 'en') ? (basePr + 10) : basePr;
+                candidates.add({'kind': 'quality', 'value': candidateUrl, 'origin': s, 'priority': pr, 'qualityKey': qKey, 'lang': qLangHint});
               }
             }
           }
@@ -181,28 +196,29 @@ class StreamingService {
           if (urlField != null) {
             final us = urlField.toString();
             if (us.isNotEmpty) {
-              final pr = us.contains('.m3u8') ? 90 : (us.contains('.mp4') ? 75 : (typeField == 'hls' ? 88 : 40));
-              candidates.add({'kind': 'url', 'value': us, 'origin': s, 'priority': pr});
+              final prBase = us.contains('.m3u8') ? 90 : (us.contains('.mp4') ? 75 : (typeField == 'hls' ? 88 : 40));
+              final pr = (langHint == 'en') ? (prBase + 8) : prBase;
+              candidates.add({'kind': 'url', 'value': us, 'origin': s, 'priority': pr, 'lang': langHint});
             }
           }
 
           // small heuristic to prefer explicit types
           if (typeField == 'hls' && playlistField == null && (s['url'] == null || s['url'].toString().isEmpty)) {
-            // maybe there are nested urls in object - add dump of object as candidate string to be probed later
             try {
-              candidates.add({'kind': 'jsonDump', 'value': jsonEncode(s), 'origin': s, 'priority': 30});
+              candidates.add({'kind': 'jsonDump', 'value': jsonEncode(s), 'origin': s, 'priority': 30, 'lang': langHint});
             } catch (_) {}
           }
         } catch (_) {}
       }
 
-      // sort candidates by priority desc and take top N to avoid too many probes
+      // sort candidates by priority desc and limit probes
       candidates.sort((a, b) => (b['priority'] as int).compareTo(a['priority'] as int));
       const int maxProbes = 8;
       final List<Map<String, dynamic>> scanList = candidates.take(maxProbes).toList();
 
       // helper to accept a playlist text
       Future<void> _acceptPlaylistText(String txt, {String? qualityKey}) async {
+        // For playlist text returned from backend we write it to a temp file (no ORIGINAL-BASE necessary)
         final tmp = await _writePlaylistToTempFile(tmdbId, txt);
         chosenUrl = tmp;
         chosenPlaylistText = txt;
@@ -211,7 +227,7 @@ class StreamingService {
         _logger.i('Selected playlist text -> $tmp');
       }
 
-      Future<bool> _tryUrlCandidate(String candidateUrl, {String? qualityKey}) async {
+      Future<bool> _tryUrlCandidate(String candidateUrl, {String? qualityKey, String? lang}) async {
         final s = candidateUrl.trim();
         if (s.isEmpty) return false;
 
@@ -226,7 +242,7 @@ class StreamingService {
           chosenUrl = s;
           streamType = 'm3u8';
           chosenQuality = qualityKey;
-          _logger.i('Selected m3u8 url -> ${_short(s)}');
+          _logger.i('Selected m3u8 url -> ${_short(s)} (lang=${lang ?? "unknown"})');
           return true;
         }
 
@@ -235,7 +251,7 @@ class StreamingService {
           chosenUrl = s;
           streamType = 'mp4';
           chosenQuality = qualityKey;
-          _logger.i('Selected mp4 url -> ${_short(s)}');
+          _logger.i('Selected mp4 url -> ${_short(s)} (lang=${lang ?? "unknown"})');
           return true;
         }
 
@@ -260,6 +276,7 @@ class StreamingService {
           final kind = c['kind'] as String? ?? 'url';
           final value = (c['value'] ?? '').toString();
           final qualityKey = c['qualityKey']?.toString();
+          final lang = c['lang']?.toString();
           if (kind == 'playlistText') {
             await _acceptPlaylistText(value, qualityKey: qualityKey);
             break;
@@ -270,14 +287,14 @@ class StreamingService {
               chosenUrl = ps;
               streamType = 'm3u8';
               chosenQuality = qualityKey;
-              _logger.i('Selected playlist url -> ${_short(ps)}');
+              _logger.i('Selected playlist url -> ${_short(ps)} (lang=${lang ?? "unknown"})');
               break;
             } else {
-              final ok = await _tryUrlCandidate(ps, qualityKey: qualityKey);
+              final ok = await _tryUrlCandidate(ps, qualityKey: qualityKey, lang: lang);
               if (ok) break;
             }
           } else {
-            final ok = await _tryUrlCandidate(value, qualityKey: qualityKey);
+            final ok = await _tryUrlCandidate(value, qualityKey: qualityKey, lang: lang);
             if (ok) break;
           }
         } catch (e, st) {
@@ -319,7 +336,6 @@ class StreamingService {
           'No stream URL available. Response snippet: $bodySnippet',
         );
       }
-      // ---------- end replacement selection logic ----------
 
       // Subtitles handling (simple: take first caption that matches language or first available)
       for (final s in streams) {
@@ -366,7 +382,8 @@ class StreamingService {
         }
       }
 
-      // If chosenUrl is remote m3u8 and forDownload requested, attempt to download playlist to temp file
+      // If chosenUrl is remote m3u8 and forDownload requested, attempt to download playlist to temp file,
+      // and resolve master -> variant preferring English where possible.
       if (chosenUrl != null &&
           chosenUrl!.isNotEmpty &&
           chosenUrl!.contains('.m3u8') &&
@@ -375,23 +392,67 @@ class StreamingService {
           (chosenUrl!.startsWith('http://') || chosenUrl!.startsWith('https://'))) {
         try {
           _logger.d('forDownload=true, fetching remote playlist to store locally...');
-          final cUrl = chosenUrl!; // safe unwrap here
-          final playlistResponse = await http.get(Uri.parse(cUrl));
-          if (playlistResponse.statusCode == 200) {
-            final file = File('${(await getTemporaryDirectory()).path}/$tmdbId-playlist.m3u8');
-            await file.writeAsString(playlistResponse.body);
-            chosenPlaylistText = playlistResponse.body;
-            chosenUrl = file.path; // now a valid local file path
-            _logger.i('Saved remote playlist to ${file.path} for download mode.');
+          final remotePlaylistUrl = chosenUrl!;
+          final playlistResp = await http.get(Uri.parse(remotePlaylistUrl));
+          if (playlistResp.statusCode == 200) {
+            var fetched = playlistResp.body.replaceAll('\r\n', '\n');
+            Uri remoteBase = Uri.parse(remotePlaylistUrl);
+
+            // If master playlist, try to resolve a preferred variant and fetch it.
+            if (_isMasterPlaylist(fetched)) {
+              _logger.d('Remote playlist is a master playlist; resolving variant (preferLanguage="en", preferredResolution="$resolution")...');
+              final resolvedVariant = await _pickVariantFromMaster(
+                fetched,
+                remoteBase,
+                preferResolution: resolution,
+                preferLanguage: 'en',
+              );
+
+              if (resolvedVariant != null) {
+                try {
+                  final variantUri = Uri.parse(resolvedVariant);
+                  final variantResp = await http.get(variantUri, headers: {
+                    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100 Safari/537.36',
+                    'Accept': 'application/vnd.apple.mpegurl, application/x-mpegURL, */*',
+                  });
+                  if (variantResp.statusCode == 200) {
+                    final body = variantResp.body.replaceAll('\r\n', '\n');
+                    if (_looksLikePlaylist(body)) {
+                      fetched = body;
+                      remoteBase = variantUri;
+                      _logger.d('Fetched resolved variant playlist successfully; will save variant playlist locally.');
+                    } else {
+                      _logger.w('Resolved variant URL fetched but content does not look like m3u8; keeping master for fallback.');
+                    }
+                  } else {
+                    _logger.w('Resolved variant fetch failed (${variantResp.statusCode}); keeping master playlist as fallback.');
+                  }
+                } catch (e, st) {
+                  _logger.w('Failed to fetch variant $resolvedVariant: $e\n$st — will keep master playlist.');
+                }
+              } else {
+                _logger.w('No variant selected from master; will save master playlist as-is.');
+              }
+            }
+
+            // rewrite playlist so relative URIs become absolute against remoteBase
+            final rewritten = _rewritePlaylistToAbsolute(fetched, remoteBase);
+
+            // Save file and include an ORIGINAL-BASE marker as a comment (optional)
+            final contentToWrite = '#ORIGINAL-BASE:${remoteBase.toString()}\n$rewritten';
+            final file = File('${(await getTemporaryDirectory()).path}/$tmdbId-playlist-${DateTime.now().millisecondsSinceEpoch}.m3u8');
+            await file.writeAsString(contentToWrite);
+            chosenPlaylistText = rewritten; // store without marker
+            chosenUrl = file.path;
+            _logger.i('Saved remote playlist (resolved) to ${file.path} for download mode.');
           } else {
-            _logger.w(
-              'Failed to fetch remote playlist for download mode: ${playlistResponse.statusCode}',
-            );
+            _logger.w('Failed to fetch remote playlist for download mode: ${playlistResp.statusCode}');
           }
         } catch (e, st) {
           _logger.w('Failed to fetch remote playlist for download mode: $e\n$st');
         }
       }
+
       final result = <String, String>{
         'url': chosenUrl!,
         'type': streamType,
@@ -412,6 +473,150 @@ class StreamingService {
   }
 
   // ------------------------------------------------------------
+  // Helper: determine a simple stream-level language hint from backend stream map
+  // ------------------------------------------------------------
+  static String? _extractStreamLanguageHint(Map<String, dynamic> s) {
+    try {
+      final checkKeys = ['language', 'lang', 'locale', 'languageCode', 'audioLang'];
+      for (final k in checkKeys) {
+        if (s.containsKey(k)) {
+          final v = s[k];
+          if (v is String && v.trim().isNotEmpty) {
+            final n = _normalizeLang(v);
+            if (n.isNotEmpty) return n;
+          }
+        }
+      }
+
+      // sometimes the 'name' or 'title' may contain language
+      final nameLike = (s['name'] ?? s['title'] ?? '').toString();
+      if (nameLike.isNotEmpty && nameLike.toLowerCase().contains('english')) return 'en';
+      if (nameLike.isNotEmpty && nameLike.toLowerCase().contains('hindi')) return 'hi';
+    } catch (_) {}
+    return null;
+  }
+
+  static String _normalizeLang(String raw) {
+    final lc = raw.toLowerCase();
+    if (lc.startsWith('en')) return 'en';
+    if (lc.contains('english')) return 'en';
+    if (lc.startsWith('hi')) return 'hi';
+    if (lc.contains('hindi')) return 'hi';
+    return lc; // return raw-ish fallback
+  }
+
+  // ------------------------------------------------------------
+  // Pick variant from master playlist preferring language/resolution
+  // Returns variant absolute URL or null if none selected
+  // ------------------------------------------------------------
+  static Future<String?> _pickVariantFromMaster(
+    String master,
+    Uri base, {
+    required String preferResolution,
+    required String preferLanguage,
+  }) async {
+    try {
+      final lines = master.replaceAll('\r\n', '\n').split('\n');
+
+      // Parse EXT-X-MEDIA audio groups first: groupId -> language OR URI (if direct)
+      final Map<String, Map<String, String>> audioGroups = {}; // groupId -> attrs
+      for (var i = 0; i < lines.length; i++) {
+        final l = lines[i].trim();
+        if (l.startsWith('#EXT-X-MEDIA')) {
+          final attrs = _parseAttributes(l.substring('#EXT-X-MEDIA:'.length));
+          final type = attrs['TYPE'] ?? '';
+          final groupId = attrs['GROUP-ID'] ?? attrs['GROUPID'] ?? '';
+          if (type.toUpperCase() == 'AUDIO' && groupId.isNotEmpty) {
+            audioGroups[groupId] = attrs.map((k, v) => MapEntry(k.toUpperCase(), v));
+          }
+        }
+      }
+
+      // Collect variants with their attributes and uri (the URI is the next non-empty non-comment line after EXT-X-STREAM-INF)
+      final List<Map<String, dynamic>> variants = [];
+      for (var i = 0; i < lines.length; i++) {
+        final l = lines[i].trim();
+        if (l.startsWith('#EXT-X-STREAM-INF')) {
+          final attrs = _parseAttributes(l.substring('#EXT-X-STREAM-INF:'.length));
+          var uriLine = '';
+          var j = i + 1;
+          while (j < lines.length && lines[j].trim().isEmpty) j++;
+          if (j < lines.length) uriLine = lines[j].trim();
+          final mapAttrs = attrs.map((k, v) => MapEntry(k.toUpperCase(), v));
+          variants.add({'attrs': mapAttrs, 'uri': uriLine, 'rawLineIndex': i});
+        }
+      }
+
+      if (variants.isEmpty) return null;
+
+      // Try to find variant with matching english audio:
+      // Heuristics:
+      // 1) If variant ATTRS contains AUDIO attribute pointing to group id which maps to LANGUAGE=en => choose that variant.
+      // 2) If there exists an EXT-X-MEDIA item with LANGUAGE en and URI that is exactly one of the variant URIs or relates -> choose associated variant.
+      // 3) If variant NAME or ATTRS contain 'english' or 'en' -> pick.
+      // 4) Else pick variant matching preferResolution if possible.
+      // 5) Else fallback to first variant.
+
+      // 1) Check AUDIO group attribute
+      for (final v in variants) {
+        final attrs = Map<String, String>.from(v['attrs'] as Map<String, String>);
+        final audioGroup = (attrs['AUDIO'] ?? attrs['AUDIO-GROUP'] ?? '').toString();
+        if (audioGroup.isNotEmpty && audioGroups.containsKey(audioGroup)) {
+          final ag = audioGroups[audioGroup]!;
+          final lang = (ag['LANGUAGE'] ?? ag['LANG'] ?? '').toString().toLowerCase();
+          if (lang.startsWith(preferLanguage)) {
+            final resolved = _resolveUri(base, v['uri'].toString());
+            return resolved;
+          }
+        }
+      }
+
+      // 2) Check EXT-X-MEDIA absolute URIs or relative that match variant URIs (less common)
+      for (final entry in audioGroups.entries) {
+        final attrs = entry.value;
+        final lang = (attrs['LANGUAGE'] ?? attrs['LANG'] ?? '').toString().toLowerCase();
+        final mediaUri = attrs['URI'];
+        if (mediaUri != null && lang.startsWith(preferLanguage)) {
+          // if mediaUri points to a playlist which itself points to variant(s), try to find variant referencing that audio group; else fallback
+          // naive scan: if a variant uri contains the same filename as mediaUri, prefer it
+          for (final v in variants) {
+            if (v['uri'] != null && v['uri'].toString().contains(p.basename(mediaUri))) {
+              final resolved = _resolveUri(base, v['uri'].toString());
+              return resolved;
+            }
+          }
+        }
+      }
+
+      // 3) NAME/other heuristics, or CODECS containing 'eng' (rare)
+      for (final v in variants) {
+        final attrs = Map<String, String>.from(v['attrs'] as Map<String, String>);
+        final name = (attrs['NAME'] ?? attrs['VIDEO-RANGE'] ?? '').toString().toLowerCase();
+        if (name.contains('english') || name.contains('eng')) {
+          return _resolveUri(base, v['uri'].toString());
+        }
+      }
+
+      // 4) prefer resolution match
+      if (preferResolution.isNotEmpty) {
+        for (final v in variants) {
+          final attrs = Map<String, String>.from(v['attrs'] as Map<String, String>);
+          final res = (attrs['RESOLUTION'] ?? '').toString().toLowerCase();
+          if (res.contains(preferResolution.toLowerCase())) {
+            return _resolveUri(base, v['uri'].toString());
+          }
+        }
+      }
+
+      // 5) fallback to first variant
+      return _resolveUri(base, variants.first['uri'].toString());
+    } catch (e, st) {
+      _logger.w('pickVariantFromMaster error: $e\n$st');
+      return null;
+    }
+  }
+
+  // ------------------------------------------------------------
   // Write playlist text to a temporary file and return path
   // ------------------------------------------------------------
   static Future<String> _writePlaylistToTempFile(String tmdbId, String playlist) async {
@@ -426,10 +631,53 @@ class StreamingService {
     }
   }
 
+  // ------------------------------------------------------------
+  // Rewrite playlist so relative URIs become absolute against `base`
+  // ------------------------------------------------------------
+  static String _rewritePlaylistToAbsolute(String playlist, Uri base) {
+    final normalized = playlist.replaceAll('\r\n', '\n');
+    final lines = normalized.split('\n');
+    final out = <String>[];
+    for (var line in lines) {
+      if (line.trim().isEmpty) {
+        out.add(line);
+        continue;
+      }
+      if (line.startsWith('#')) {
+        out.add(line);
+        continue;
+      }
+      final trimmed = line.trim();
+      try {
+        // if already absolute or protocol-relative, keep as-is (but coerce protocol-relative)
+        if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('file://')) {
+          out.add(trimmed);
+          continue;
+        }
+        if (trimmed.startsWith('//')) {
+          final scheme = base.scheme.isNotEmpty ? base.scheme : 'https';
+          out.add('$scheme:$trimmed');
+          continue;
+        }
+        // resolve relative against remote base
+        final resolved = base.resolve(trimmed);
+        out.add(resolved.toString());
+      } catch (_) {
+        // fallback keep original line
+        out.add(trimmed);
+      }
+    }
+    return out.join('\n');
+  }
+
   // Helper to detect raw playlist text
   static bool _looksLikePlaylist(String s) {
     final upper = s.toUpperCase();
     return upper.contains('#EXTM3U') || upper.contains('#EXT-X-STREAM-INF') || upper.contains('#EXTINF');
+  }
+
+  static bool _isMasterPlaylist(String s) {
+    return s.toUpperCase().contains('#EXT-X-STREAM-INF');
   }
 
   // ------------------------------------------------------------
@@ -529,38 +777,59 @@ class StreamingService {
     }
   }
 
-  // ------------------------------------------------------------
-  // Subtitle conversion helper (kept for offline converting)
-  // ------------------------------------------------------------
-  static String _convertSrtToVtt(String srtContent) {
-    final lines = srtContent.split('\n');
-    final buffer = StringBuffer()..writeln('WEBVTT\n');
-
-    for (int i = 0; i < lines.length; i++) {
-      final line = lines[i].trim();
-
-      if (RegExp(r'^\d+$').hasMatch(line)) {
-        // Skip subtitle index line
-        continue;
-      } else if (line.contains('-->')) {
-        buffer.writeln(line.replaceAll(',', '.')); // Convert SRT time format to VTT
-      } else {
-        buffer.writeln(line);
-      }
-    }
-
-    return buffer.toString().trim();
-  }
-
   // small helper for logging short versions of strings
   static String _short(String s, [int max = 160]) {
     if (s.length <= max) return s;
     return s.substring(0, max) + '...';
   }
+
+  // -------------------------
+  // Reused helpers below
+  // -------------------------
+  static String _resolveUri(Uri playlistUri, String line) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty) return trimmed;
+
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
+
+    if (trimmed.startsWith('//')) {
+      final scheme = (playlistUri.scheme.isNotEmpty) ? playlistUri.scheme : 'https';
+      return '$scheme:$trimmed';
+    }
+
+    if (playlistUri.hasScheme && playlistUri.scheme == 'file') {
+      final basePath = playlistUri.toFilePath();
+      final resolvedPath = p.normalize(p.join(p.dirname(basePath), trimmed));
+      return Uri.file(resolvedPath).toString();
+    }
+
+    if (trimmed.startsWith('/')) {
+      return '${playlistUri.scheme}://${playlistUri.authority}$trimmed';
+    }
+
+    try {
+      final resolved = playlistUri.resolve(trimmed);
+      return resolved.toString();
+    } catch (e) {
+      return '${playlistUri.scheme}://${playlistUri.authority}/$trimmed';
+    }
+  }
+
+  static Map<String, String> _parseAttributes(String input) {
+    final map = <String, String>{};
+    final parts = RegExp(r'([A-Z0-9-]+)=("(?:[^"]*)"|[^,]*)', caseSensitive: false).allMatches(input);
+    for (final m in parts) {
+      final key = m.group(1)!.toUpperCase();
+      var value = m.group(2)!;
+      if (value.startsWith('"') && value.endsWith('"')) value = value.substring(1, value.length - 1);
+      map[key] = value;
+    }
+    return map;
+  }
 }
 
 // =========================
-// Offline downloader below (unchanged from previous working implementation)
+// Offline downloader below (unchanged logic but full implementation included)
 // =========================
 
 class CancelToken {
@@ -738,16 +1007,45 @@ class OfflineDownloader {
         final maybe = m3u8Url;
         final file = File(maybe);
         if (await file.exists()) {
-          playlist = (await file.readAsString()).replaceAll('\r\n', '\n');
-          baseUri = Uri.file(file.path);
+          // Read local playlist and detect optional ORIGINAL-BASE marker we wrote earlier.
+          var content = (await file.readAsString());
+          content = content.replaceAll('\r\n', '\n');
+          Uri? originalBase;
+          if (content.startsWith('#ORIGINAL-BASE:')) {
+            final firstLineEnd = content.indexOf('\n');
+            final firstLine = firstLineEnd >= 0 ? content.substring(0, firstLineEnd).trim() : content.trim();
+            final baseStr = firstLine.substring('#ORIGINAL-BASE:'.length).trim();
+            try {
+              originalBase = Uri.parse(baseStr);
+            } catch (_) {
+              originalBase = null;
+            }
+            // strip first line so playlist parser sees only playlist contents
+            content = firstLineEnd >= 0 ? content.substring(firstLineEnd + 1) : '';
+          }
+          playlist = content;
+          baseUri = originalBase ?? Uri.file(file.path);
         } else {
           try {
             final uri = Uri.parse(maybe);
             if (uri.scheme == 'file') {
               final f2 = File(uri.toFilePath());
               if (!await f2.exists()) throw Exception('Local playlist file not found: ${f2.path}');
-              playlist = (await f2.readAsString()).replaceAll('\r\n', '\n');
-              baseUri = uri;
+              var content = (await f2.readAsString()).replaceAll('\r\n', '\n');
+              Uri? originalBase;
+              if (content.startsWith('#ORIGINAL-BASE:')) {
+                final firstLineEnd = content.indexOf('\n');
+                final firstLine = firstLineEnd >= 0 ? content.substring(0, firstLineEnd).trim() : content.trim();
+                final baseStr = firstLine.substring('#ORIGINAL-BASE:'.length).trim();
+                try {
+                  originalBase = Uri.parse(baseStr);
+                } catch (_) {
+                  originalBase = null;
+                }
+                content = firstLineEnd >= 0 ? content.substring(firstLineEnd + 1) : '';
+              }
+              playlist = content;
+              baseUri = originalBase ?? uri;
             } else {
               throw Exception('Local playlist file not found: $maybe');
             }
@@ -758,6 +1056,7 @@ class OfflineDownloader {
       }
 
       // Master playlist detection
+// ---- master/variant handling ----
       if (playlist.contains('#EXT-X-STREAM-INF')) {
         final lines = playlist.split('\n');
         String? pickedVariant;
@@ -765,12 +1064,10 @@ class OfflineDownloader {
           final l = lines[i].trim();
           if (l.startsWith('#EXT-X-STREAM-INF')) {
             var j = i + 1;
-            while (j < lines.length && lines[j].trim().isEmpty) {
-              j++;
-            }
+            while (j < lines.length && lines[j].trim().isEmpty) j++;
             if (j < lines.length) {
               final candidate = lines[j].trim();
-              if (preferredResolution != null && l.contains(preferredResolution)) {
+              if (preferredResolution != null && preferredResolution.isNotEmpty && l.contains(preferredResolution)) {
                 pickedVariant = candidate;
                 break;
               }
@@ -780,19 +1077,61 @@ class OfflineDownloader {
         }
         if (pickedVariant == null) throw Exception('No variant streams found in master playlist.');
 
-        final variantUrl = _resolveUri(baseUri, pickedVariant);
-        final variantUri = Uri.parse(variantUrl);
+        // Resolve variant URL robustly
+        String variantUrl = _resolveUri(baseUri, pickedVariant);
+        Uri variantUri = Uri.parse(variantUrl);
+
+        // If parsed URI lacks scheme but base is http(s), re-resolve via baseUri.resolve()
+        if ((variantUri.scheme.isEmpty || variantUri.scheme == '') && (baseUri.scheme == 'http' || baseUri.scheme == 'https')) {
+          variantUrl = baseUri.resolve(pickedVariant).toString();
+          variantUri = Uri.parse(variantUrl);
+        }
+
+        print('Resolved variant URL -> $variantUrl  (base=$baseUri)');
 
         if (variantUri.scheme == 'file') {
           final vfile = File(variantUri.toFilePath());
           if (!await vfile.exists()) throw Exception('Variant playlist file not found: ${vfile.path}');
           playlist = (await vfile.readAsString()).replaceAll('\r\n', '\n');
           baseUri = variantUri;
-        } else {
-          final vresp = await client.get(variantUri);
-          if (vresp.statusCode != 200) throw Exception('Variant playlist download failed: ${vresp.statusCode}');
-          playlist = vresp.body.replaceAll('\r\n', '\n');
+        } else if (variantUri.scheme == 'http' || variantUri.scheme == 'https') {
+          // Add conservative headers to avoid servers returning landing HTML
+          final vresp = await client.get(variantUri, headers: {
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100 Safari/537.36',
+            'Accept': 'application/vnd.apple.mpegurl, application/x-mpegURL, */*',
+          });
+
+          if (vresp.statusCode != 200) {
+            throw Exception('Variant playlist download failed: ${vresp.statusCode} for $variantUrl');
+          }
+
+          final body = vresp.body.replaceAll('\r\n', '\n');
+
+          // Sanity check: ensure the fetched content looks like m3u8
+          final up = body.toUpperCase();
+          if (!(up.contains('#EXTM3U') || up.contains('#EXTINF') || up.contains('#EXT-X-STREAM-INF'))) {
+            // give a helpful message with the content-type/snippet for debugging
+            final ct = vresp.headers['content-type'] ?? 'unknown';
+            final snippet = body.length > 300 ? body.substring(0, 300) + '...' : body;
+            throw Exception('Variant URL fetched but not an m3u8 (content-type=$ct). Snippet: $snippet');
+          }
+
+          playlist = body;
           baseUri = variantUri;
+        } else {
+          // Last-resort: try to coerce into an absolute URL using base authority
+          if (baseUri.scheme == 'http' || baseUri.scheme == 'https') {
+            final coerced = '${baseUri.scheme}://${baseUri.authority}/${pickedVariant.replaceAll(RegExp(r'^/+'), '')}';
+            final vresp = await client.get(Uri.parse(coerced));
+            if (vresp.statusCode == 200 && (vresp.body.toUpperCase().contains('#EXTM3U') || vresp.body.toUpperCase().contains('#EXTINF'))) {
+              playlist = vresp.body.replaceAll('\r\n', '\n');
+              baseUri = Uri.parse(coerced);
+            } else {
+              throw Exception('Could not download variant playlist. Tried $variantUrl and $coerced');
+            }
+          } else {
+            throw Exception('Unsupported variant URI scheme: ${variantUri.scheme} for $variantUrl');
+          }
         }
       }
 
@@ -1037,7 +1376,7 @@ class OfflineDownloader {
 
   static Map<String, String> _parseAttributes(String input) {
     final map = <String, String>{};
-    final parts = RegExp(r'([A-Z0-9-]+)=("(?:[^"]*)"|[^,]*)').allMatches(input);
+    final parts = RegExp(r'([A-Z0-9-]+)=("(?:[^"]*)"|[^,]*)', caseSensitive: false).allMatches(input);
     for (final m in parts) {
       final key = m.group(1)!;
       var value = m.group(2)!;

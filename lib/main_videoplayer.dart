@@ -97,7 +97,12 @@ class MainVideoPlayer extends StatefulWidget {
 class MainVideoPlayerState extends State<MainVideoPlayer>
     with WidgetsBindingObserver {
   late BetterPlayerController _betterPlayerController;
-  Map<String, dynamic>? _streamingInfo;
+Map<String, dynamic>? _streamingInfo;
+
+  // Keep previous streaming info so we can rollback on bad switches
+Map<String, dynamic>? _prevStreamingInfo;
+  String? _prevSelectedQuality;
+  String? _prevVideoPath;
 
   bool _isInitialized = false;
   String? _errorMessage;
@@ -132,7 +137,7 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
   int? _currentEpisodeNumber;
   int? _currentSeasonNumber;
   bool _showNextEpisodeBar = false;
-  Map<String, String>? _nextEpisodeData;
+  Map<String, dynamic>? _nextEpisodeData;
   bool _showRecommendationsBar = false;
   Map<String, dynamic>? _recommendationData;
   Timer? _recommendationTimer;
@@ -159,6 +164,9 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
 
   // network timeout used for backend and HTTP calls
   final Duration _networkTimeout = const Duration(seconds: 10);
+
+  // watchdog timeout after a switch (seconds)
+  final int _playbackStartTimeoutSeconds = 8;
 
   @override
   void initState() {
@@ -607,6 +615,32 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
     return completer.future;
   }
 
+  /// Wait for playback to actually start (first-frame / not buffering / playing)
+  /// Returns true if playback appears healthy within timeoutSeconds, false otherwise.
+  Future<bool> _waitForPlaybackStart({int timeoutSeconds = 8}) async {
+    final int stepMs = 300;
+    int elapsed = 0;
+    while (elapsed < timeoutSeconds * 1000) {
+      await Future.delayed(Duration(milliseconds: stepMs));
+      elapsed += stepMs;
+      final vp = _videoValue;
+      if (vp == null) continue;
+
+      final initialized = vp.initialized ?? false;
+      final buffering = vp.isBuffering ?? false;
+      final isPlaying = vp.isPlaying ?? false;
+      final pos = vp.position ?? Duration.zero;
+
+      // Conditions to accept as "started":
+      // - initialized true and not buffering and playing === true
+      // OR - initialized true, not buffering, and we have a position > 0 (first-frame advanced)
+      if (initialized && !buffering && (isPlaying || pos > Duration.zero)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // use dynamic to avoid ambiguous import/type issues
   dynamic get _videoValue =>
       _betterPlayerController.videoPlayerController?.value;
@@ -1051,93 +1085,183 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
     }
   }
 
-Future<void> _fetchNewQualityStream(String quality) async {
-  try {
-    // If current streamingInfo says HLS and we parsed tracks, use them
-    final isHls = ((_streamingInfo?['type'] as String?) ?? '')
-        .toString()
-        .toLowerCase()
-        .contains('m3u8') || widget.isHls;
+  Future<void> _fetchNewQualityStream(String quality) async {
+    try {
+      // Save previous state so we can roll back in case of failure
+      _prevStreamingInfo = _streamingInfo == null ? null : Map<String, dynamic>.from(_streamingInfo!);
+      _prevSelectedQuality = _selectedQuality;
+      _prevVideoPath = _currentVideoPath;
 
-    // Map quality label to an approximate target height
-    final qualityMap = {
-      '360p': 360,
-      '480p': 480,
-      '720p': 720,
-      '1080p': 1080,
-    };
+      // If current streamingInfo says HLS and we parsed tracks, use them
+      final isHls = ((_streamingInfo?['type'] as String?) ?? '')
+          .toString()
+          .toLowerCase()
+          .contains('m3u8') || widget.isHls;
 
-    if (isHls) {
-      final tracks = _betterPlayerController.betterPlayerAsmsTracks;
-      debugPrint('HLS detected, available ASMS tracks: ${tracks.length}');
-      for (var t in tracks) {
-        debugPrint('track: id=${t.id} ${t.width}x${t.height} @ ${t.bitrate}');
+      // Map quality label to an approximate target height
+      final qualityMap = {
+        '360p': 360,
+        '480p': 480,
+        '720p': 720,
+        '1080p': 1080,
+      };
+
+      if (isHls) {
+        final tracks = _betterPlayerController.betterPlayerAsmsTracks;
+        debugPrint('HLS detected, available ASMS tracks: ${tracks.length}');
+        for (var t in tracks) {
+          debugPrint('track: id=${t.id} ${t.width}x${t.height} @ ${t.bitrate}');
+        }
+
+        // If user chose Auto -> let ExoPlayer adapt automatically
+        if (quality == 'Auto') {
+          // We simply keep the current data source and let ExoPlayer do ABR
+          setState(() => _selectedQuality = 'Auto');
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Switched to Auto (adaptive)')));
+          return;
+        }
+
+        // Try to find the track with closest height to desired quality
+        if (tracks.isNotEmpty && qualityMap.containsKey(quality)) {
+          final targetHeight = qualityMap[quality]!;
+          // prefer track whose height <= targetHeight but closest to it
+          tracks.sort((a, b) => (b.width ?? 0).compareTo(a.width ?? 0)); // descending
+          BetterPlayerAsmsTrack? chosen;
+          for (var t in tracks) {
+            if ((t.height ?? 0) <= targetHeight) {
+              chosen = t;
+              break;
+            }
+          }
+          chosen ??= tracks.first; // fallback to highest available
+
+          try {
+            // Attempt to set the track and then verify playback starts shortly
+            _betterPlayerController.setTrack(chosen);
+            // Wait for playback to start; if it doesn't, roll back to previous stream.
+            final started = await _waitForPlaybackStart(timeoutSeconds: _playbackStartTimeoutSeconds);
+            if (!started) {
+              debugPrint('Track switch did not start playback within timeout — reverting quality.');
+              // revert to previous stream
+              if (_prevVideoPath != null) {
+                await _switchVideo(_prevVideoPath!, widget.title,
+                    newSubtitleUrl: _prevStreamingInfo?['subtitleUrl'],
+                    isHls: (_prevStreamingInfo?['type'] == 'm3u8'));
+              }
+              setState(() {
+                _selectedQuality = _prevSelectedQuality ?? 'Auto';
+              });
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Quality switch failed — reverted to previous quality')));
+              }
+              return;
+            } else {
+              setState(() => _selectedQuality = quality);
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Switched to $quality')));
+              debugPrint('Selected ASMS track: ${chosen.width}x${chosen.height} @ ${chosen.bitrate}');
+              return;
+            }
+          } catch (e) {
+            debugPrint('setTrack failed: $e');
+            // fallthrough to fallback fetch
+          }
+        }
       }
 
-      // If user chose Auto -> let ExoPlayer adapt automatically
-      if (quality == 'Auto') {
-        // We simply keep the current data source and let ExoPlayer do ABR
-        setState(() => _selectedQuality = 'Auto');
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Switched to Auto (adaptive)')));
+      // FALLBACK: ask backend for a specific quality URL (existing behavior) with timeout
+      final streamingInfo = await StreamingService.getStreamingLink(
+        tmdbId: widget.title.hashCode.toString(),
+        title: widget.title,
+        releaseYear: widget.releaseYear,
+        season: _currentSeasonNumber,
+        episode: _currentEpisodeNumber,
+        resolution: quality == "Auto" ? "auto" : quality,
+        enableSubtitles: _showSubtitles,
+      ).timeout(_networkTimeout);
+      _streamingInfo = streamingInfo;
+      final newUrl = streamingInfo['url'] ?? _currentVideoPath;
+      final newSubtitleUrl = streamingInfo['subtitleUrl'];
+      final isHlsNew = (streamingInfo['type'] == 'm3u8');
+
+      // Use wrapper that ensures playback starts and reverts on failure
+      final switchedOk = await _trySwitchAndEnsurePlaying(
+        videoPath: newUrl,
+        title: widget.title,
+        newSubtitleUrl: newSubtitleUrl,
+        isHls: isHlsNew,
+        timeoutSeconds: _playbackStartTimeoutSeconds,
+      );
+
+      if (!switchedOk) {
+        // revert to previous
+        debugPrint('Switch to new URL did not start playback; reverting');
+        if (_prevVideoPath != null) {
+          await _switchVideo(_prevVideoPath!, widget.title,
+              newSubtitleUrl: _prevStreamingInfo?['subtitleUrl'],
+              isHls: (_prevStreamingInfo?['type'] == 'm3u8'));
+        }
+        setState(() {
+          _selectedQuality = _prevSelectedQuality ?? 'Auto';
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to change quality — reverted')));
+        }
         return;
       }
 
-      // Try to find the track with closest height to desired quality
-      if (tracks.isNotEmpty && qualityMap.containsKey(quality)) {
-        final targetHeight = qualityMap[quality]!;
-        // prefer track whose height <= targetHeight but closest to it
-        tracks.sort((a, b) => (b.width ?? 0).compareTo(a.width ?? 0)); // descending
-        BetterPlayerAsmsTrack? chosen;
-        for (var t in tracks) {
-          if ((t.height ?? 0) <= targetHeight) {
-            chosen = t;
-            break;
-          }
-        }
-        chosen ??= tracks.first; // fallback to highest available
-
-        try {
-          _betterPlayerController.setTrack(chosen);
-          setState(() => _selectedQuality = quality);
-          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Switched to $quality')));
-          debugPrint('Selected ASMS track: ${chosen.width}x${chosen.height} @ ${chosen.bitrate}');
-          return;
-        } catch (e) {
-          debugPrint('setTrack failed: $e');
-          // fallthrough to fallback fetch
-        }
+      setState(() => _selectedQuality = quality);
+    } on TimeoutException catch (te) {
+      debugPrint('getStreamingLink timed out when changing quality: $te');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Request timed out while changing quality')));
+      }
+      // revert if needed
+      if (_prevVideoPath != null) {
+        await _switchVideo(_prevVideoPath!, widget.title,
+            newSubtitleUrl: _prevStreamingInfo?['subtitleUrl'],
+            isHls: (_prevStreamingInfo?['type'] == 'm3u8'));
+        setState(() {
+          _selectedQuality = _prevSelectedQuality ?? _selectedQuality;
+        });
+      }
+    } catch (e, st) {
+      debugPrint('Failed to change quality: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to change quality: $e')));
+      }
+      // revert
+      if (_prevVideoPath != null) {
+        await _switchVideo(_prevVideoPath!, widget.title,
+            newSubtitleUrl: _prevStreamingInfo?['subtitleUrl'],
+            isHls: (_prevStreamingInfo?['type'] == 'm3u8'));
+        setState(() {
+          _selectedQuality = _prevSelectedQuality ?? _selectedQuality;
+        });
       }
     }
-
-    // FALLBACK: ask backend for a specific quality URL (existing behavior) with timeout
-    final streamingInfo = await StreamingService.getStreamingLink(
-      tmdbId: widget.title.hashCode.toString(),
-      title: widget.title,
-      releaseYear: widget.releaseYear,
-      season: _currentSeasonNumber,
-      episode: _currentEpisodeNumber,
-      resolution: quality == "Auto" ? "auto" : quality,
-      enableSubtitles: _showSubtitles,
-    ).timeout(_networkTimeout);
-    _streamingInfo = streamingInfo;
-    final newUrl = streamingInfo['url'] ?? _currentVideoPath;
-    final newSubtitleUrl = streamingInfo['subtitleUrl'];
-    final isHlsNew = (streamingInfo['type'] == 'm3u8');
-    await _switchVideo(newUrl, widget.title, newSubtitleUrl: newSubtitleUrl, isHls: isHlsNew);
-    setState(() => _selectedQuality = quality);
-  } on TimeoutException catch (te) {
-    debugPrint('getStreamingLink timed out when changing quality: $te');
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Request timed out while changing quality')));
-    }
-  } catch (e, st) {
-    debugPrint('Failed to change quality: $e\n$st');
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to change quality: $e')));
-    }
   }
-}
 
+  /// Helper wrapper that switches video and waits for playback to start.
+  /// Returns true if playback started, false if not (in which case caller can revert).
+  Future<bool> _trySwitchAndEnsurePlaying({
+    required String videoPath,
+    required String title,
+    String? newSubtitleUrl,
+    bool isHls = false,
+    int timeoutSeconds = 8,
+  }) async {
+    // Attempt switch
+    try {
+      await _switchVideo(videoPath, title, newSubtitleUrl: newSubtitleUrl, isHls: isHls);
+    } catch (e) {
+      debugPrint('Error during _switchVideo: $e');
+      return false;
+    }
+
+    // Wait for playback to start
+    final started = await _waitForPlaybackStart(timeoutSeconds: timeoutSeconds);
+    return started;
+  }
 
   void _showSpeedMenu() async {
     final speed = await showMenu<double>(
@@ -1560,6 +1684,9 @@ Future<void> _fetchNewQualityStream(String quality) async {
     }
   }
 
+  /// Switches the data source. NOTE: this function intentionally does not perform rollback;
+  /// rollback is handled by callers via _trySwitchAndEnsurePlaying which wraps this and then waits
+  /// for playback to start and revert if needed.
   Future<void> _switchVideo(String videoPath, String title,
       {String? newSubtitleUrl, bool isHls = false}) async {
     if (!mounted) return;

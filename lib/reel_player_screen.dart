@@ -1,8 +1,16 @@
 // reel_player_screen.dart
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:youtube_player_flutter/youtube_player_flutter.dart';
 import 'models/reel.dart';
+
+/// Optimizations:
+/// - Heavy URL parsing (extracting YouTube IDs) is performed off the UI isolate
+///   using compute() which significantly reduces main-thread work when opening
+///   a player with many reels.
+/// - Controller creation remains lazy and limited to a small window.
+/// - If compute hasn't finished yet, we fall back to the safe runtime parser.
 
 class ReelPlayerScreen extends StatefulWidget {
   final List<Reel> reels;
@@ -26,19 +34,69 @@ class _ReelPlayerScreenState extends State<ReelPlayerScreen> {
   final Map<int, YoutubePlayerController> _controllers = {};
   static const int _preloadRange = 1; // current ±1 — keep low for smoothness
 
+  // Heavy parsing result: video IDs extracted off the UI isolate
+  List<String> _videoIds = [];
+  bool _videoIdsReady = false;
+  bool _disposed = false;
+
   @override
   void initState() {
     super.initState();
     currentIndex = widget.initialIndex.clamp(0, widget.reels.length - 1);
     _pageController = PageController(initialPage: currentIndex, viewportFraction: 1.0);
 
-    // create controllers for the initial window (lazily)
+    // Start background parsing of video IDs (heavy work) as soon as possible.
+    _prepareVideoIdsInBackground();
+
+    // Ensure controllers for initial window (creation is cheap since it only uses IDs)
+    // If video IDs aren't ready yet, _ensureControllersFor will fall back to runtime parsing.
     _ensureControllersFor(currentIndex);
 
-    // After first frame, play the focused item if ready
+    // After first frame, attempt to play the focused item if controller is ready.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _playIndex(currentIndex);
     });
+  }
+
+  /// Serialize reels to primitive maps and run compute to extract YouTube IDs off the UI thread.
+  Future<void> _prepareVideoIdsInBackground() async {
+    if (widget.reels.isEmpty) {
+      _videoIds = [];
+      _videoIdsReady = true;
+      return;
+    }
+
+    try {
+      // Convert Reels to primitive-only maps so compute can transfer them to the isolate.
+      final serialized = widget.reels
+          .map<Map<String, String>>((r) => {'videoUrl': r.videoUrl ?? ''})
+          .toList();
+
+      final result = await compute(_extractVideoIds, serialized);
+      if (_disposed) return;
+
+      // result is List<String> (video ids or empty string for invalid)
+      setState(() {
+        _videoIds = result;
+        _videoIdsReady = true;
+      });
+
+      // Now that IDs exist, ensure controllers for the current window are created with those IDs.
+      _ensureControllersFor(currentIndex);
+
+      // If the focused controller exists, try to play it (in case previous attempt couldn't).
+      Future.delayed(const Duration(milliseconds: 80), () {
+        if (!_disposed) _playIndex(currentIndex);
+      });
+    } catch (e) {
+      // Parsing failed in background; we fall back to runtime parsing for each controller creation.
+      debugPrint('Video ID extraction failed in background: $e');
+      if (!_disposed) {
+        setState(() {
+          _videoIdsReady = false; // we'll fallback to runtime parsing as needed
+        });
+      }
+    }
   }
 
   /// Ensure controllers exist for indices in [index - _preloadRange .. index + _preloadRange].
@@ -61,9 +119,20 @@ class _ReelPlayerScreenState extends State<ReelPlayerScreen> {
     // Create controllers for indices in the active window if missing
     for (var i in active) {
       if (_controllers.containsKey(i)) continue;
+
       final reel = widget.reels[i];
-      final videoId = YoutubePlayer.convertUrlToId(reel.videoUrl) ?? "";
+      String? videoId;
+
+      // Prefer background-extracted IDs if available and valid
+      if (_videoIdsReady && i < _videoIds.length && _videoIds[i].isNotEmpty) {
+        videoId = _videoIds[i];
+      } else {
+        // fallback: try runtime parsing (cheap for a small number of controllers)
+        videoId = YoutubePlayer.convertUrlToId(reel.videoUrl) ?? "";
+      }
+
       if (videoId.isEmpty) continue;
+
       final controller = YoutubePlayerController(
         initialVideoId: videoId,
         flags: const YoutubePlayerFlags(
@@ -74,8 +143,8 @@ class _ReelPlayerScreenState extends State<ReelPlayerScreen> {
           enableCaption: false,
         ),
       );
+
       _controllers[i] = controller;
-      // don't call play here — we'll play when page is focused
     }
   }
 
@@ -102,7 +171,7 @@ class _ReelPlayerScreenState extends State<ReelPlayerScreen> {
       currentController.unMute();
       currentController.play();
     } catch (_) {
-      // some timing errors can occur; ignore safely
+      // timing errors can occur; ignore safely
     }
   }
 
@@ -127,6 +196,7 @@ class _ReelPlayerScreenState extends State<ReelPlayerScreen> {
 
   @override
   void dispose() {
+    _disposed = true;
     _pageController.dispose();
     for (var controller in _controllers.values) {
       try {
@@ -141,9 +211,16 @@ class _ReelPlayerScreenState extends State<ReelPlayerScreen> {
     final reel = widget.reels[index];
     var controller = _controllers[index];
 
-    // Create lazily if still missing (safe guard); keep creation cheap
+    // Create lazily if still missing (safe guard); keep creation cheap.
     if (controller == null) {
-      final videoId = YoutubePlayer.convertUrlToId(reel.videoUrl);
+      String? videoId;
+
+      if (_videoIdsReady && index < _videoIds.length && _videoIds[index].isNotEmpty) {
+        videoId = _videoIds[index];
+      } else {
+        videoId = YoutubePlayer.convertUrlToId(reel.videoUrl);
+      }
+
       if (videoId != null && videoId.isNotEmpty) {
         controller = YoutubePlayerController(
           initialVideoId: videoId,
@@ -458,4 +535,41 @@ class _ReelVideoPageState extends State<ReelVideoPage> with AutomaticKeepAliveCl
       ),
     );
   }
+}
+
+/// Top-level function used by compute() to extract YouTube IDs.
+/// Input: List<dynamic> where each item is a Map with key 'videoUrl' -> String.
+/// Output: List<String> of videoIds (empty string for invalid/missing).
+List<String> _extractVideoIds(List<dynamic> serialized) {
+  final List<String> ids = <String>[];
+  final RegExp ytIdReg = RegExp(
+    r'(?:v=|\/)([0-9A-Za-z_-]{11})(?:\b|&|$)',
+    caseSensitive: false,
+  );
+
+  for (var item in serialized) {
+    try {
+      final url = (item is Map && item['videoUrl'] != null) ? item['videoUrl'].toString() : '';
+      if (url.isEmpty) {
+        ids.add('');
+        continue;
+      }
+      final m = ytIdReg.firstMatch(url);
+      if (m != null && m.groupCount >= 1) {
+        ids.add(m.group(1) ?? '');
+      } else {
+        // Try a few common URL forms fallback parsing
+        // e.g., youtu.be/<id>
+        final shortMatch = RegExp(r'youtu\.be\/([0-9A-Za-z_-]{11})').firstMatch(url);
+        if (shortMatch != null && shortMatch.groupCount >= 1) {
+          ids.add(shortMatch.group(1) ?? '');
+        } else {
+          ids.add('');
+        }
+      }
+    } catch (_) {
+      ids.add('');
+    }
+  }
+  return ids;
 }

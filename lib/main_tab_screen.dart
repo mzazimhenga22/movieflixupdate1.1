@@ -1,3 +1,4 @@
+// main_tab_screen.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:movie_app/settings_provider.dart';
@@ -7,6 +8,7 @@ import 'package:movie_app/categories_screen.dart';
 import 'package:movie_app/downloads_screen.dart';
 import 'package:movie_app/interactive_features_screen.dart';
 import 'package:movie_app/components/common_widgets.dart';
+import 'package:movie_app/tv_homescreen.dart'; // <-- TV home screen
 
 /// Selects between HomeScreenMain and HomeScreenLite based on settings
 class HomeContainer extends StatelessWidget {
@@ -35,7 +37,7 @@ class MainTabScreen extends StatefulWidget {
 class _MainTabScreenState extends State<MainTabScreen> {
   int _selectedIndex = 0;
 
-  /// Returns the list of tab pages
+  /// Returns the list of tab pages (mobile/tablet)
   List<Widget> _getPages(SettingsProvider settings) {
     return [
       HomeContainer(profileName: widget.profileName),
@@ -50,11 +52,27 @@ class _MainTabScreenState extends State<MainTabScreen> {
     ];
   }
 
+  // Simple TV detection helper — tweak thresholds as needed
+  bool _isTelevision(BuildContext context) {
+    final mq = MediaQuery.of(context);
+    // Treat as TV if width is large OR shortest side (useful for tablets/large screens)
+    if (mq.size.width >= 900) return true;
+    if (mq.size.shortestSide >= 600) return true;
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) {
     final settings = Provider.of<SettingsProvider>(context);
     final accentColor = settings.accentColor;
 
+    // If device is TV, immediately navigate / show TVHomeScreen instead of tab UI.
+    // Returning the TV screen directly avoids showing bottom navigation which is not ideal on TV.
+    if (_isTelevision(context)) {
+      return const TVHomeScreen();
+    }
+
+    // Mobile / normal behavior (tabs)
     return Scaffold(
       body: IndexedStack(
         index: _selectedIndex,

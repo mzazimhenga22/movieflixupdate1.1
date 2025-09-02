@@ -1,6 +1,7 @@
 // tvshow_episodes_section.dart
 import 'dart:async';
 import 'dart:ui' show ImageFilter;
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cached_network_image/cached_network_image.dart' hide DownloadProgress;
@@ -13,11 +14,38 @@ import 'package:movie_app/settings_provider.dart';
 import 'package:movie_app/movie_detail_screen.dart'; // find ancestor for downloads and centralized modal helpers
 
 /// Optimized TVShowEpisodesSection:
+/// - Offloads episode normalization/parsing to compute()
 /// - Keeps episodes state alive (AutomaticKeepAliveClientMixin)
 /// - Extracts episode row to a lightweight StatelessWidget
-/// - Uses listen:false for Provider reads to avoid unnecessary rebuilds
-/// - Minimizes widget allocations in build path
-/// - Uses const constructors where possible
+/// - Minimizes widget allocations, uses const where possible
+/// - Reduces per-row GPU cost by removing BackdropFilter from each row
+
+// ----------------------------- isolate helpers -----------------------------
+// compute() target must be top-level or static
+List<Map<String, dynamic>> _extractEpisodes(List<dynamic> rawEpisodes) {
+  final out = <Map<String, dynamic>>[];
+  for (final e in rawEpisodes) {
+    if (e is Map) {
+      final episodeNumber = (e['episode_number'] as num?)?.toInt() ?? 0;
+      final runtime = (e['runtime'] is int)
+          ? e['runtime'] as int
+          : (e['runtime'] is num ? (e['runtime'] as num).toInt() : 0);
+      out.add({
+        'episode_number': episodeNumber,
+        'name': e['name']?.toString() ?? 'Episode $episodeNumber',
+        'overview': e['overview']?.toString() ?? '',
+        'still_path': e['still_path']?.toString(),
+        'runtime': runtime,
+      });
+    }
+  }
+  return out;
+}
+
+// ----------------------------- lightweight style constants -----------------------------
+const _titleTextStyle = TextStyle(color: Colors.white, fontWeight: FontWeight.w600);
+const _overviewTextStyle = TextStyle(color: Colors.white70, fontSize: 13);
+const _headerTitleStyle = TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white);
 
 // ----------------------------- glass helper widgets -----------------------------
 class GlassContainer extends StatelessWidget {
@@ -40,7 +68,7 @@ class GlassContainer extends StatelessWidget {
       child: ClipRRect(
         borderRadius: borderRadius,
         child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
           child: Container(
             padding: padding,
             decoration: BoxDecoration(
@@ -61,6 +89,7 @@ class GlassContainer extends StatelessWidget {
   }
 }
 
+/// Episode card — keep visual but avoid expensive per-row BackdropFilter
 class EpisodeGlassCard extends StatelessWidget {
   final Widget child;
   final EdgeInsets padding;
@@ -69,22 +98,20 @@ class EpisodeGlassCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Use a lightweight translucent decoration (no per-row blur)
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(12),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-          child: Container(
-            padding: padding,
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.03),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.white.withOpacity(0.05)),
-              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 6, offset: Offset(0, 2))],
-            ),
-            child: child,
+        child: Container(
+          padding: padding,
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.03),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.white.withOpacity(0.05)),
+            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 6, offset: Offset(0, 2))],
           ),
+          child: child,
         ),
       ),
     );
@@ -115,7 +142,7 @@ class _EpisodeRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final epNum = (episode['episode_number'] as num?)?.toInt() ?? 0;
+    final epNum = (episode['episode_number'] as int?) ?? 0;
     final epName = episode['name'] as String? ?? 'Episode $epNum';
     final epOverview = episode['overview'] as String? ?? '';
     final stillPath = episode['still_path'] as String?;
@@ -132,10 +159,11 @@ class _EpisodeRow extends StatelessWidget {
               child: Container(
                 decoration: BoxDecoration(borderRadius: BorderRadius.circular(4), color: Colors.grey[800]),
                 clipBehavior: Clip.hardEdge,
-                child: (stillPath != null && stillPath.toString().isNotEmpty)
+                child: (stillPath != null && stillPath.isNotEmpty)
                     ? CachedNetworkImage(
                         imageUrl: 'https://image.tmdb.org/t/p/w300$stillPath',
                         fit: BoxFit.cover,
+                        fadeInDuration: Duration.zero,
                         errorWidget: (c, u, e) => Container(color: Colors.grey),
                       )
                     : const Icon(Icons.tv, color: Colors.white70),
@@ -147,10 +175,9 @@ class _EpisodeRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Text(epName, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                Text(epName, maxLines: 1, overflow: TextOverflow.ellipsis, style: _titleTextStyle),
                 const SizedBox(height: 4),
-                if (epOverview.isNotEmpty)
-                  Text(epOverview, maxLines: 4, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                if (epOverview.isNotEmpty) Text(epOverview, maxLines: 4, overflow: TextOverflow.ellipsis, style: _overviewTextStyle),
               ],
             ),
           ),
@@ -195,7 +222,6 @@ class _EpisodeRow extends StatelessWidget {
 }
 
 // ----------------------------- Episode options modal (reusable, public name) -----------------------------
-// Using a public name here prevents cross-file private symbol issues.
 class EpisodePlayOptionsModal extends StatefulWidget {
   final String initialResolution;
   final bool initialSubtitles;
@@ -300,7 +326,7 @@ class TVShowEpisodesSection extends StatefulWidget {
 }
 
 class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with AutomaticKeepAliveClientMixin {
-  final Map<int, List<dynamic>> _episodesCache = <int, List<dynamic>>{};
+  final Map<int, List<Map<String, dynamic>>> _episodesCache = <int, List<Map<String, dynamic>>>{};
   late int _selectedSeasonNumber;
   bool _isLoading = false;
   bool _isVisible = false;
@@ -341,7 +367,12 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with Autom
 
       if (!mounted) return;
 
-      final episodes = (seasonDetails['episodes'] is List) ? seasonDetails['episodes'] as List<dynamic> : <dynamic>[];
+      final rawEpisodes = (seasonDetails['episodes'] is List) ? seasonDetails['episodes'] as List<dynamic> : <dynamic>[];
+
+      // Offload normalization to background isolate — reduces main-thread work when many episodes exist
+      final List<Map<String, dynamic>> episodes = await compute(_extractEpisodes, rawEpisodes);
+
+      if (!mounted) return;
 
       setState(() {
         _episodesCache[seasonNumber] = episodes;
@@ -353,7 +384,7 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with Autom
       debugPrint('Timeout fetching season $seasonNumber: $e');
       if (!mounted) return;
       setState(() {
-        _episodesCache[seasonNumber] = <dynamic>[];
+        _episodesCache[seasonNumber] = <Map<String, dynamic>>[];
         _isLoading = false;
         _errorMessage = 'Request timed out while loading episodes.';
       });
@@ -363,7 +394,7 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with Autom
       debugPrint('Error fetching season $seasonNumber: $e\n$st');
       if (!mounted) return;
       setState(() {
-        _episodesCache[seasonNumber] = <dynamic>[];
+        _episodesCache[seasonNumber] = <Map<String, dynamic>>[];
         _isLoading = false;
         _errorMessage = 'Unable to load episodes. Tap Retry.';
       });
@@ -428,7 +459,7 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with Autom
               _showLocalLoadingDialog();
             }
 
-            final episodeNumber = (episode['episode_number'] as num?)?.toInt() ?? 1;
+            final episodeNumber = (episode['episode_number'] as int?) ?? 1;
             final episodeName = episode['name'] as String? ?? 'Untitled';
             Map<String, String> streamingInfo = <String, String>{};
 
@@ -493,7 +524,7 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with Autom
           },
           onDownload: (resolution, subtitles) async {
             // sheet closed inside modal; call parent state's download method if available
-            final episodeNumber = (episode['episode_number'] as num?)?.toInt() ?? 1;
+            final episodeNumber = (episode['episode_number'] as int?) ?? 1;
             final parent = context.findAncestorStateOfType<MovieDetailScreenState>();
             if (parent != null) {
               await parent.downloadEpisodeFromChild(
@@ -538,7 +569,7 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with Autom
           GlassContainer(
             child: Row(
               children: <Widget>[
-                const Text('Episodes', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
+                const Text('Episodes', style: _headerTitleStyle),
                 const Spacer(),
                 DropdownButton<int>(
                   value: _selectedSeasonNumber,
@@ -608,7 +639,7 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with Autom
               );
             }
 
-            final list = episodes ?? <dynamic>[];
+            final list = episodes ?? <Map<String, dynamic>>[];
             if (list.isEmpty) {
               return const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -624,30 +655,36 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with Autom
                 physics: const NeverScrollableScrollPhysics(),
                 itemCount: list.length,
                 itemBuilder: (context, index) {
-                  final episode = list[index] as Map<String, dynamic>;
-                  return _EpisodeRow(
-                    episode: episode,
-                    seasonNumber: _selectedSeasonNumber,
-                    tvShowName: widget.tvShowName,
-                    tvId: widget.tvId,
-                    releaseYear: _releaseYear,
-                    onPlayPressed: () => _showEpisodePlayOptionsModal(episode, _selectedSeasonNumber),
-                    onDownloadPressed: () {
-                      final parentState = context.findAncestorStateOfType<MovieDetailScreenState>();
-                      if (parentState != null) {
-                        final epNumber = (episode['episode_number'] as num?)?.toInt() ?? 1;
-                        parentState.downloadEpisodeFromChild(
-                          season: _selectedSeasonNumber,
-                          episode: epNumber,
-                          showTitle: widget.tvShowName,
-                          showId: widget.tvId,
-                          resolution: '720p',
-                          subtitles: false,
-                        );
-                      } else {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to start download.')));
-                      }
-                    },
+                  final episode = list[index];
+                  final epNum = (episode['episode_number'] as int?) ?? index;
+                  final key = ValueKey('${widget.tvId}_s${_selectedSeasonNumber}_e$epNum');
+
+                  return KeyedSubtree(
+                    key: key,
+                    child: _EpisodeRow(
+                      episode: episode,
+                      seasonNumber: _selectedSeasonNumber,
+                      tvShowName: widget.tvShowName,
+                      tvId: widget.tvId,
+                      releaseYear: _releaseYear,
+                      onPlayPressed: () => _showEpisodePlayOptionsModal(episode, _selectedSeasonNumber),
+                      onDownloadPressed: () {
+                        final parentState = context.findAncestorStateOfType<MovieDetailScreenState>();
+                        if (parentState != null) {
+                          final epNumber = (episode['episode_number'] as int?) ?? 1;
+                          parentState.downloadEpisodeFromChild(
+                            season: _selectedSeasonNumber,
+                            episode: epNumber,
+                            showTitle: widget.tvShowName,
+                            showId: widget.tvId,
+                            resolution: '720p',
+                            subtitles: false,
+                          );
+                        } else {
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to start download.')));
+                        }
+                      },
+                    ),
                   );
                 },
               ),
