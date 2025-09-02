@@ -11,6 +11,7 @@ import 'package:movie_app/tmdb_api.dart' as tmdb;
 import 'package:movie_app/streaming_service.dart';
 import 'package:movie_app/main_videoplayer.dart';
 import 'package:movie_app/settings_provider.dart';
+
 import 'package:movie_app/movie_detail_screen.dart'; // find ancestor for downloads and centralized modal helpers
 
 /// Optimized TVShowEpisodesSection:

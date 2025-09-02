@@ -5,7 +5,7 @@ import 'dart:io';
 
 import 'package:better_player/better_player.dart';
 import 'package:device_info_plus/device_info_plus.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, compute;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/cupertino.dart';
@@ -17,6 +17,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:system_info/system_info.dart';
 import 'package:fl_pip/fl_pip.dart' show FlPiP;
 import 'package:path/path.dart' as p;
+
 
 /// Simple data classes
 class Subtitle {
@@ -46,6 +47,64 @@ class SubtitleTrack {
   SubtitleTrack({required this.label, required this.url});
 }
 
+/// -----------------
+/// Isolate helpers
+/// -----------------
+/// compute() requires top-level functions. These return JSON-serializable
+/// structures (List<Map>) which we convert back into Subtitle objects on the main isolate.
+
+List<Map<String, dynamic>> _parseSrtIsolate(String srt) {
+  final List<Map<String, dynamic>> subtitles = [];
+  final regex = RegExp(
+      r'(\d+)\s+(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})\s+([\s\S]*?)(?=\n\n|\$)',
+      dotAll: true);
+  final matches = regex.allMatches(srt);
+  for (final match in matches) {
+    final start = _parseDurationIsolate(match.group(2)!);
+    final end = _parseDurationIsolate(match.group(3)!);
+    final text = match.group(4)!.trim().replaceAll('\r\n', '\n').replaceAll('\n', ' ');
+    subtitles.add({
+      'start_ms': start.inMilliseconds,
+      'end_ms': end.inMilliseconds,
+      'text': text,
+    });
+  }
+  return subtitles;
+}
+
+List<Map<String, dynamic>> _parseVttIsolate(String vtt) {
+  final List<Map<String, dynamic>> subtitles = [];
+  // Accept optional WEBVTT header; find time cues
+  final regex = RegExp(
+      r'(\d{2}:\d{2}:\d{2}\.\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}\.\d{3})\s+([\s\S]*?)(?=\n\n|\$)',
+      dotAll: true);
+  final matches = regex.allMatches(vtt);
+  for (final match in matches) {
+    final start = _parseDurationIsolate(match.group(1)!);
+    final end = _parseDurationIsolate(match.group(2)!);
+    final text = match.group(3)!.trim().replaceAll('\r\n', '\n').replaceAll('\n', ' ');
+    subtitles.add({
+      'start_ms': start.inMilliseconds,
+      'end_ms': end.inMilliseconds,
+      'text': text,
+    });
+  }
+  return subtitles;
+}
+
+Duration _parseDurationIsolate(String timeString) {
+  // Handles both 00:00:00,000 and 00:00:00.000 formats
+  final parts = timeString.split(RegExp(r'[:,.]'));
+  final hours = int.parse(parts[0]);
+  final minutes = int.parse(parts[1]);
+  final seconds = int.parse(parts[2]);
+  final milliseconds = int.parse(parts[3]);
+  return Duration(hours: hours, minutes: minutes, seconds: seconds, milliseconds: milliseconds);
+}
+
+/// -----------------
+/// Widget
+/// -----------------
 class MainVideoPlayer extends StatefulWidget {
   final String videoPath;
   final String title;
@@ -97,10 +156,10 @@ class MainVideoPlayer extends StatefulWidget {
 class MainVideoPlayerState extends State<MainVideoPlayer>
     with WidgetsBindingObserver {
   late BetterPlayerController _betterPlayerController;
-Map<String, dynamic>? _streamingInfo;
+  Map<String, dynamic>? _streamingInfo;
 
   // Keep previous streaming info so we can rollback on bad switches
-Map<String, dynamic>? _prevStreamingInfo;
+  Map<String, dynamic>? _prevStreamingInfo;
   String? _prevSelectedQuality;
   String? _prevVideoPath;
 
@@ -121,6 +180,7 @@ Map<String, dynamic>? _prevStreamingInfo;
   double? _startX;
   double _playbackSpeed = 1.0;
   List<Subtitle> _subtitles = [];
+  String _CurrentSubtitle = "";
   String _currentSubtitle = "";
   final List<String> _qualities = ["Auto", "360p", "480p", "720p", "1080p"];
   String _selectedQuality = "Auto";
@@ -182,17 +242,31 @@ Map<String, dynamic>? _prevStreamingInfo;
       bufferForPlaybackAfterRebufferMs: 5000,
     );
 
+    // Start heavy background tasks as soon as possible (non-blocking)
+    _startHeavyBackgroundTasks();
+
     _enforceLandscape();
     _saveWatchHistory(); // fine if nothing to save yet
     _videoInitFuture = _setupStreamingAndController();
     _initializeBrightness();
     _currentSubtitleUrl = widget.subtitleUrl;
-    _loadSubtitles();
+    _loadSubtitles(); // uses compute to parse off main thread
     if (widget.enableSkipIntro && widget.chapters != null) {
       _prepareSkip();
     }
     _loadResumePosition();
     _loadDownloadState();
+  }
+
+  /// Start heavy CPU work that can be moved off the main isolate.
+  /// Do not await here — just kick off isolates early.
+  void _startHeavyBackgroundTasks() {
+    // Pre-warm subtitle parsing if there's a local path (non-blocking)
+    // Note: actual file/network fetch remains async on main isolate (platform channel),
+    // but heavy parsing is handled in isolates. We don't await anything here so initState stays fast.
+
+    // Additional heavy precomputations could be launched here in the same pattern.
+    // For now we ensure subtitle parsing will run in compute when content is available.
   }
 
   @override
@@ -457,8 +531,22 @@ Map<String, dynamic>? _prevStreamingInfo;
 
       _betterPlayerController.addEventsListener(_betterPlayerEventListener);
 
-      // Wait for initialization but with improved error handling to avoid long blocking
-      await _waitForInitialization(timeoutSeconds: 12);
+      // Wait for initialization; if it didn't finish properly, try a controlled retry
+      final initializedOk = await _waitForInitialization(timeoutSeconds: 12);
+      if (!initializedOk) {
+        debugPrint('Initial BetterPlayer initialization FAILED or timed out — attempting fallback retry with alternative headers/data source');
+        try {
+          await _retryWithAlternativeHeaders();
+        } catch (e) {
+          debugPrint('Fallback retry also failed: $e');
+          if (mounted) {
+            setState(() {
+              _errorMessage = "Playback initialization failed (initial + fallback).";
+            });
+          }
+          return; // abort initialization flow
+        }
+      }
 
       // After initialization, attempt to auto-select track based on device
       await _applyAutoTrackSelection();
@@ -546,22 +634,26 @@ Map<String, dynamic>? _prevStreamingInfo;
         .toLowerCase()
         .contains('m3u8');
 
-    final dataSource = BetterPlayerDataSource(
-      BetterPlayerDataSourceType.network,
-      actualUrl,
-      headers: headers,
-      liveStream: isHls,
-      useAsmsSubtitles: true,
-      useAsmsTracks: true,
-      useAsmsAudioTracks: true,
-      videoFormat: isHls ? BetterPlayerVideoFormat.hls : null,
-      bufferingConfiguration: _bufferingConfig,
-    );
+    // Helper to create dataSource with configurable ASMS parsing
+    BetterPlayerDataSource makeDataSource({required bool useAsms}) {
+      return BetterPlayerDataSource(
+        BetterPlayerDataSourceType.network,
+        actualUrl,
+        headers: headers,
+        liveStream: isHls,
+        useAsmsSubtitles: useAsms,
+        useAsmsTracks: useAsms,
+        useAsmsAudioTracks: useAsms,
+        videoFormat: isHls ? BetterPlayerVideoFormat.hls : null,
+        bufferingConfiguration: _bufferingConfig,
+      );
+    }
 
+    // Try with ASMS enabled first (closer to optimal)
     try {
-      // guard setupDataSource with timeout
-      await _betterPlayerController.setupDataSource(dataSource).timeout(_networkTimeout);
-      await _waitForInitialization(timeoutSeconds: 10);
+      await _betterPlayerController.setupDataSource(makeDataSource(useAsms: true)).timeout(_networkTimeout);
+      final initialized = await _waitForInitialization(timeoutSeconds: 10);
+      if (!initialized) throw Exception('init timeout after ASMS-enabled setup');
       await _applyAutoTrackSelection();
       await _betterPlayerController.play();
       if (mounted) {
@@ -570,11 +662,27 @@ Map<String, dynamic>? _prevStreamingInfo;
           _isInitialized = true;
         });
       }
-    } on TimeoutException catch (te) {
-      debugPrint("Retry with alt headers timed out: $te");
-      rethrow;
+      return;
     } catch (e) {
-      debugPrint("Retry with alt headers also failed: $e");
+      debugPrint('Retry with ASMS=true failed: $e');
+    }
+
+    // Second attempt: try again disabling ASMS parsing (simpler playback path)
+    try {
+      debugPrint('Retrying with ASMS disabled (fallback)...');
+      await _betterPlayerController.setupDataSource(makeDataSource(useAsms: false)).timeout(_networkTimeout);
+      final initialized = await _waitForInitialization(timeoutSeconds: 10);
+      if (!initialized) throw Exception('init timeout after ASMS-disabled setup');
+      try { await _betterPlayerController.play(); } catch (_) {}
+      if (mounted) {
+        setState(() {
+          _errorMessage = null;
+          _isInitialized = true;
+        });
+      }
+      return;
+    } catch (e) {
+      debugPrint('Retry with ASMS=false also failed: $e');
       rethrow;
     }
   }
@@ -595,21 +703,29 @@ Map<String, dynamic>? _prevStreamingInfo;
     return headers;
   }
 
-  Future<void> _waitForInitialization({int timeoutSeconds = 10}) async {
-    final completer = Completer<void>();
+  /// Returns true if controller became initialized within timeoutSeconds.
+  Future<bool> _waitForInitialization({int timeoutSeconds = 10}) async {
+    final completer = Completer<bool>();
     final int stepMs = 200;
     int elapsed = 0;
-    Timer.periodic(Duration(milliseconds: stepMs), (t) {
-      final vp = _videoValue;
-      if (vp != null && (vp.initialized ?? false)) {
-        t.cancel();
-        completer.complete();
-      } else {
-        elapsed += stepMs;
-        if (elapsed >= timeoutSeconds * 1000) {
-          t.cancel();
-          completer.complete();
+    Timer? t;
+    t = Timer.periodic(Duration(milliseconds: stepMs), (_) {
+      try {
+        final vp = _videoValue;
+        if (vp != null && (vp.initialized ?? false)) {
+          t?.cancel();
+          if (!completer.isCompleted) completer.complete(true);
+        } else {
+          elapsed += stepMs;
+          if (elapsed >= timeoutSeconds * 1000) {
+            t?.cancel();
+            if (!completer.isCompleted) completer.complete(false);
+          }
         }
+      } catch (e) {
+        // defensive: if reading _videoValue throws for any reason, bail
+        t?.cancel();
+        if (!completer.isCompleted) completer.complete(false);
       }
     });
     return completer.future;
@@ -726,30 +842,41 @@ Map<String, dynamic>? _prevStreamingInfo;
     }
   }
 
-  void _betterPlayerEventListener(BetterPlayerEvent event) {
-    if (!mounted) return;
-    try {
-      setState(() {
-        _isBuffering =
-            event.betterPlayerEventType == BetterPlayerEventType.bufferingStart;
-      });
+void _betterPlayerEventListener(BetterPlayerEvent event) {
+  if (!mounted) return;
+  try {
+    setState(() {
+      _isBuffering =
+          event.betterPlayerEventType == BetterPlayerEventType.bufferingStart;
+    });
 
-      if (event.betterPlayerEventType == BetterPlayerEventType.finished) {
-        _checkForEndOfContent();
-      }
+    // Safe null-aware logging of parameters (avoid calling .isNotEmpty on a possibly null value)
+    final params = event.parameters;
+    final paramsText = (params != null && params.toString().isNotEmpty) ? ' params: $params' : '';
+    debugPrint('BetterPlayerEvent: ${event.betterPlayerEventType}$paramsText');
 
-      // If tracks became available after parsing playlist, attempt auto selection
-      if (event.betterPlayerEventType == BetterPlayerEventType.changedTrack ||
-          event.betterPlayerEventType == BetterPlayerEventType.initialized) {
-        // schedule shortly so tracks are populated
-        Future.delayed(const Duration(milliseconds: 300), () {
-          _applyAutoTrackSelection();
-        });
-      }
-    } catch (e) {
-      debugPrint("BetterPlayer event listener error: $e");
+    if (event.betterPlayerEventType == BetterPlayerEventType.finished) {
+      _checkForEndOfContent();
     }
+
+    // If tracks became available after parsing playlist, attempt auto selection
+    if (event.betterPlayerEventType == BetterPlayerEventType.changedTrack ||
+        event.betterPlayerEventType == BetterPlayerEventType.initialized) {
+      // schedule shortly so tracks are populated
+      Future.delayed(const Duration(milliseconds: 700), () {
+        _applyAutoTrackSelection();
+      });
+    }
+
+    // Surface exception events (BetterPlayer uses `exception` for player-side failures)
+    if (event.betterPlayerEventType == BetterPlayerEventType.exception) {
+      debugPrint('BetterPlayer reported an exception: $params');
+    }
+  } catch (e) {
+    debugPrint("BetterPlayer event listener error: $e");
   }
+}
+
 
   Future<void> _initializeBrightness() async {
     if (kIsWeb) {
@@ -805,41 +932,49 @@ Map<String, dynamic>? _prevStreamingInfo;
       }
     }
     if (content != null && mounted) {
-      final subtitleText = content;
-      setState(() {
-        _subtitles = subtitleText.startsWith('WEBVTT')
-            ? _parseVtt(subtitleText)
-            : _parseSrt(subtitleText);
-      });
+      try {
+        // Decide format and parse using compute() so regex work happens off the UI thread
+        final trimmed = content.trimLeft();
+        List<Map<String, dynamic>> raw;
+        if (trimmed.startsWith('WEBVTT')) {
+          raw = await compute(_parseVttIsolate, content);
+        } else {
+          raw = await compute(_parseSrtIsolate, content);
+        }
+        final parsed = raw.map((m) => Subtitle(
+          start: Duration(milliseconds: m['start_ms'] as int),
+          end: Duration(milliseconds: m['end_ms'] as int),
+          text: m['text'] as String,
+        )).toList();
+        setState(() {
+          _subtitles = parsed;
+        });
+      } catch (e) {
+        debugPrint('Error parsing subtitles in isolate: $e');
+      }
     }
   }
 
   List<Subtitle> _parseSrt(String srt) {
-    final List<Subtitle> subtitles = [];
-    final regex = RegExp(
-        r'(\d+)\s+(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})\s+([\s\S]*?)(?=\n\n|\$)');
-    final matches = regex.allMatches(srt);
-    for (final match in matches) {
-      final start = _parseDuration(match.group(2)!);
-      final end = _parseDuration(match.group(3)!);
-      final text = match.group(4)!.trim().replaceAll('\n', ' ');
-      subtitles.add(Subtitle(start: start, end: end, text: text));
-    }
-    return subtitles;
+    // kept for backward compatibility / tests; the isolate path is preferred.
+    return _parseSrtIsolate(srt)
+        .map((m) => Subtitle(
+              start: Duration(milliseconds: m['start_ms'] as int),
+              end: Duration(milliseconds: m['end_ms'] as int),
+              text: m['text'] as String,
+            ))
+        .toList();
   }
 
   List<Subtitle> _parseVtt(String vtt) {
-    final List<Subtitle> subtitles = [];
-    final regex = RegExp(
-        r'(\d{2}:\d{2}:\d{2}\.\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}\.\d{3})\s+([\s\S]*?)(?=\n\n|\$)');
-    final matches = regex.allMatches(vtt);
-    for (final match in matches) {
-      final start = _parseDuration(match.group(1)!);
-      final end = _parseDuration(match.group(2)!);
-      final text = match.group(3)!.trim().replaceAll('\n', ' ');
-      subtitles.add(Subtitle(start: start, end: end, text: text));
-    }
-    return subtitles;
+    // kept for backward compatibility / tests; the isolate path is preferred.
+    return _parseVttIsolate(vtt)
+        .map((m) => Subtitle(
+              start: Duration(milliseconds: m['start_ms'] as int),
+              end: Duration(milliseconds: m['end_ms'] as int),
+              text: m['text'] as String,
+            ))
+        .toList();
   }
 
   Duration _parseDuration(String timeString) {
@@ -1789,7 +1924,17 @@ Map<String, dynamic>? _prevStreamingInfo;
         return;
       }
 
-      await _waitForInitialization(timeoutSeconds: 10);
+      final initializedOk = await _waitForInitialization(timeoutSeconds: 10);
+      if (!initializedOk) {
+        debugPrint('Switch data source failed to initialize within timeout.');
+        if (mounted) {
+          setState(() {
+            _errorMessage = 'Playback setup failed (init timeout)';
+            _isInitialized = false;
+          });
+        }
+        throw Exception('Data source init failed');
+      }
 
       setState(() {
         _isInitialized = (_videoValue?.initialized ?? false);
@@ -1820,6 +1965,7 @@ Map<String, dynamic>? _prevStreamingInfo;
           SnackBar(content: Text("Failed to switch video: $e")),
         );
       }
+      rethrow;
     }
   }
 

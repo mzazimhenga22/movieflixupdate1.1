@@ -1,4 +1,4 @@
-// tv_homescreen.dart (updated)
+// tv_homescreen.dart (updated & unified)
 import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
@@ -10,6 +10,9 @@ import 'package:movie_app/settings_provider.dart';
 import 'package:movie_app/tmdb_api.dart' as tmdb;
 import 'package:movie_app/components/stories_section.dart';
 import 'package:movie_app/sub_home_screen.dart';
+import 'package:movie_app/search_screen.dart';
+import 'package:movie_app/mylist_screen.dart';
+import 'package:movie_app/categories_screen.dart';
 import 'package:palette_generator/palette_generator.dart';
 
 class TVHomeScreen extends StatefulWidget {
@@ -28,37 +31,41 @@ class _TVHomeScreenState extends State<TVHomeScreen> {
       backgroundColor: currentBackgroundColor,
       body: Stack(
         children: [
+          // background color anim
           AnimatedContainer(
             duration: const Duration(milliseconds: 600),
             color: currentBackgroundColor,
             width: double.infinity,
             height: double.infinity,
           ),
-          Column(
-            children: [
-              TVFeaturedBanner(
-                onBackgroundColorChanged: (color) {
-                  if (color != currentBackgroundColor && mounted) {
-                    setState(() => currentBackgroundColor = color);
-                  }
-                },
-              ),
-              Expanded(
-                child: CustomScrollView(
-                  physics: const BouncingScrollPhysics(),
-                  slivers: [
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
-                        child: SubHomeScreen(),
-                      ),
-                    ),
-                    const SliverToBoxAdapter(child: SizedBox(height: 20)),
-                  ],
+
+          // Main content uses NestedScrollView so the banner collapses when the inner
+          // scroll (SubHomeScreen) scrolls — this prevents cards from going under the banner.
+          NestedScrollView(
+            headerSliverBuilder: (context, innerBoxIsScrolled) {
+              return [
+                SliverToBoxAdapter(
+                  child: TVFeaturedBanner(
+                    onBackgroundColorChanged: (color) {
+                      if (color != currentBackgroundColor && mounted) {
+                        setState(() => currentBackgroundColor = color);
+                      }
+                    },
+                  ),
                 ),
+              ];
+            },
+            // The subhome is expected to be scrollable (ListView/CustomScrollView inside).
+            // If SubHomeScreen uses its own scroll, NestedScrollView will coordinate scrolling.
+            body: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.only(left: 88.0), // make room for left nav overlay
+                child: SubHomeScreen(),
               ),
-            ],
+            ),
           ),
+
+          // Left navigation overlay (fixed)
           const LeftNavigation(),
         ],
       ),
@@ -80,7 +87,7 @@ class LeftNavigation extends StatelessWidget {
           width: 88,
           height: height,
           decoration: BoxDecoration(
-            color: Color.fromRGBO(0, 0, 0, 0.65),
+            color: const Color.fromRGBO(0, 0, 0, 0.65),
             backgroundBlendMode: BlendMode.darken,
           ),
           child: BackdropFilter(
@@ -119,13 +126,27 @@ class _NavButton extends StatelessWidget {
         child: Builder(builder: (ctx) {
           final hasFocus = Focus.of(ctx).hasPrimaryFocus || Focus.of(ctx).hasFocus;
           return GestureDetector(
-            onTap: routeName == null ? null : () => Navigator.pushNamed(context, routeName!),
+            onTap: routeName == null
+                ? null
+                : () {
+                    // Map a few important left-nav entries to concrete screens (works even when named routes
+                    // aren't registered). For other names we fall back to pushNamed so existing routes still work.
+                    if (routeName == '/search') {
+                      Navigator.push(context, MaterialPageRoute(builder: (_) => const SearchScreen()));
+                    } else if (routeName == '/categories') {
+                      Navigator.push(context, MaterialPageRoute(builder: (_) => const CategoriesScreen()));
+                    } else if (routeName == '/mylist') {
+                      Navigator.push(context, MaterialPageRoute(builder: (_) => const MyListScreen()));
+                    } else {
+                      Navigator.pushNamed(context, routeName!);
+                    }
+                  },
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 160),
               width: 56,
               height: 56,
               decoration: BoxDecoration(
-                color: hasFocus ? Color.fromRGBO(255, 255, 255, 0.06) : Colors.transparent,
+                color: hasFocus ? const Color.fromRGBO(255, 255, 255, 0.06) : Colors.transparent,
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Icon(icon, color: Colors.white, size: 28),
@@ -352,7 +373,7 @@ class _TVFeaturedBannerState extends State<TVFeaturedBanner> {
                       width: active ? 18 : 8,
                       height: 8,
                       decoration: BoxDecoration(
-                        color: active ? Color.fromRGBO(255, 255, 255, 0.95) : Color.fromRGBO(255, 255, 255, 0.24),
+                        color: active ? const Color.fromRGBO(255, 255, 255, 0.95) : const Color.fromRGBO(255, 255, 255, 0.24),
                         borderRadius: BorderRadius.circular(8),
                       ),
                     );
@@ -436,7 +457,7 @@ class _TVBannerContentV2State extends State<_TVBannerContentV2> {
                       center: Alignment(0.0 + (_parallax / 100), 0.3),
                       radius: 1.2,
                       colors: [
-                        Color.fromRGBO(0, 0, 0, 0.55),
+                        const Color.fromRGBO(0, 0, 0, 0.55),
                         Colors.transparent,
                       ],
                       stops: const [0.0, 0.85],
@@ -452,11 +473,21 @@ class _TVBannerContentV2State extends State<_TVBannerContentV2> {
                   gradient: LinearGradient(
                     begin: Alignment.bottomCenter,
                     end: Alignment.topCenter,
-                    colors: [Color.fromRGBO(0, 0, 0, 0.9), Colors.transparent],
+                    colors: [const Color.fromRGBO(0, 0, 0, 0.9), Colors.transparent],
                   ),
                 ),
               ),
             ),
+
+          // Stories moved to top of banner as requested
+          Positioned(
+            left: widget.leftNavWidth + 28,
+            right: 24,
+            top: 12,
+            child: SizedBox(height: 110, child: StoriesSection()),
+          ),
+
+          // Poster + title + actions remain near bottom
           Positioned(
             left: widget.leftNavWidth + 28,
             right: 24,
@@ -507,7 +538,7 @@ class _TVBannerContentV2State extends State<_TVBannerContentV2> {
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                               decoration: BoxDecoration(
-                                color: Color.fromRGBO(255, 255, 255, 0.06),
+                                color: const Color.fromRGBO(255, 255, 255, 0.06),
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Row(
@@ -563,12 +594,6 @@ class _TVBannerContentV2State extends State<_TVBannerContentV2> {
               ],
             ),
           ),
-          Positioned(
-            left: widget.leftNavWidth + 28,
-            right: 24,
-            bottom: 12,
-            child: SizedBox(height: 110, child: StoriesSection()),
-          ),
         ],
       ),
     );
@@ -580,7 +605,7 @@ class _TVBannerContentV2State extends State<_TVBannerContentV2> {
     required VoidCallback onPressed,
     bool emphasize = false,
   }) {
-    final bg = emphasize ? Colors.white : Color.fromRGBO(255, 255, 255, 0.08);
+    final bg = emphasize ? Colors.white : const Color.fromRGBO(255, 255, 255, 0.08);
     final fg = emphasize ? Colors.black : Colors.white;
     return ElevatedButton.icon(
       onPressed: onPressed,
@@ -677,7 +702,7 @@ class _PosterTileState extends State<PosterTile> {
             boxShadow: _focused
                 ? [
                     BoxShadow(
-                      color: Color.fromRGBO(255, 255, 255, 0.12),
+                      color: const Color.fromRGBO(255, 255, 255, 0.12),
                       blurRadius: 22,
                       spreadRadius: 1,
                       offset: const Offset(0, 6),
