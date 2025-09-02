@@ -1,8 +1,10 @@
 // messages_controller.dart
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -94,7 +96,16 @@ class MessagesController extends ChangeNotifier {
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _groupsSub;
 
   // to avoid duplicate last-message fetches on many rapid doc changes
+  // we now store tokens "<chatId>|<isGroupFlag>"
   final Set<String> _pendingLastMessageFetches = {};
+
+  // queue + concurrency limiter
+  final Queue<String> _fetchQueue = Queue<String>();
+  int _activeFetches = 0;
+  static const int _maxConcurrentFetches = 5;
+
+  // Debounce for snapshot bursts
+  Timer? _docsChangedDebounce;
 
   // SharedPrefs key prefix
   String get _prefsPrefix => 'msgs_${currentUser['id'] ?? 'unknown'}';
@@ -210,7 +221,17 @@ class MessagesController extends ChangeNotifier {
     });
   }
 
+  /// Debounce incoming doc-changed bursts and process once per small window.
   void _handleDocsChanged(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+      {required bool isGroup}) {
+    _docsChangedDebounce?.cancel();
+    _docsChangedDebounce = Timer(const Duration(milliseconds: 200), () {
+      _processDocsChanged(docs, isGroup: isGroup);
+    });
+  }
+
+  /// Original _handleDocsChanged logic moved here; gets called by the debounce timer.
+  void _processDocsChanged(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
       {required bool isGroup}) {
     // Build map so we can merge remote order/pins/etc into local in-memory list.
     final Map<String, QueryDocumentSnapshot<Map<String, dynamic>>> docsById = {
@@ -402,16 +423,41 @@ class MessagesController extends ChangeNotifier {
     }
 
     // If necessary, queue a fetch of latest message for more accurate lastMessage/readBy info
-    if (needsFetch && !_pendingLastMessageFetches.contains(id)) {
-      _pendingLastMessageFetches.add(id);
-      _fetchLastMessageAndUpdate(id, isGroup: isGroup).whenComplete(() {
-        _pendingLastMessageFetches.remove(id);
-        _saveCachedLists();
-        notifyListeners();
-      });
+    if (needsFetch) {
+      final token = '$id|${isGroup ? '1' : '0'}';
+      if (!_pendingLastMessageFetches.contains(token)) {
+        _pendingLastMessageFetches.add(token);
+        _enqueueLastMessageFetch(token);
+      }
     }
   }
 
+  /// queue helpers for controlled concurrency
+  void _enqueueLastMessageFetch(String token) {
+    _fetchQueue.add(token);
+    _tryProcessQueue();
+  }
+
+  void _tryProcessQueue() {
+    if (_activeFetches >= _maxConcurrentFetches) return;
+    if (_fetchQueue.isEmpty) return;
+
+    final token = _fetchQueue.removeFirst();
+    _activeFetches++;
+
+    final parts = token.split('|');
+    final chatId = parts[0];
+    final isGroup = parts.length > 1 && parts[1] == '1';
+
+    // call and when complete, decrement active and continue
+    _fetchLastMessageAndUpdate(chatId, isGroup: isGroup).whenComplete(() {
+      _activeFetches--;
+      _pendingLastMessageFetches.remove(token);
+      _tryProcessQueue();
+      _saveCachedLists();
+      notifyListeners();
+    });
+  }
 
   /// Fetch a user profile and apply to the in-memory chat summary (if present).
   Future<void> _fetchAndApplyProfile(String userId, String chatId, bool isGroup) async {
@@ -457,23 +503,55 @@ class MessagesController extends ChangeNotifier {
     }
   }
 
+  /// Fetch the latest message from the messages subcollection and update local summary.
+  /// Workaround: if parent doc lacks lastMessage/unreadBy or has an older timestamp,
+  /// update the parent doc inside a transaction so it behaves similar to a Cloud Function.
+  /// Improvement: skip messages that are 'deletedFor' current user and, if none visible,
+  /// clear the parent lastMessage so the snippet matches the opened chat.
   Future<void> _fetchLastMessageAndUpdate(String chatId, {required bool isGroup}) async {
     try {
-      final ref = FirebaseFirestore.instance
+      final msgsRef = FirebaseFirestore.instance
           .collection(isGroup ? 'groups' : 'chats')
           .doc(chatId)
           .collection('messages')
           .orderBy('timestamp', descending: true)
-          .limit(1);
+          .limit(20); // fetch several recent messages to find first visible for user
 
-      final snap = await ref.get();
-      if (snap.docs.isEmpty) return;
-      final m = snap.docs.first.data();
+      final snap = await msgsRef.get();
+      if (snap.docs.isEmpty) {
+        // no messages at all -> clear summary & optionally parent
+        _applyEmptyLastMessageToSummary(chatId, isGroup);
+        await _clearParentLastMessageIfNeeded(chatId, isGroup);
+        return;
+      }
+
+      // pick first message not containing currentUser in deletedFor
+      QueryDocumentSnapshot<Map<String, dynamic>>? chosen;
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        final deletedFor = List<dynamic>.from(data['deletedFor'] ?? []);
+        if (!deletedFor.contains(currentUser['id'])) {
+          chosen = doc;
+          break;
+        }
+      }
+
+      if (chosen == null) {
+        // all recent messages are deleted for current user -> treat as "no visible messages"
+        _applyEmptyLastMessageToSummary(chatId, isGroup);
+        await _clearParentLastMessageIfNeeded(chatId, isGroup);
+        return;
+      }
+
+      final mDoc = chosen;
+      final m = mDoc.data();
       final senderId = m['senderId'] as String?;
       final text = (m['text'] as String?) ?? (m['type'] == 'media' ? 'Media' : '');
       final timestamp = _parseTimestamp(m['timestamp']);
       final readBy = List<dynamic>.from(m['readBy'] ?? []);
       final unreadForUser = !(readBy.contains(currentUser['id']));
+
+      // Update in-memory summary
       final idx = chatSummaries.indexWhere((c) => c.id == chatId && c.isGroup == isGroup);
       if (idx >= 0) {
         final s = chatSummaries[idx];
@@ -495,8 +573,82 @@ class MessagesController extends ChangeNotifier {
         );
         chatSummaries.add(summary);
       }
+
+      // Repair parent doc if it is missing lastMessage or has older timestamp than chosen message:
+      try {
+        final parentRef = FirebaseFirestore.instance.collection(isGroup ? 'groups' : 'chats').doc(chatId);
+        await FirebaseFirestore.instance.runTransaction((tx) async {
+          final parentSnap = await tx.get(parentRef);
+          final parentData = parentSnap.exists ? (parentSnap.data() as Map<String, dynamic>?) : null;
+          final parentTs = _parseTimestamp(parentData?['timestamp']);
+
+          final shouldUpdateParent = parentData == null ||
+              !(parentData.containsKey('lastMessage')) ||
+              timestamp.isAfter(parentTs);
+
+          if (shouldUpdateParent) {
+            // Build unreadBy: all userIds in parent doc except sender
+            List<dynamic> userIds = [];
+            if (parentData != null && parentData.containsKey('userIds')) {
+              userIds = List<dynamic>.from(parentData['userIds'] ?? []);
+            } else {
+              userIds = parentData?['userIds'] ?? [];
+            }
+
+            // recipients = all userIds except the sender
+            final recipientIds = userIds.where((id) => id != senderId).toList().cast<String>();
+
+            // use message timestamp if it's a Firestore Timestamp; otherwise use serverTimestamp
+            final tsValue = m['timestamp'] is Timestamp ? m['timestamp'] : FieldValue.serverTimestamp();
+
+            final updateData = <String, dynamic>{
+              'lastMessage': text,
+              'timestamp': tsValue,
+            };
+
+            if (recipientIds.isNotEmpty) {
+              updateData['unreadBy'] = FieldValue.arrayUnion(recipientIds);
+            }
+
+            tx.set(parentRef, updateData, SetOptions(merge: true));
+          }
+        });
+      } catch (e, st) {
+        // don't fail the whole fetch because parent update failed; just log
+        debugPrint('[MessagesController] parent doc repair failed for $chatId: $e\n$st');
+      }
     } catch (e, st) {
       debugPrint('[MessagesController] _fetchLastMessageAndUpdate error: $e\n$st');
+    }
+  }
+
+  /// Helper: apply "no visible message" to in-memory summary
+  void _applyEmptyLastMessageToSummary(String chatId, bool isGroup) {
+    final idx = chatSummaries.indexWhere((c) => c.id == chatId && c.isGroup == isGroup);
+    if (idx >= 0) {
+      final s = chatSummaries[idx];
+      s.lastMessageText = '';
+      s.unreadCount = 0;
+      // keep timestamp as-is (do not override with epoch unless desired)
+    }
+  }
+
+  /// If parent doc still claims a lastMessage but there are no visible messages for this user,
+  /// clear the parent's lastMessage so UI doesn't display a snippet which won't show in the opened chat.
+  Future<void> _clearParentLastMessageIfNeeded(String chatId, bool isGroup) async {
+    try {
+      final parentRef = FirebaseFirestore.instance.collection(isGroup ? 'groups' : 'chats').doc(chatId);
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final parentSnap = await tx.get(parentRef);
+        if (!parentSnap.exists) return;
+        final parentData = parentSnap.data() as Map<String, dynamic>? ?? {};
+        final last = parentData['lastMessage'];
+        if (last != null && (last is String && last.isNotEmpty)) {
+          tx.update(parentRef, {'lastMessage': '', 'timestamp': FieldValue.serverTimestamp()});
+        }
+      });
+    } catch (e, st) {
+      debugPrint('[MessagesController] _clearParentLastMessageIfNeeded error: $e\n$st');
     }
   }
 
@@ -775,6 +927,7 @@ class MessagesController extends ChangeNotifier {
   void dispose() {
     _chatsSub?.cancel();
     _groupsSub?.cancel();
+    _docsChangedDebounce?.cancel();
     super.dispose();
   }
 
@@ -1007,5 +1160,32 @@ class MessagesController extends ChangeNotifier {
         ),
       ),
     );
+  }
+
+  /// Public helper to mark a single message as deleted FOR THE CURRENT USER.
+  /// Call this from your ChatScreen when user deletes one message.
+  Future<void> markMessageDeletedForUser(String chatId, String messageId, {required bool isGroup}) async {
+    try {
+      final uid = currentUser['id'] as String?;
+      if (uid == null) return;
+
+      final msgRef = FirebaseFirestore.instance
+          .collection(isGroup ? 'groups' : 'chats')
+          .doc(chatId)
+          .collection('messages')
+          .doc(messageId);
+
+      // mark deletedFor this user
+      await msgRef.update({'deletedFor': FieldValue.arrayUnion([uid])});
+
+      // After marking, re-evaluate the latest visible message for this user and repair parent doc accordingly.
+      await _fetchLastMessageAndUpdate(chatId, isGroup: isGroup);
+
+      // Also persist cached lists and notify UI
+      _saveCachedLists();
+      notifyListeners();
+    } catch (e, st) {
+      debugPrint('[MessagesController] markMessageDeletedForUser error: $e\n$st');
+    }
   }
 }

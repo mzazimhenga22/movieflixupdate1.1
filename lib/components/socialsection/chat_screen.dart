@@ -1,9 +1,7 @@
 // chat_screen.dart
 // Updated: ensure message bubbles never appear below the typing area.
-// Key ideas:
-// - Keep resizeToAvoidBottomInset: false to avoid heavy relayouts on keyboard open.
-// - Pin typing area and animate its bottom using MediaQuery.viewInsets.bottom.
-// - Measure typing area height via GlobalKey and keep messages' bottom offset = typingHeight + viewInsets.bottom.
+// Added robust deletion repair (recompute chat.lastMessage excluding messages deletedFor current user).
+// Uses compute() to move local snapshot processing off the UI thread.
 
 import 'dart:io';
 import 'dart:async';
@@ -26,6 +24,25 @@ import 'widgets/advanced_chat_list.dart';
 import 'widgets/message_actions.dart';
 import 'forward_message_screen.dart';
 import 'presence_wrapper.dart';
+
+/// Compute worker: given a list of message maps and currentUserId,
+/// returns the first visible message (map) that does NOT contain currentUserId in 'deletedFor'.
+/// If none found, returns null.
+Map<String, dynamic>? _findFirstVisibleMessage(Map<String, dynamic> payload) {
+  final raw = payload['raw'] as List<dynamic>? ?? [];
+  final currentId = payload['currentId'] as String? ?? '';
+
+  for (final r in raw) {
+    if (r is Map) {
+      final m = Map<String, dynamic>.from(r);
+      final deletedFor = List<String>.from(m['deletedFor'] ?? []);
+      if (!deletedFor.contains(currentId)) {
+        return m;
+      }
+    }
+  }
+  return null;
+}
 
 class ChatScreen extends StatefulWidget {
   final String chatId;
@@ -82,6 +99,9 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
       _loadChatBackground();
       markChatAsRead(widget.chatId, widget.currentUser['id']);
       _listenForIncomingCalls();
+
+      // one-time repair: ensure parent chat doc lastMessage isn't a message deleted for me
+      _repairChatParentDocIfNeeded();
     });
 
     // Ensure we capture an initial measurement after first frame
@@ -353,7 +373,6 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
 
       unawaited(sendFcmPush(
         fcmToken: fcmToken,
-        
         title: title,
         body: body,
         extraData: extraData,
@@ -470,6 +489,7 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
     if (!_isDisposed) _replyingToNotifier.value = null;
   }
 
+  /// Show the message actions sheet and handle all actions.
   void _showMessageActions(QueryDocumentSnapshot<Object?> message, bool isMe, GlobalKey messageKey) {
     if (isActionOverlayVisible) return;
     isActionOverlayVisible = true;
@@ -509,20 +529,44 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
         }
       },
       onDelete: () async {
-        final data = message.data() as Map<String, dynamic>;
-        final deletedFor = List<String>.from(data['deletedFor'] ?? []);
-        deletedFor.add(widget.currentUser['id']);
+        // Delete for current user: add user id to deletedFor array on message.
+        try {
+          final uid = widget.currentUser['id'] as String?;
+          if (uid == null || uid.isEmpty) return;
 
-        await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).collection('messages').doc(message.id).update({'deletedFor': deletedFor});
+          final msgRef = FirebaseFirestore.instance
+              .collection('chats')
+              .doc(widget.chatId)
+              .collection('messages')
+              .doc(message.id);
 
-        final chatDoc = await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).get();
-        if (chatDoc.exists && chatDoc['pinnedMessageId'] == message.id) {
-          await FirebaseFirestore.instance.collection('chats').doc(widget.chatId).update({'pinnedMessageId': null});
-        }
+          // Atomically add current user to deletedFor
+          await msgRef.update({
+            'deletedFor': FieldValue.arrayUnion([uid])
+          });
 
-        if (mounted) {
-          Navigator.of(context, rootNavigator: false).pop();
-          isActionOverlayVisible = false;
+          // If the message was pinned, clear pinnedMessageId on parent chat
+          final chatRef = FirebaseFirestore.instance.collection('chats').doc(widget.chatId);
+          final chatDoc = await chatRef.get();
+          if (chatDoc.exists && chatDoc.data()?['pinnedMessageId'] == message.id) {
+            await chatRef.update({'pinnedMessageId': null, 'pinnedMessageText': null, 'pinnedMessageSenderId': null});
+          }
+
+          // Now recompute the parent doc lastMessage/timestamp to point to the most recent visible message
+          // (exclude messages that have deletedFor containing this user).
+          await _repairParentDocAfterMessageDeletion(deletedMessageId: message.id, currentUserId: uid);
+
+          if (mounted) {
+            Navigator.of(context, rootNavigator: false).pop(); // close the actions sheet
+            isActionOverlayVisible = false;
+          }
+        } catch (e, st) {
+          debugPrint('onDelete error: $e\n$st');
+          if (mounted) {
+            Navigator.of(context, rootNavigator: false).pop();
+            isActionOverlayVisible = false;
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to delete message')));
+          }
         }
       },
       onBlock: () async {
@@ -629,84 +673,83 @@ class _ChatScreenState extends State<ChatScreen> with AutomaticKeepAliveClientMi
     });
   }
 
-  // Put this inside _ChatScreenState (e.g. right after _listenForIncomingCalls())
-void _showQuickActionsBottomSheet() {
-  showModalBottomSheet(
-    context: context,
-    backgroundColor: Colors.transparent,
-    builder: (ctx) {
-      return Container(
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.85),
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-          border: Border.all(color: widget.accentColor.withOpacity(0.08)),
-        ),
-        padding: const EdgeInsets.all(12),
-        child: Wrap(
-          alignment: WrapAlignment.spaceBetween,
-          children: [
-            ListTile(
-              leading: CircleAvatar(
-                backgroundImage: widget.otherUser['avatarUrl'] != null
-                    ? CachedNetworkImageProvider(widget.otherUser['avatarUrl'])
-                    : null,
-                backgroundColor: widget.accentColor.withOpacity(0.2),
-                child: widget.otherUser['avatarUrl'] == null ? const Icon(Icons.person) : null,
+  // Quick actions bottom sheet (unchanged)
+  void _showQuickActionsBottomSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Container(
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.85),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+            border: Border.all(color: widget.accentColor.withOpacity(0.08)),
+          ),
+          padding: const EdgeInsets.all(12),
+          child: Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            children: [
+              ListTile(
+                leading: CircleAvatar(
+                  backgroundImage: widget.otherUser['avatarUrl'] != null
+                      ? CachedNetworkImageProvider(widget.otherUser['avatarUrl'])
+                      : null,
+                  backgroundColor: widget.accentColor.withOpacity(0.2),
+                  child: widget.otherUser['avatarUrl'] == null ? const Icon(Icons.person) : null,
+                ),
+                title: Text(widget.otherUser['username'] ?? 'Contact'),
+                subtitle: Text(widget.otherUser['status'] ?? ''),
+                trailing: IconButton(
+                  icon: const Icon(Icons.info_outline),
+                  color: widget.accentColor,
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    Navigator.pushNamed(context, '/profile', arguments: {
+                      ...widget.otherUser,
+                      'onBackgroundSet': _setChatBackground,
+                    });
+                  },
+                ),
               ),
-              title: Text(widget.otherUser['username'] ?? 'Contact'),
-              subtitle: Text(widget.otherUser['status'] ?? ''),
-              trailing: IconButton(
-                icon: const Icon(Icons.info_outline),
-                color: widget.accentColor,
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  Navigator.pushNamed(context, '/profile', arguments: {
-                    ...widget.otherUser,
-                    'onBackgroundSet': _setChatBackground,
-                  });
-                },
+              const Divider(),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      startVoiceCall();
+                    },
+                    icon: const Icon(Icons.call),
+                    label: const Text('Voice'),
+                  ),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      startVideoCall();
+                    },
+                    icon: const Icon(Icons.videocam),
+                    label: const Text('Video'),
+                  ),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(side: BorderSide(color: widget.accentColor)),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      // future: open media picker
+                    },
+                    icon: const Icon(Icons.image),
+                    label: const Text('Media'),
+                  ),
+                ],
               ),
-            ),
-            const Divider(),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    startVoiceCall();
-                  },
-                  icon: const Icon(Icons.call),
-                  label: const Text('Voice'),
-                ),
-                ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor),
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    startVideoCall();
-                  },
-                  icon: const Icon(Icons.videocam),
-                  label: const Text('Video'),
-                ),
-                OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(side: BorderSide(color: widget.accentColor)),
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    // future: open media picker
-                  },
-                  icon: const Icon(Icons.image),
-                  label: const Text('Media'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      );
-    },
-  );
-}
-
+            ],
+          ),
+        );
+      },
+    );
+  }
 
   // Measure typing area height and update notifier
   void _updateTypingHeight() {
@@ -875,10 +918,114 @@ void _showQuickActionsBottomSheet() {
       ),
     );
   }
+
+  /// ---------------------------
+  /// Repair helpers
+  /// ---------------------------
+
+  /// When a message was deleted for the current user, recompute the parent chat's
+  /// lastMessage/timestamp to the latest message that is still visible to this user.
+  Future<void> _repairParentDocAfterMessageDeletion({required String deletedMessageId, required String currentUserId}) async {
+    try {
+      final chatRef = FirebaseFirestore.instance.collection('chats').doc(widget.chatId);
+      // Fetch recent messages (limit 50) to find the newest one not deleted for this user
+      final snap = await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(widget.chatId)
+          .collection('messages')
+          .orderBy('timestamp', descending: true)
+          .limit(50)
+          .get();
+
+      final raw = snap.docs.map((d) {
+        final m = Map<String, dynamic>.from(d.data() as Map<String, dynamic>);
+        m['id'] = d.id;
+        return m;
+      }).toList();
+
+      // Use compute to find the first visible message (off the UI thread)
+      final payload = {'raw': raw, 'currentId': currentUserId};
+      final visible = await compute(_findFirstVisibleMessage, payload);
+
+      // Update parent doc transactionally
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final parentSnap = await tx.get(chatRef);
+        final parentData = parentSnap.exists ? (parentSnap.data() as Map<String, dynamic>?) : null;
+
+        if (visible != null) {
+          // write the visible message as lastMessage (use its timestamp if present)
+          final tsRaw = visible['timestamp'];
+          final tsValue = tsRaw is Timestamp ? tsRaw : FieldValue.serverTimestamp();
+          final updateData = <String, dynamic>{
+            'lastMessage': visible['text'] ?? '',
+            'timestamp': tsValue,
+          };
+          tx.set(chatRef, updateData, SetOptions(merge: true));
+        } else {
+          // No visible messages: clear lastMessage and set a recent timestamp
+          tx.set(chatRef, {
+            'lastMessage': '',
+            'timestamp': FieldValue.serverTimestamp(),
+            // Optionally, clear unreadBy so UI doesn't show unread for empty chat
+            'unreadBy': [],
+          }, SetOptions(merge: true));
+        }
+      });
+    } catch (e, st) {
+      debugPrint('_repairParentDocAfterMessageDeletion failed: $e\n$st');
+    }
+  }
+
+  /// On opening the chat try a quick repair if the parent doc's lastMessage points to a message
+  /// that is deleted for the current user — ensures list preview is consistent.
+  Future<void> _repairChatParentDocIfNeeded() async {
+    try {
+      final chatRef = FirebaseFirestore.instance.collection('chats').doc(widget.chatId);
+      final parentSnap = await chatRef.get();
+      if (!parentSnap.exists) return;
+      final parentData = parentSnap.data() as Map<String, dynamic>? ?? {};
+      final lastMessageText = (parentData['lastMessage'] as String?) ?? '';
+      // If empty lastMessage do nothing
+      if (lastMessageText.isEmpty) return;
+
+      // Check the latest message docs to see if the parent lastMessage corresponds to a message
+      final snap = await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(widget.chatId)
+          .collection('messages')
+          .orderBy('timestamp', descending: true)
+          .limit(20)
+          .get();
+
+      // Map docs for compute
+      final raw = snap.docs.map((d) {
+        final m = Map<String, dynamic>.from(d.data() as Map<String, dynamic>);
+        m['id'] = d.id;
+        return m;
+      }).toList();
+
+      // If the current top message is deleted for me, run full repair.
+      bool needRepair = false;
+      if (raw.isNotEmpty) {
+        final top = raw.first;
+        final deletedFor = List<String>.from(top['deletedFor'] ?? []);
+        if (deletedFor.contains(widget.currentUser['id'])) {
+          needRepair = true;
+        }
+      }
+
+      if (needRepair) {
+        // call the same repair that excludes messages deleted for me
+        await _repairParentDocAfterMessageDeletion(deletedMessageId: raw.first['id'] as String, currentUserId: widget.currentUser['id']);
+      }
+    } catch (e, st) {
+      debugPrint('_repairChatParentDocIfNeeded failed: $e\n$st');
+    }
+  }
 }
 
 /// ---------------------------
-/// Helper widgets below
+/// Helper widgets below (unchanged, preserved from original)
 /// ---------------------------
 
 class _ChatBackground extends StatelessWidget {
@@ -946,6 +1093,8 @@ class _ChatMessagesWrapper extends StatelessWidget {
       child: ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
         valueListenable: replyingToNotifier,
         builder: (context, replyingTo, _) {
+          // AdvancedChatList is still responsible for rendering messages and listening for new ones.
+          // The repair operations that maintain parent doc consistency are handled in ChatScreen above.
           return AdvancedChatList(
             chatId: chatId,
             currentUser: currentUser,
@@ -987,6 +1136,7 @@ class _TypingAreaWrapper extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<QueryDocumentSnapshot<Object?>?>(
+
       valueListenable: replyingToNotifier,
       builder: (context, replyingTo, _) {
         return RepaintBoundary(

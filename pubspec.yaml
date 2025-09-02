@@ -30,6 +30,8 @@ dependencies:
 
   # Video & Media
   video_player: ^2.7.0
+  better_player:
+    path: ./better_player_fixed   # ✅ local patched version
   youtube_player_flutter: ^9.1.1
   flutter_sound: ^9.2.13
   just_audio: ^0.10.4

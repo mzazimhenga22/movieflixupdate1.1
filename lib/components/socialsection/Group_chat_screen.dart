@@ -1,6 +1,8 @@
 // group_chat_screen.dart
 // Members bar moved inside the container at the top (sliding horizontal row).
 // Typing area pinned to bottom; scaffold set to resizeToAvoidBottomInset:false.
+// Added: compute() workers for heavier mapping tasks and repair logic for message deletion.
+// Typing area measured to avoid message underlap and reduce rebuilds on keyboard open.
 
 import 'dart:async';
 import 'dart:convert';
@@ -28,6 +30,43 @@ import 'VideoCallScreen_Group.dart';
 import 'VoiceCallScreen_Group.dart';
 import 'presence_wrapper.dart';
 
+/// Compute worker: find first visible message not deleted for current user.
+/// Expects payload = {'raw': List<Map<String, dynamic>>, 'currentId': String}
+Map<String, dynamic>? _findFirstVisibleMessageForUser(Map<String, dynamic> payload) {
+  final raw = payload['raw'] as List<dynamic>? ?? [];
+  final currentId = payload['currentId'] as String? ?? '';
+
+  for (final item in raw) {
+    if (item is Map) {
+      final m = Map<String, dynamic>.from(item);
+      final deletedFor = List<String>.from(m['deletedFor'] ?? []);
+      if (!deletedFor.contains(currentId)) {
+        return m;
+      }
+    }
+  }
+  return null;
+}
+
+/// Compute worker to convert minimal member docs to safe maps (keeps only light fields).
+List<Map<String, dynamic>> _processMemberDocsForUI(List<dynamic> raw) {
+  final result = <Map<String, dynamic>>[];
+  for (final r in raw) {
+    if (r is Map) {
+      final id = r['id']?.toString() ?? '';
+      final data = r['data'] as Map<String, dynamic>? ?? {};
+      result.add({
+        'id': id,
+        'username': data['username'] ?? data['name'] ?? 'User',
+        'avatarUrl': data['avatarUrl'] ?? data['photoUrl'] ?? '',
+        'status': data['status'] ?? '',
+        'isOnline': data['isOnline'] ?? false,
+      });
+    }
+  }
+  return result;
+}
+
 class GroupChatScreen extends StatefulWidget {
   final String chatId;
   final Map<String, dynamic> currentUser;
@@ -48,8 +87,7 @@ class GroupChatScreen extends StatefulWidget {
   State<GroupChatScreen> createState() => _GroupChatScreenState();
 }
 
-class _GroupChatScreenState extends State<GroupChatScreen>
-    with AutomaticKeepAliveClientMixin {
+class _GroupChatScreenState extends State<GroupChatScreen> with AutomaticKeepAliveClientMixin {
   // ValueNotifiers to minimize rebuild surface
   final ValueNotifier<String?> _backgroundUrlNotifier = ValueNotifier<String?>(null);
   final ValueNotifier<List<Map<String, dynamic>>> _groupMembersNotifier =
@@ -58,6 +96,10 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       ValueNotifier<Map<String, dynamic>?>(null);
   final ValueNotifier<QueryDocumentSnapshot<Object?>?> _replyingToNotifier =
       ValueNotifier<QueryDocumentSnapshot<Object?>?>(null);
+
+  // Typing area measurement (so messages are positioned above it, like ChatScreen)
+  final GlobalKey _typingKey = GlobalKey();
+  final ValueNotifier<double> _typingHeightNotifier = ValueNotifier<double>(0.0);
 
   // Subscriptions - cancel them on dispose to avoid "used after disposed" crashes
   StreamSubscription<DocumentSnapshot<Object?>>? _groupDocSub;
@@ -87,6 +129,9 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       _loadGroupDataAndListen();
       _listenForIncomingCalls();
     });
+
+    // initial typing measurement
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateTypingHeight());
   }
 
   @override
@@ -107,6 +152,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
     _groupMembersNotifier.dispose();
     _groupDataNotifier.dispose();
     _replyingToNotifier.dispose();
+    _typingHeightNotifier.dispose();
 
     super.dispose();
   }
@@ -199,24 +245,34 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       final docData = chatDoc.data()!;
       final memberIds = List<String>.from((docData as Map<String, dynamic>)['userIds'] ?? []);
 
-      // fetch members in parallel (first time snapshot)
+      // fetch members in batches (chunk to avoid many simultaneous gets and to handle Firestore limits)
       try {
         if (memberIds.isNotEmpty) {
-          // chunking may be needed for very large groups (Firestore whereIn limit), but left simple for clarity
-          final membersSnapshots = await Future.wait(memberIds.map((uid) => FirebaseFirestore.instance.collection('users').doc(uid).get()));
-          final members = membersSnapshots.where((d) => d.exists).map((d) {
-            final m = Map<String, dynamic>.from(d.data()!);
-            m['id'] = d.id;
-            return m;
-          }).toList();
+          final memberChunks = <List<String>>[];
+          const chunkSize = 10; // safe default for whereIn/parallel requests
+          for (var i = 0; i < memberIds.length; i += chunkSize) {
+            memberChunks.add(memberIds.sublist(i, i + chunkSize > memberIds.length ? memberIds.length : i + chunkSize));
+          }
+
+          final fetchedMembers = <Map<String, dynamic>>[];
+
+          for (final chunk in memberChunks) {
+            // Use batch get via multiple doc refs (safer than whereIn for very large groups; but we still use get on each doc)
+            final futures = chunk.map((uid) => FirebaseFirestore.instance.collection('users').doc(uid).get()).toList();
+            final docs = await Future.wait(futures);
+
+            // build light-weight raw list and offload mapping to compute
+            final rawForCompute = docs.where((d) => d.exists).map((d) => {'id': d.id, 'data': d.data() ?? {}}).toList();
+            final processed = await compute(_processMemberDocsForUI, rawForCompute);
+            fetchedMembers.addAll(processed);
+          }
 
           if (!_isDisposed) {
-            // update notifier without causing a full rebuild
-            _groupMembersNotifier.value = members;
+            _groupMembersNotifier.value = fetchedMembers;
           }
 
           // cache for offline quick load
-          await _cacheGroupData(Map<String, dynamic>.from(docData), members);
+          await _cacheGroupData(Map<String, dynamic>.from(docData), fetchedMembers);
         } else {
           if (!_isDisposed) _groupMembersNotifier.value = [];
         }
@@ -224,10 +280,9 @@ class _GroupChatScreenState extends State<GroupChatScreen>
         debugPrint('Failed to fetch member docs: $e');
       }
 
-      // observe member docs for updates but debounce UI refreshes
-      // cancel existing members subscription before creating a new one
+      // observe member docs for updates but only when safe (small groups)
       _membersSub?.cancel();
-      if (memberIds.isNotEmpty) {
+      if (memberIds.isNotEmpty && memberIds.length <= 10) {
         try {
           _membersSub = FirebaseFirestore.instance
               .collection('users')
@@ -236,17 +291,22 @@ class _GroupChatScreenState extends State<GroupChatScreen>
               .listen((snapshot) {
             if (_isDisposed) return;
             _debounce?.cancel();
-            _debounce = Timer(const Duration(milliseconds: 300), () {
-              // Refresh the members notifier without bubbling a full-screen setState
+            _debounce = Timer(const Duration(milliseconds: 300), () async {
               if (_isDisposed) return;
-              // If we have the latest members list, reassign to trigger ValueListenableBuilder listeners
-              _groupMembersNotifier.value = List<Map<String, dynamic>>.from(_groupMembersNotifier.value);
+              // Map docs to simple maps (offload to compute)
+              final raw = snapshot.docs.map((d) => {'id': d.id, 'data': d.data() ?? {}}).toList();
+              final processed = await compute(_processMemberDocsForUI, raw);
+              if (_isDisposed) return;
+              _groupMembersNotifier.value = processed;
             });
           });
         } catch (e) {
-          // Firestore whereIn might throw if memberIds is empty or too large; handle gracefully
           debugPrint('Failed to start members listener: $e');
         }
+      } else {
+        // Too many members — skip live members listener to avoid Firestore whereIn limits;
+        // rely on cached data and periodic updates triggered by group doc changes.
+        _membersSub?.cancel();
       }
 
       // mark as read
@@ -535,7 +595,6 @@ class _GroupChatScreenState extends State<GroupChatScreen>
           // sendFcmPush signature used in chat_screen: fcmToken, projectId, title, body, extraData
           unawaited(sendFcmPush(
             fcmToken: token,
-           
             title: title,
             body: body,
             extraData: extraData,
@@ -681,20 +740,33 @@ class _GroupChatScreenState extends State<GroupChatScreen>
         }
       },
       onDelete: () async {
-        final data = message.data() as Map<String, dynamic>;
-        final deletedFor = List<String>.from(data['deletedFor'] ?? []);
-        deletedFor.add(widget.currentUser['id']);
+        try {
+          final data = message.data() as Map<String, dynamic>;
+          final deletedFor = List<String>.from(data['deletedFor'] ?? []);
+          deletedFor.add(widget.currentUser['id']);
 
-        await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).collection('messages').doc(message.id).update({'deletedFor': deletedFor});
+          final msgRef = FirebaseFirestore.instance.collection('groups').doc(widget.chatId).collection('messages').doc(message.id);
+          await msgRef.update({'deletedFor': deletedFor});
 
-        final chatDoc = await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).get();
-        if (chatDoc.exists && chatDoc['pinnedMessageId'] == message.id) {
-          await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).update({'pinnedMessageId': null});
-        }
+          final chatDoc = await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).get();
+          if (chatDoc.exists && chatDoc['pinnedMessageId'] == message.id) {
+            await FirebaseFirestore.instance.collection('groups').doc(widget.chatId).update({'pinnedMessageId': null});
+          }
 
-        if (mounted) {
-          Navigator.of(context, rootNavigator: false).pop();
-          setState(() => isActionOverlayVisible = false);
+          // Repair parent doc lastMessage/timestamp after deletion for this user
+          await _repairGroupParentDocAfterMessageDeletion(currentUserId: widget.currentUser['id']);
+
+          if (mounted) {
+            Navigator.of(context, rootNavigator: false).pop();
+            setState(() => isActionOverlayVisible = false);
+          }
+        } catch (e, st) {
+          debugPrint('Group onDelete error: $e\n$st');
+          if (mounted) {
+            Navigator.of(context, rootNavigator: false).pop();
+            setState(() => isActionOverlayVisible = false);
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to delete message')));
+          }
         }
       },
       onBlock: () async {
@@ -722,7 +794,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
       },
       onEdit: () async {
         if (isMe) {
-          await Navigator.pushNamed(context, '/editMessage', arguments: {'message': message, 'chatId': widget.chatId});
+          await Navigator.pushNamed(context, '/editMessage', arguments: {'message': message, 'chatId': widget.chatId, 'isGroup': true});
         } else if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cannot edit others\' messages')));
         }
@@ -863,9 +935,32 @@ class _GroupChatScreenState extends State<GroupChatScreen>
     );
   }
 
+  // Measure typing area height and update notifier
+  void _updateTypingHeight() {
+    if (_isDisposed) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_isDisposed) return;
+      try {
+        final ctx = _typingKey.currentContext;
+        if (ctx == null) return;
+        final box = ctx.findRenderObject() as RenderBox?;
+        if (box == null || !box.hasSize) return;
+        final double newHeight = box.size.height;
+        if ((_typingHeightNotifier.value - newHeight).abs() > 0.5) {
+          _typingHeightNotifier.value = newHeight;
+        }
+      } catch (e) {
+        // ignore measurement errors
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
+
+    // schedule typing area measurement
+    _updateTypingHeight();
 
     return PresenceWrapper(
       userId: widget.currentUser['id'],
@@ -878,6 +973,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
         appBar: PreferredSize(
           preferredSize: const Size.fromHeight(kToolbarHeight),
           child: ValueListenableBuilder<Map<String, dynamic>?>(
+
             valueListenable: _groupDataNotifier,
             builder: (context, groupData, _) {
               return GroupChatAppBar(
@@ -936,30 +1032,41 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                         // and only the pinned bottom typing area animates when the keyboard opens.
                         child: Stack(
                           children: [
-                            // Messages: fill the available space (won't be relaid out on keyboard)
-                            Positioned.fill(
-                              child: GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onTap: () {
-                                  // dismiss keyboard when tapping messages area
-                                  FocusScope.of(context).unfocus();
-                                },
-                                // add top padding so messages are not covered by the members bar overlay
-                                child: Padding(
-                                  padding: const EdgeInsets.only(top: 80.0), // match members bar height + spacing
-                                  child: RepaintBoundary(
-                                    child: _GroupMessagesWrapper(
-                                      groupId: widget.chatId,
-                                      currentUser: widget.currentUser,
-                                      groupMembersNotifier: _groupMembersNotifier,
-                                      replyingToNotifier: _replyingToNotifier,
-                                      onMessageLongPressed: _showMessageActions,
-                                      onCancelReply: _onCancelReply,
-                                      onReplyToMessage: _onReplyToMessage, // forward taps from list to set reply target
+                            // Messages: dynamic bottom offset so messages never underlap typing area.
+                            ValueListenableBuilder<double>(
+                              valueListenable: _typingHeightNotifier,
+                              builder: (context, typingHeight, _) {
+                                final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+                                final messagesBottom = typingHeight + bottomInset;
+                                return Positioned(
+                                  top: 0,
+                                  left: 0,
+                                  right: 0,
+                                  bottom: messagesBottom,
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: () {
+                                      // dismiss keyboard when tapping messages area
+                                      FocusScope.of(context).unfocus();
+                                    },
+                                    // add top padding so messages are not covered by the members bar overlay
+                                    child: Padding(
+                                      padding: const EdgeInsets.only(top: 80.0),
+                                      child: RepaintBoundary(
+                                        child: _GroupMessagesWrapper(
+                                          groupId: widget.chatId,
+                                          currentUser: widget.currentUser,
+                                          groupMembersNotifier: _groupMembersNotifier,
+                                          replyingToNotifier: _replyingToNotifier,
+                                          onMessageLongPressed: _showMessageActions,
+                                          onCancelReply: _onCancelReply,
+                                          onReplyToMessage: _onReplyToMessage,
+                                        ),
+                                      ),
                                     ),
                                   ),
-                                ),
-                              ),
+                                );
+                              },
                             ),
 
                             // MEMBERS BAR: placed at the top INSIDE the container and slides horizontally
@@ -984,7 +1091,7 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                               ),
                             ),
 
-                            // Pinned bottom: typing area animate only bottom inset
+                            // Pinned bottom: typing area animate only bottom inset, measure with _typingKey
                             Positioned(
                               left: 0,
                               right: 0,
@@ -993,24 +1100,19 @@ class _GroupChatScreenState extends State<GroupChatScreen>
                                 padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
                                 duration: const Duration(milliseconds: 160),
                                 curve: Curves.easeOut,
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    // Typing area wrapper
-                                    Container(
-                                      color: Colors.black.withOpacity(0.55),
-                                      child: _GroupTypingAreaWrapper(
-                                        replyingToNotifier: _replyingToNotifier,
-                                        onSendMessage: sendMessage,
-                                        onSendFile: sendFile,
-                                        onSendAudio: sendAudio,
-                                        onCancelReply: _onCancelReply,
-                                        accentColor: widget.accentColor,
-                                        currentUser: widget.currentUser,
-                                        groupMembersNotifier: _groupMembersNotifier,
-                                      ),
-                                    ),
-                                  ],
+                                child: Container(
+                                  key: _typingKey, // measure this container's height
+                                  color: Colors.black.withOpacity(0.55),
+                                  child: _GroupTypingAreaWrapper(
+                                    replyingToNotifier: _replyingToNotifier,
+                                    onSendMessage: sendMessage,
+                                    onSendFile: sendFile,
+                                    onSendAudio: sendAudio,
+                                    onCancelReply: _onCancelReply,
+                                    accentColor: widget.accentColor,
+                                    currentUser: widget.currentUser,
+                                    groupMembersNotifier: _groupMembersNotifier,
+                                  ),
                                 ),
                               ),
                             ),
@@ -1026,6 +1128,57 @@ class _GroupChatScreenState extends State<GroupChatScreen>
         ),
       ),
     );
+  }
+
+  /// ---------------------------
+  /// Repair helpers (for message deletion)
+  /// ---------------------------
+
+  /// After a user deletes a message for themselves, recompute the group's parent doc lastMessage
+  /// to the latest message not deleted for this user.
+  Future<void> _repairGroupParentDocAfterMessageDeletion({required String currentUserId}) async {
+    try {
+      final chatRef = FirebaseFirestore.instance.collection('groups').doc(widget.chatId);
+      // Fetch recent messages (limit 50) to find the newest one not deleted for this user
+      final snap = await FirebaseFirestore.instance
+          .collection('groups')
+          .doc(widget.chatId)
+          .collection('messages')
+          .orderBy('timestamp', descending: true)
+          .limit(50)
+          .get();
+
+      final raw = snap.docs.map((d) {
+        final m = Map<String, dynamic>.from(d.data() as Map<String, dynamic>);
+        m['id'] = d.id;
+        return m;
+      }).toList();
+
+      // Use compute to find the first visible message (off the UI thread)
+      final payload = {'raw': raw, 'currentId': currentUserId};
+      final visible = await compute(_findFirstVisibleMessageForUser, payload);
+
+      // Update parent doc transactionally
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final parentSnap = await tx.get(chatRef);
+        if (visible != null) {
+          final tsRaw = visible['timestamp'];
+          final tsValue = tsRaw is Timestamp ? tsRaw : FieldValue.serverTimestamp();
+          tx.set(chatRef, {
+            'lastMessage': visible['text'] ?? '',
+            'timestamp': tsValue,
+          }, SetOptions(merge: true));
+        } else {
+          tx.set(chatRef, {
+            'lastMessage': '',
+            'timestamp': FieldValue.serverTimestamp(),
+            'unreadBy': [],
+          }, SetOptions(merge: true));
+        }
+      });
+    } catch (e, st) {
+      debugPrint('_repairGroupParentDocAfterMessageDeletion failed: $e\n$st');
+    }
   }
 }
 
@@ -1184,7 +1337,7 @@ class _GroupMembersBar extends StatelessWidget {
         valueListenable: groupMembersNotifier,
         builder: (context, members, _) {
           final showMembers = members.isNotEmpty;
-          final count = members.isNotEmpty ? (members.length > 20 ? members.length : members.length) : 0;
+          final count = members.isNotEmpty ? (members.length > 20 ? 20 : members.length) : 0;
 
           return Row(
             children: [
@@ -1197,7 +1350,7 @@ class _GroupMembersBar extends StatelessWidget {
                       physics: const BouncingScrollPhysics(),
                       itemCount: count + 1, // +1 for trailing group icon
                       itemBuilder: (context, index) {
-                        if (index < members.length) {
+                        if (index < members.length && index < 20) {
                           final member = members[index];
                           final avatarUrl = (member['avatarUrl'] as String?) ?? '';
                           return Padding(

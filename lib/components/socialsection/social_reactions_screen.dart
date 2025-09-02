@@ -43,6 +43,7 @@ import 'chatutils.dart' as chatUtils;
 import 'package:share_plus/share_plus.dart';
 import 'package:movie_app/components/watch_party_screen.dart';
 import 'post_review_screen.dart';
+import 'polls_section.dart';
 import 'algo.dart';
 
 // Import the stories components you asked for
@@ -164,7 +165,8 @@ class _SimpleVideoPlayerState extends State<SimpleVideoPlayer>
   Widget build(BuildContext context) {
     super.build(context);
     final height =
-        (widget.height ?? (MediaQuery.of(context).size.width * 9 / 16)).clamp(160.0, 420.0);
+        (widget.height ?? (MediaQuery.of(context).size.width * 9 / 16))
+            .clamp(160.0, 420.0);
     return GestureDetector(
       onTap: widget.onTap ?? _togglePlay,
       child: AnimatedContainer(
@@ -185,7 +187,8 @@ class _SimpleVideoPlayerState extends State<SimpleVideoPlayer>
                 child: const Center(child: CircularProgressIndicator()),
               ),
             if (!_isPlaying && _initialized)
-              const Icon(Icons.play_circle_outline, color: Colors.white70, size: 48),
+              const Icon(Icons.play_circle_outline,
+                  color: Colors.white70, size: 48),
           ],
         ),
       ),
@@ -204,7 +207,8 @@ class FeedProvider with ChangeNotifier {
   // local cache for quick UI access
   final Map<String, Map<String, dynamic>> _postCache = {};
 
-  FeedProvider({int postsPerPage = _kPostsPerPage}) : _postsPerPage = postsPerPage;
+  FeedProvider({int postsPerPage = _kPostsPerPage})
+      : _postsPerPage = postsPerPage;
 
   List<Map<String, dynamic>> get feedPosts => _feedPosts;
   bool get isLoading => _isLoading;
@@ -238,19 +242,29 @@ class FeedProvider with ChangeNotifier {
             'user': (data['user'] ?? '').toString(),
             'post': (data['post'] ?? '').toString(),
             'type': (data['type'] ?? '').toString(),
-            'likedBy': (data['likedBy'] as List?)?.where((i) => i != null).map((i) => i.toString()).toList() ?? <String>[],
+            'likedBy': (data['likedBy'] as List?)
+                    ?.where((i) => i != null)
+                    .map((i) => i.toString())
+                    .toList() ??
+                <String>[],
             'title': (data['title'] ?? '').toString(),
             'season': (data['season'] ?? '').toString(),
             'episode': (data['episode'] ?? '').toString(),
             'media': (data['media'] ?? '').toString(),
             'mediaType': (data['mediaType'] ?? '').toString(),
-            'timestamp': data['timestamp']?.toString() ?? DateTime.now().toIso8601String(),
+            'timestamp': data['timestamp']?.toString() ??
+                DateTime.now().toIso8601String(),
             'userId': (data['userId'] ?? '').toString(),
-            'retweetCount': (data['retweetCount'] is int) ? data['retweetCount'] as int : 0,
-            'commentsCount': (data['commentsCount'] is int) ? data['commentsCount'] as int : 0,
+            'retweetCount':
+                (data['retweetCount'] is int) ? data['retweetCount'] as int : 0,
+            'commentsCount': (data['commentsCount'] is int)
+                ? data['commentsCount'] as int
+                : 0,
             'views': (data['views'] is int) ? data['views'] as int : 0,
             'tags': data['tags'] ?? [],
-            'followerCount': (data['followerCount'] is int) ? data['followerCount'] as int : 0,
+            'followerCount': (data['followerCount'] is int)
+                ? data['followerCount'] as int
+                : 0,
             'originalPostId': (data['originalPostId'] ?? '').toString(),
           };
           _postCache[doc.id] = item;
@@ -261,7 +275,8 @@ class FeedProvider with ChangeNotifier {
           _feedPosts.clear();
           _lastDocument = snapshot.docs.isNotEmpty ? snapshot.docs.last : null;
         } else {
-          _lastDocument = snapshot.docs.isNotEmpty ? snapshot.docs.last : _lastDocument;
+          _lastDocument =
+              snapshot.docs.isNotEmpty ? snapshot.docs.last : _lastDocument;
         }
 
         _feedPosts.addAll(newPosts);
@@ -344,12 +359,16 @@ class _PostCardWidgetState extends State<PostCardWidget> {
   @override
   void initState() {
     super.initState();
-    likedBy = (widget.post['likedBy'] as List?)?.map((e) => e.toString()).toList() ?? <String>[];
+    likedBy =
+        (widget.post['likedBy'] as List?)?.map((e) => e.toString()).toList() ??
+            <String>[];
     final currentUserId = (widget.currentUser?['id'] as String?) ?? '';
     isLiked = likedBy.contains(currentUserId);
     final userId = (widget.post['userId'] as String?) ?? '';
-    final userRecord = widget.users.firstWhere((u) => (u['id'] as String?) == userId,
-        orElse: () => {'username': widget.post['user'] ?? 'Unknown', 'avatar': ''});
+    final userRecord = widget.users.firstWhere(
+        (u) => (u['id'] as String?) == userId,
+        orElse: () =>
+            {'username': widget.post['user'] ?? 'Unknown', 'avatar': ''});
     _username = (userRecord['username'] as String?) ?? 'Unknown';
     _avatarUrl = (userRecord['avatar'] as String?) ?? '';
     _muted = widget.muted;
@@ -359,7 +378,9 @@ class _PostCardWidgetState extends State<PostCardWidget> {
     setState(() => _muted = !_muted);
     try {
       await widget.onToggleMute(widget.post['userId']?.toString() ?? '');
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_muted ? 'User muted' : 'User unmuted')));
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(_muted ? 'User muted' : 'User unmuted')));
     } catch (e) {
       debugPrint('mute error: $e');
       setState(() => _muted = !_muted); // revert on failure
@@ -397,10 +418,14 @@ class _PostCardWidgetState extends State<PostCardWidget> {
     setState(() => _saving = true);
     try {
       await widget.onSave(widget.post);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved')));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Saved')));
     } catch (e) {
       debugPrint('save failed: $e');
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Save failed: $e')));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Save failed: $e')));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -435,7 +460,8 @@ class _PostCardWidgetState extends State<PostCardWidget> {
 
     // display height based on screen height: make feed media occupy ~70% of screen height
     final screenHeight = MediaQuery.of(context).size.height;
-    final imageHeight = ((screenHeight * 0.70).clamp(160.0, screenHeight * 0.85));
+    final imageHeight =
+        ((screenHeight * 0.70).clamp(160.0, screenHeight * 0.85));
 
     final borderRadius = BorderRadius.circular(14.0);
 
@@ -456,7 +482,12 @@ class _PostCardWidgetState extends State<PostCardWidget> {
       color: Colors.white.withOpacity(0.03),
       borderRadius: borderRadius,
       border: Border.all(color: widget.accentColor.withOpacity(0.10)),
-      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.28), blurRadius: 10, offset: const Offset(0, 6))],
+      boxShadow: [
+        BoxShadow(
+            color: Colors.black.withOpacity(0.28),
+            blurRadius: 10,
+            offset: const Offset(0, 6))
+      ],
     );
 
     return RepaintBoundary(
@@ -474,57 +505,105 @@ class _PostCardWidgetState extends State<PostCardWidget> {
                 children: [
                   // header
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
                     child: Row(
                       children: [
                         CircleAvatar(
                           radius: 20,
                           backgroundColor: widget.accentColor,
-                          backgroundImage: _avatarUrl.isNotEmpty ? CachedNetworkImageProvider(_avatarUrl) : null,
+                          backgroundImage: _avatarUrl.isNotEmpty
+                              ? CachedNetworkImageProvider(_avatarUrl)
+                              : null,
                           child: _avatarUrl.isEmpty
-                              ? Text(_username.isNotEmpty ? _username[0].toUpperCase() : '?', style: const TextStyle(color: Colors.white))
+                              ? Text(
+                                  _username.isNotEmpty
+                                      ? _username[0].toUpperCase()
+                                      : '?',
+                                  style: const TextStyle(color: Colors.white))
                               : null,
                         ),
                         const SizedBox(width: 10),
                         Expanded(
-                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Text(_username, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
-                            const SizedBox(height: 2),
-                            Text(_friendlyTimeString(post['timestamp']?.toString() ?? DateTime.now().toIso8601String()),
-                                style: TextStyle(color: Colors.white70, fontSize: 12)),
-                          ]),
+                          child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(_username,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w700)),
+                                const SizedBox(height: 2),
+                                Text(
+                                    _friendlyTimeString(
+                                        post['timestamp']?.toString() ??
+                                            DateTime.now().toIso8601String()),
+                                    style: TextStyle(
+                                        color: Colors.white70, fontSize: 12)),
+                              ]),
                         ),
                         // Follow / mute small actions
                         IconButton(
-                          icon: const Icon(Icons.more_horiz, color: Colors.white70),
+                          icon: const Icon(Icons.more_horiz,
+                              color: Colors.white70),
                           onPressed: () async {
-                            showModalBottomSheet(context: context, backgroundColor: Colors.grey[900], builder: (ctx) {
-                              return SafeArea(
-                                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                                  ListTile(
-                                      leading: const Icon(Icons.person_add, color: Colors.white),
-                                      title: const Text('Follow/Unfollow', style: TextStyle(color: Colors.white)),
-                                      onTap: () {
-                                        Navigator.pop(ctx);
-                                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Toggled follow for $_username')));
-                                      }),
-                                  ListTile(
-                                      leading: Icon(_muted ? Icons.volume_off : Icons.volume_up, color: Colors.white),
-                                      title: Text(_muted ? 'Unmute user' : 'Mute user', style: const TextStyle(color: Colors.white)),
-                                      onTap: () {
-                                        Navigator.pop(ctx);
-                                        _toggleMuteLocal();
-                                      }),
-                                  ListTile(
-                                      leading: const Icon(Icons.report, color: Colors.white),
-                                      title: const Text('Report', style: TextStyle(color: Colors.white)),
-                                      onTap: () {
-                                        Navigator.pop(ctx);
-                                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Reported')));
-                                      }),
-                                ]),
-                              );
-                            });
+                            showModalBottomSheet(
+                                context: context,
+                                backgroundColor: Colors.grey[900],
+                                builder: (ctx) {
+                                  return SafeArea(
+                                    child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          ListTile(
+                                              leading: const Icon(
+                                                  Icons.person_add,
+                                                  color: Colors.white),
+                                              title: const Text(
+                                                  'Follow/Unfollow',
+                                                  style: TextStyle(
+                                                      color: Colors.white)),
+                                              onTap: () {
+                                                Navigator.pop(ctx);
+                                                ScaffoldMessenger.of(context)
+                                                    .showSnackBar(SnackBar(
+                                                        content: Text(
+                                                            'Toggled follow for $_username')));
+                                              }),
+                                          ListTile(
+                                              leading: Icon(
+                                                  _muted
+                                                      ? Icons.volume_off
+                                                      : Icons.volume_up,
+                                                  color: Colors.white),
+                                              title: Text(
+                                                  _muted
+                                                      ? 'Unmute user'
+                                                      : 'Mute user',
+                                                  style: const TextStyle(
+                                                      color: Colors.white)),
+                                              onTap: () {
+                                                Navigator.pop(ctx);
+                                                _toggleMuteLocal();
+                                              }),
+                                          ListTile(
+                                              leading: const Icon(Icons.report,
+                                                  color: Colors.white),
+                                              title: const Text('Report',
+                                                  style: TextStyle(
+                                                      color: Colors.white)),
+                                              onTap: () {
+                                                Navigator.pop(ctx);
+                                                ScaffoldMessenger.of(context)
+                                                    .showSnackBar(
+                                                        const SnackBar(
+                                                            content: Text(
+                                                                'Reported')));
+                                              }),
+                                        ]),
+                                  );
+                                });
                           },
                         ),
                       ],
@@ -536,11 +615,13 @@ class _PostCardWidgetState extends State<PostCardWidget> {
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       child: ConstrainedBox(
-                        constraints: BoxConstraints(maxHeight: imageHeight, minHeight: 120),
+                        constraints: BoxConstraints(
+                            maxHeight: imageHeight, minHeight: 120),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(10),
                           child: Builder(builder: (context) {
-                            if (mediaType == 'photo' && isValidImageUrl(media)) {
+                            if (mediaType == 'photo' &&
+                                isValidImageUrl(media)) {
                               return CachedNetworkImage(
                                 imageUrl: media,
                                 fit: BoxFit.cover,
@@ -552,11 +633,13 @@ class _PostCardWidgetState extends State<PostCardWidget> {
                                   height: imageHeight,
                                   child: const CircularProgressIndicator(),
                                 ),
-                                fadeInDuration: const Duration(milliseconds: 300),
+                                fadeInDuration:
+                                    const Duration(milliseconds: 300),
                                 errorWidget: (c, url, err) => Container(
                                   color: Colors.grey[800],
                                   height: imageHeight,
-                                  child: const Icon(Icons.broken_image, size: 40),
+                                  child:
+                                      const Icon(Icons.broken_image, size: 40),
                                 ),
                               );
                             } else if (mediaType == 'video') {
@@ -568,19 +651,41 @@ class _PostCardWidgetState extends State<PostCardWidget> {
                                   autoPlay: false,
                                   onTap: () {
                                     final videoPosts = widget.allPosts
-                                        .where((p) => (p['mediaType'] as String?) == 'video' && (p['media'] as String?)!.isNotEmpty)
-                                        .map((p) => Reel(videoUrl: (p['media'] as String?) ?? '', movieTitle: (p['title'] as String?) ?? 'Video', movieDescription: (p['post'] as String?) ?? ''))
+                                        .where((p) =>
+                                            (p['mediaType'] as String?) ==
+                                                'video' &&
+                                            (p['media'] as String?)!.isNotEmpty)
+                                        .map((p) => Reel(
+                                            videoUrl:
+                                                (p['media'] as String?) ?? '',
+                                            movieTitle:
+                                                (p['title'] as String?) ??
+                                                    'Video',
+                                            movieDescription:
+                                                (p['post'] as String?) ?? ''))
                                         .toList();
-                                    final idx = videoPosts.indexWhere((r) => r.videoUrl == media);
+                                    final idx = videoPosts
+                                        .indexWhere((r) => r.videoUrl == media);
                                     if (idx != -1) {
-                                      Navigator.push(context, MaterialPageRoute(builder: (_) => FeedReelPlayerScreen(reels: videoPosts, initialIndex: idx)));
+                                      Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                              builder: (_) =>
+                                                  FeedReelPlayerScreen(
+                                                      reels: videoPosts,
+                                                      initialIndex: idx)));
                                     } else {
                                       Navigator.push(
                                           context,
                                           MaterialPageRoute(
-                                              builder: (_) => FeedReelPlayerScreen(
-                                                  reels: [Reel(videoUrl: media, movieTitle: title, movieDescription: message)],
-                                                  initialIndex: 0)));
+                                              builder: (_) =>
+                                                  FeedReelPlayerScreen(reels: [
+                                                    Reel(
+                                                        videoUrl: media,
+                                                        movieTitle: title,
+                                                        movieDescription:
+                                                            message)
+                                                  ], initialIndex: 0)));
                                     }
                                   },
                                 ),
@@ -589,7 +694,8 @@ class _PostCardWidgetState extends State<PostCardWidget> {
                               return Container(
                                 height: imageHeight,
                                 color: Colors.grey[850],
-                                child: const Center(child: Icon(Icons.image, size: 40)),
+                                child: const Center(
+                                    child: Icon(Icons.image, size: 40)),
                               );
                             }
                           }),
@@ -599,51 +705,123 @@ class _PostCardWidgetState extends State<PostCardWidget> {
 
                   // text content
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(message, style: const TextStyle(fontSize: 15, color: Colors.white70)),
-                      const SizedBox(height: 8),
-                      Row(children: [
-                        if (title.isNotEmpty)
-                          Expanded(child: Text('Movie: $title', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white60, fontStyle: FontStyle.italic))),
-                        if (season.isNotEmpty) Padding(padding: const EdgeInsets.only(left: 6.0), child: Text('S:$season', style: const TextStyle(color: Colors.white60, fontStyle: FontStyle.italic))),
-                        if (episode.isNotEmpty) Padding(padding: const EdgeInsets.only(left: 6.0), child: Text('E:$episode', style: const TextStyle(color: Colors.white60, fontStyle: FontStyle.italic))),
-                      ]),
-                    ]),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 12),
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(message,
+                              style: const TextStyle(
+                                  fontSize: 15, color: Colors.white70)),
+                          const SizedBox(height: 8),
+                          Row(children: [
+                            if (title.isNotEmpty)
+                              Expanded(
+                                  child: Text('Movie: $title',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          color: Colors.white60,
+                                          fontStyle: FontStyle.italic))),
+                            if (season.isNotEmpty)
+                              Padding(
+                                  padding: const EdgeInsets.only(left: 6.0),
+                                  child: Text('S:$season',
+                                      style: const TextStyle(
+                                          color: Colors.white60,
+                                          fontStyle: FontStyle.italic))),
+                            if (episode.isNotEmpty)
+                              Padding(
+                                  padding: const EdgeInsets.only(left: 6.0),
+                                  child: Text('E:$episode',
+                                      style: const TextStyle(
+                                          color: Colors.white60,
+                                          fontStyle: FontStyle.italic))),
+                          ]),
+                        ]),
                   ),
 
                   const Divider(color: Colors.white10, height: 1),
 
                   // actions
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8.0, vertical: 6),
                     child: Row(children: [
                       Flexible(
                         child: Row(mainAxisSize: MainAxisSize.min, children: [
                           _FrostedIconButton(
                             onTap: _onLikePressed,
                             child: Row(children: [
-                              Icon(isLiked ? Icons.favorite : Icons.favorite_border, color: isLiked ? Colors.redAccent : Colors.white70, size: 20),
+                              Icon(
+                                  isLiked
+                                      ? Icons.favorite
+                                      : Icons.favorite_border,
+                                  color: isLiked
+                                      ? Colors.redAccent
+                                      : Colors.white70,
+                                  size: 20),
                               const SizedBox(width: 6),
-                              Text(likedBy.length.toString(), style: const TextStyle(color: Colors.white70)),
+                              Text(likedBy.length.toString(),
+                                  style:
+                                      const TextStyle(color: Colors.white70)),
                             ]),
                           ),
                           const SizedBox(width: 8),
-                          _FrostedIconButton(onTap: () => widget.onComment(widget.post), child: Row(children: const [Icon(Icons.comment, color: Colors.white70, size: 20), SizedBox(width: 6), Text('Comment', style: TextStyle(color: Colors.white70))])),
+                          _FrostedIconButton(
+                              onTap: () => widget.onComment(widget.post),
+                              child: Row(children: const [
+                                Icon(Icons.comment,
+                                    color: Colors.white70, size: 20),
+                                SizedBox(width: 6),
+                                Text('Comment',
+                                    style: TextStyle(color: Colors.white70))
+                              ])),
                           const SizedBox(width: 8),
-                          _FrostedIconButton(onTap: () => widget.onWatchParty(widget.post), child: Row(children: const [Icon(Icons.connected_tv, color: Colors.white70, size: 20), SizedBox(width: 6), Text('Watch', style: TextStyle(color: Colors.white70))])),
+                          _FrostedIconButton(
+                              onTap: () => widget.onWatchParty(widget.post),
+                              child: Row(children: const [
+                                Icon(Icons.connected_tv,
+                                    color: Colors.white70, size: 20),
+                                SizedBox(width: 6),
+                                Text('Watch',
+                                    style: TextStyle(color: Colors.white70))
+                              ])),
                         ]),
                       ),
                       const SizedBox(width: 8),
                       Row(mainAxisSize: MainAxisSize.min, children: [
-                        _FrostedIconButton(onTap: () => widget.onRetweet(widget.post), child: Row(children: [const Icon(Icons.repeat, color: Colors.white70, size: 20), const SizedBox(width: 6), Text(retweetCount.toString(), style: const TextStyle(color: Colors.white70))])),
+                        _FrostedIconButton(
+                            onTap: () => widget.onRetweet(widget.post),
+                            child: Row(children: [
+                              const Icon(Icons.repeat,
+                                  color: Colors.white70, size: 20),
+                              const SizedBox(width: 6),
+                              Text(retweetCount.toString(),
+                                  style: const TextStyle(color: Colors.white70))
+                            ])),
                         const SizedBox(width: 8),
-                        _FrostedIconButton(onTap: () => widget.onShare(widget.post), child: const Icon(Icons.share, color: Colors.white70, size: 20)),
+                        _FrostedIconButton(
+                            onTap: () => widget.onShare(widget.post),
+                            child: const Icon(Icons.share,
+                                color: Colors.white70, size: 20)),
                         const SizedBox(width: 8),
-                        _FrostedIconButton(onTap: _onSavePressed, child: _saving ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.bookmark_border, color: Colors.white70, size: 20)),
+                        _FrostedIconButton(
+                            onTap: _onSavePressed,
+                            child: _saving
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2))
+                                : const Icon(Icons.bookmark_border,
+                                    color: Colors.white70, size: 20)),
                         if (userId == currentUserId) ...[
                           const SizedBox(width: 8),
-                          _FrostedIconButton(onTap: () => widget.onDelete(id), child: const Icon(Icons.delete, color: Colors.redAccent, size: 20)),
+                          _FrostedIconButton(
+                              onTap: () => widget.onDelete(id),
+                              child: const Icon(Icons.delete,
+                                  color: Colors.redAccent, size: 20)),
                         ],
                       ]),
                     ]),
@@ -724,7 +902,8 @@ class _SocialReactionsScreen extends StatefulWidget {
   State<_SocialReactionsScreen> createState() => _SocialReactionsScreenState();
 }
 
-class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with WidgetsBindingObserver {
+class _SocialReactionsScreenState extends State<_SocialReactionsScreen>
+    with WidgetsBindingObserver {
   int _selectedIndex = 0;
   List<Map<String, dynamic>> _users = [];
   final List<String> _notifications = [];
@@ -777,7 +956,10 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
 
     // pagination trigger (small threshold)
     final feed = Provider.of<FeedProvider>(context, listen: false);
-    if (_mainScrollController.position.pixels >= _mainScrollController.position.maxScrollExtent - 120 && !feed.isLoading && feed.hasMorePosts) {
+    if (_mainScrollController.position.pixels >=
+            _mainScrollController.position.maxScrollExtent - 120 &&
+        !feed.isLoading &&
+        feed.hasMorePosts) {
       feed.fetchPosts();
     }
   }
@@ -799,11 +981,14 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
         _loadUsers(),
         _loadUserData(),
       ]);
-      await Provider.of<FeedProvider>(context, listen: false).fetchPosts(isRefresh: true);
+      await Provider.of<FeedProvider>(context, listen: false)
+          .fetchPosts(isRefresh: true);
       _refreshRankedCache();
     } catch (e) {
       debugPrint('Error initializing social screen: $e');
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to initialize: $e')));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Failed to initialize: $e')));
     }
   }
 
@@ -846,7 +1031,10 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
     try {
       final current = FirebaseAuth.instance.currentUser;
       if (current == null) throw Exception('No current user');
-      final doc = await FirebaseFirestore.instance.collection('users').doc(current.uid).get();
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(current.uid)
+          .get();
       if (!doc.exists) throw Exception('No user document');
       final data = Map<String, dynamic>.from(doc.data() ?? {});
       data['id'] = doc.id;
@@ -858,20 +1046,24 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
       debugPrint('Error loading user data: $e');
       if (mounted) {
         setState(() => _currentUser = null);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error loading profile: $e')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error loading profile: $e')));
       }
     }
   }
 
   Future<void> _loadUsers() async {
     try {
-      final snapshot = await FirebaseFirestore.instance.collection('users').get();
+      final snapshot =
+          await FirebaseFirestore.instance.collection('users').get();
       final rawUsers = snapshot.docs.map((d) {
         final m = Map<String, dynamic>.from(d.data());
         m['id'] = d.id;
         return m;
       }).toList();
-      _users = rawUsers.map((u) => _normalizeUserData(Map<String, dynamic>.from(u))).toList();
+      _users = rawUsers
+          .map((u) => _normalizeUserData(Map<String, dynamic>.from(u)))
+          .toList();
       if (mounted) setState(() {});
     } catch (e) {
       debugPrint('Error loading users: $e');
@@ -899,13 +1091,15 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
       }
     } else {
       final picker = ImagePicker();
-      if (type == 'photo') return await picker.pickImage(source: ImageSource.gallery);
+      if (type == 'photo')
+        return await picker.pickImage(source: ImageSource.gallery);
       return await picker.pickVideo(source: ImageSource.gallery);
     }
     return null;
   }
 
-  Future<String> uploadMedia(dynamic mediaFile, String type, BuildContext context) async {
+  Future<String> uploadMedia(
+      dynamic mediaFile, String type, BuildContext context) async {
     try {
       final mediaId = const Uuid().v4();
       String filePath;
@@ -913,8 +1107,10 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
       if (kIsWeb) {
         if (mediaFile is html.File) {
           final fileSizeInBytes = mediaFile.size;
-          if (type == 'photo' && fileSizeInBytes > 5 * 1024 * 1024) throw Exception('Image too large, max 5MB');
-          if (type == 'video' && fileSizeInBytes > 20 * 1024 * 1024) throw Exception('Video too large, max 20MB');
+          if (type == 'photo' && fileSizeInBytes > 5 * 1024 * 1024)
+            throw Exception('Image too large, max 5MB');
+          if (type == 'video' && fileSizeInBytes > 20 * 1024 * 1024)
+            throw Exception('Video too large, max 20MB');
           final extension = mediaFile.name.split('.').last.toLowerCase();
           filePath = 'media/$mediaId.$extension';
           contentType = mediaFile.type;
@@ -922,7 +1118,8 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
           reader.readAsArrayBuffer(mediaFile);
           await reader.onLoad.first;
           final bytes = reader.result as Uint8List;
-          await _supabase.storage.from('feeds').uploadBinary(filePath, bytes, fileOptions: FileOptions(contentType: contentType));
+          await _supabase.storage.from('feeds').uploadBinary(filePath, bytes,
+              fileOptions: FileOptions(contentType: contentType));
         } else {
           throw Exception('Invalid web file');
         }
@@ -930,12 +1127,15 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
         if (mediaFile is XFile) {
           final file = File(mediaFile.path);
           final fileSizeInBytes = await file.length();
-          if (type == 'photo' && fileSizeInBytes > 5 * 1024 * 1024) throw Exception('Image too large, max 5MB');
-          if (type == 'video' && fileSizeInBytes > 20 * 1024 * 1024) throw Exception('Video too large, max 20MB');
+          if (type == 'photo' && fileSizeInBytes > 5 * 1024 * 1024)
+            throw Exception('Image too large, max 5MB');
+          if (type == 'video' && fileSizeInBytes > 20 * 1024 * 1024)
+            throw Exception('Video too large, max 20MB');
           final extension = p.extension(mediaFile.path).replaceFirst('.', '');
           filePath = 'media/$mediaId.$extension';
           contentType = _getMimeType(extension);
-          await _supabase.storage.from('feeds').upload(filePath, file, fileOptions: FileOptions(contentType: contentType));
+          await _supabase.storage.from('feeds').upload(filePath, file,
+              fileOptions: FileOptions(contentType: contentType));
         } else {
           throw Exception('Invalid file type');
         }
@@ -945,7 +1145,9 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
       return url.isNotEmpty ? url : 'https://via.placeholder.com/150';
     } catch (e) {
       debugPrint('upload error: $e');
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error uploading media: $e')));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error uploading media: $e')));
       return 'https://via.placeholder.com/150';
     }
   }
@@ -967,21 +1169,40 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
   Future<void> _postStory() async {
     final choice = await showModalBottomSheet<String>(
       context: context,
-      builder: (context) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
-        ListTile(leading: const Icon(Icons.photo, color: Colors.white), title: const Text("Upload Photo", style: TextStyle(color: Colors.white)), onTap: () => Navigator.pop(context, 'photo')),
-        ListTile(leading: const Icon(Icons.videocam, color: Colors.white), title: const Text("Upload Video", style: TextStyle(color: Colors.white)), onTap: () => Navigator.pop(context, 'video')),
+      builder: (context) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+        ListTile(
+            leading: const Icon(Icons.photo, color: Colors.white),
+            title: const Text("Upload Photo",
+                style: TextStyle(color: Colors.white)),
+            onTap: () => Navigator.pop(context, 'photo')),
+        ListTile(
+            leading: const Icon(Icons.videocam, color: Colors.white),
+            title: const Text("Upload Video",
+                style: TextStyle(color: Colors.white)),
+            onTap: () => Navigator.pop(context, 'video')),
       ])),
     );
     if (choice == null || !mounted) return;
     final pickedFile = await pickFile(choice);
     if (pickedFile == null) return;
 
-    showDialog(context: context, barrierDismissible: false, builder: (_) => const AlertDialog(content: Row(children: [CircularProgressIndicator(), SizedBox(width: 12), Text('Uploading...')])));
+    showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const AlertDialog(
+                content: Row(children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 12),
+              Text('Uploading...')
+            ])));
 
     try {
       final uploadedUrl = await uploadMedia(pickedFile, choice, context);
       if (!mounted) return;
-      if (uploadedUrl.isEmpty || uploadedUrl == 'https://via.placeholder.com/150') throw Exception('Upload failed');
+      if (uploadedUrl.isEmpty ||
+          uploadedUrl == 'https://via.placeholder.com/150')
+        throw Exception('Upload failed');
 
       final story = {
         'user': _currentUser?['username'] ?? 'User',
@@ -990,7 +1211,11 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
         'type': choice,
         'timestamp': DateTime.now().toIso8601String(),
       };
-      final docRef = await FirebaseFirestore.instance.collection('users').doc(_currentUser?['id']?.toString()).collection('stories').add(story);
+      final docRef = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(_currentUser?['id']?.toString())
+          .collection('stories')
+          .add(story);
       story['id'] = docRef.id;
       await FirebaseFirestore.instance.collection('stories').add(story);
 
@@ -1010,7 +1235,9 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
       await _saveLocalData();
     } catch (e) {
       debugPrint('postStory error: $e');
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to post story: $e')));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Failed to post story: $e')));
     } finally {
       if (mounted) Navigator.pop(context);
     }
@@ -1018,17 +1245,27 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
 
   Future<void> _postMovieReview() async {
     if (_currentUser == null) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User data not loaded')));
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('User data not loaded')));
       return;
     }
 
-    Navigator.push(context, MaterialPageRoute(builder: (_) => PostReviewScreen(accentColor: widget.accentColor, currentUser: _currentUser)));
+    Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => PostReviewScreen(
+                accentColor: widget.accentColor, currentUser: _currentUser)));
   }
 
   // Ranking helpers (unchanged)
   List<Map<String, dynamic>> _rankAndApply(List<Map<String, dynamic>> posts) {
     try {
-      final ranked = Algo.rankPosts(posts, currentUser: _currentUser, recentlySeenTags: _recentlySeenTags, mode: _feedMode, seed: DateTime.now().millisecondsSinceEpoch % 100000);
+      final ranked = Algo.rankPosts(posts,
+          currentUser: _currentUser,
+          recentlySeenTags: _recentlySeenTags,
+          mode: _feedMode,
+          seed: DateTime.now().millisecondsSinceEpoch % 100000);
       return ranked;
     } catch (e) {
       debugPrint('Ranking error: $e');
@@ -1036,9 +1273,12 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
     }
   }
 
-  List<Map<String, dynamic>> _getCachedRanked(List<Map<String, dynamic>> source) {
+  List<Map<String, dynamic>> _getCachedRanked(
+      List<Map<String, dynamic>> source) {
     try {
-      final sourceId = source.map((p) => (p['id'] ?? '').toString()).join('|').hashCode ^ _feedMode.hashCode;
+      final sourceId =
+          source.map((p) => (p['id'] ?? '').toString()).join('|').hashCode ^
+              _feedMode.hashCode;
       if (_cachedRankedPosts == null || _cachedForSourceId != sourceId) {
         final newRanked = _rankAndApply(source);
         _cachedRankedPosts = newRanked;
@@ -1054,7 +1294,11 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
   void _refreshRankedCache() {
     final feed = Provider.of<FeedProvider>(context, listen: false);
     _cachedRankedPosts = _rankAndApply(feed.feedPosts);
-    _cachedForSourceId = feed.feedPosts.map((p) => (p['id'] ?? '').toString()).join('|').hashCode ^ _feedMode.hashCode;
+    _cachedForSourceId = feed.feedPosts
+            .map((p) => (p['id'] ?? '').toString())
+            .join('|')
+            .hashCode ^
+        _feedMode.hashCode;
   }
 
   // Toggle mute helper (centralized)
@@ -1095,10 +1339,11 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
               duration: const Duration(milliseconds: 200),
               opacity: _showStories ? 1.0 : 0.0,
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 10),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8.0, vertical: 10),
                 child:
-                // Use StoriesRow's built-in navigation/grouping behavior:
-                StoriesRow(
+                    // Use StoriesRow's built-in navigation/grouping behavior:
+                    StoriesRow(
                   stories: storiesForRow,
                   currentUserAvatar: _currentUser?['avatar']?.toString(),
                   // Give the StoriesRow the full current user map so it can navigate to PostStoryScreen
@@ -1115,12 +1360,17 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
         ),
 
         // Post Movie Review button (kept visible even when stories are hidden)
-        Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor, minimumSize: const Size(double.infinity, 48)),
-          onPressed: _postMovieReview,
-          icon: const Icon(Icons.rate_review, size: 20),
-          label: const Text('Post Movie Review', style: TextStyle(fontSize: 16)),
-        )),
+        Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: widget.accentColor,
+                  minimumSize: const Size(double.infinity, 48)),
+              onPressed: _postMovieReview,
+              icon: const Icon(Icons.rate_review, size: 20),
+              label: const Text('Post Movie Review',
+                  style: TextStyle(fontSize: 16)),
+            )),
 
         Expanded(
           child: RefreshIndicator(
@@ -1132,28 +1382,43 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
               key: _feedKey,
               controller: _mainScrollController,
               slivers: [
-                SliverList(delegate: SliverChildBuilderDelegate((context, index) {
+                SliverList(
+                    delegate: SliverChildBuilderDelegate((context, index) {
                   if (index >= rankedPosts.length) {
-                    return feedProvider.hasMorePosts ? const Padding(padding: EdgeInsets.all(12), child: Center(child: CircularProgressIndicator())) : const SizedBox.shrink();
+                    return feedProvider.hasMorePosts
+                        ? const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: Center(child: CircularProgressIndicator()))
+                        : const SizedBox.shrink();
                   }
                   final item = rankedPosts[index];
 
                   // QUICK check for muted users using cached set (no FutureBuilder)
-                  final isMuted = _mutedUsers.contains((item['userId'] ?? '').toString());
+                  final isMuted =
+                      _mutedUsers.contains((item['userId'] ?? '').toString());
                   if (isMuted) {
                     // show a placeholder for muted content with an unmute button
                     return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 12),
+                      padding: const EdgeInsets.symmetric(
+                          vertical: 8.0, horizontal: 12),
                       child: Container(
                         padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(12)),
+                        decoration: BoxDecoration(
+                            color: Colors.white10,
+                            borderRadius: BorderRadius.circular(12)),
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Expanded(child: Text('Muted content', style: TextStyle(color: Colors.white.withOpacity(0.8)))),
-                            TextButton(onPressed: () async {
-                              await _toggleMuteForUser((item['userId'] ?? '').toString());
-                            }, child: const Text('Unmute'))
+                            Expanded(
+                                child: Text('Muted content',
+                                    style: TextStyle(
+                                        color: Colors.white.withOpacity(0.8)))),
+                            TextButton(
+                                onPressed: () async {
+                                  await _toggleMuteForUser(
+                                      (item['userId'] ?? '').toString());
+                                },
+                                child: const Text('Unmute'))
                           ],
                         ),
                       ),
@@ -1173,54 +1438,84 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
                     },
                     onDelete: (id) async {
                       try {
-                        await FirebaseFirestore.instance.collection('feeds').doc(id).delete();
+                        await FirebaseFirestore.instance
+                            .collection('feeds')
+                            .doc(id)
+                            .delete();
                         feedProvider.removePost(id);
                         _refreshRankedCache();
                       } catch (e) {
                         debugPrint('delete post error: $e');
-                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to delete post: $e')));
+                        if (mounted)
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                              content: Text('Failed to delete post: $e')));
                       }
                     },
                     onLike: (id, wasLiked) async {
                       try {
-                        final ref = FirebaseFirestore.instance.collection('feeds').doc(id);
+                        final ref = FirebaseFirestore.instance
+                            .collection('feeds')
+                            .doc(id);
                         if (wasLiked) {
-                          await ref.update({'likedBy': FieldValue.arrayRemove([_currentUser?['id'] ?? ''])});
+                          await ref.update({
+                            'likedBy': FieldValue.arrayRemove(
+                                [_currentUser?['id'] ?? ''])
+                          });
                         } else {
-                          await ref.update({'likedBy': FieldValue.arrayUnion([_currentUser?['id'] ?? ''])});
+                          await ref.update({
+                            'likedBy': FieldValue.arrayUnion(
+                                [_currentUser?['id'] ?? ''])
+                          });
                         }
                       } catch (e) {
                         debugPrint('like error: $e');
-                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to like post: $e')));
+                        if (mounted)
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                              content: Text('Failed to like post: $e')));
                       }
                     },
                     onComment: _showComments,
                     onWatchParty: (post) {
-                      Navigator.push(context, MaterialPageRoute(builder: (_) => WatchPartyScreen(post: post)));
+                      Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => WatchPartyScreen(post: post)));
                     },
                     onSend: (post) {
-                      final code = (100000 + Random().nextInt(900000)).toString();
-                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Started Watch Party: Code $code')));
+                      final code =
+                          (100000 + Random().nextInt(900000)).toString();
+                      if (mounted)
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                            content: Text('Started Watch Party: Code $code')));
                       setState(() {
-                        _notifications.add('${_currentUser?['username'] ?? 'User'} started a watch party with code $code');
+                        _notifications.add(
+                            '${_currentUser?['username'] ?? 'User'} started a watch party with code $code');
                       });
                     },
                     onShare: (post) async {
                       try {
-                        final shareText = '${post['post']}\n\nShared from MovieFlix';
-                        if (post['media'] != null && (post['media'] as String).isNotEmpty) {
-                          await Share.share('${post['post']}\n${post['media']}\n\nShared from MovieFlix');
+                        final shareText =
+                            '${post['post']}\n\nShared from MovieFlix';
+                        if (post['media'] != null &&
+                            (post['media'] as String).isNotEmpty) {
+                          await Share.share(
+                              '${post['post']}\n${post['media']}\n\nShared from MovieFlix');
                         } else {
                           await Share.share(shareText);
                         }
                       } catch (e) {
                         debugPrint('share error: $e');
-                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to share: $e')));
+                        if (mounted)
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Failed to share: $e')));
                       }
                     },
                     onRetweet: (post) async {
                       if (_currentUser == null) {
-                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User data not loaded')));
+                        if (mounted)
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('User data not loaded')));
                         return;
                       }
                       try {
@@ -1240,18 +1535,26 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
                           'originalPostId': originalId,
                         };
 
-                        final docRef = await FirebaseFirestore.instance.collection('feeds').add(newPost);
+                        final docRef = await FirebaseFirestore.instance
+                            .collection('feeds')
+                            .add(newPost);
                         newPost['id'] = docRef.id;
                         if (originalId.isNotEmpty) {
-                          final originalRef = FirebaseFirestore.instance.collection('feeds').doc(originalId);
-                          await originalRef.update({'retweetCount': FieldValue.increment(1)});
+                          final originalRef = FirebaseFirestore.instance
+                              .collection('feeds')
+                              .doc(originalId);
+                          await originalRef.update(
+                              {'retweetCount': FieldValue.increment(1)});
                         }
 
-                        Provider.of<FeedProvider>(context, listen: false).addPost(newPost);
+                        Provider.of<FeedProvider>(context, listen: false)
+                            .addPost(newPost);
                         _refreshRankedCache();
                       } catch (e) {
                         debugPrint('retweet error: $e');
-                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to repost: $e')));
+                        if (mounted)
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Failed to repost: $e')));
                       }
                     },
                     onSave: (post) async {
@@ -1266,16 +1569,42 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
                       }
                     },
                   );
-                }, childCount: rankedPosts.length + (feedProvider.hasMorePosts ? 1 : 0))),
-                SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                    const Text('Recommended Movies', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-                    IconButton(icon: Icon(_showRecommendations ? Icons.remove : Icons.add, color: Colors.white), onPressed: () => setState(() => _showRecommendations = !_showRecommendations)),
-                  ]),
-                  Visibility(visible: _showRecommendations, child: const SizedBox(height: 12)),
-                  if (_showRecommendations) const TrendingMoviesWidget(),
-                  const SizedBox(height: 20),
-                ]))),
+                },
+                        childCount: rankedPosts.length +
+                            (feedProvider.hasMorePosts ? 1 : 0))),
+                SliverToBoxAdapter(
+                    child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 12),
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    const Text('Recommended Movies',
+                                        style: TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.white)),
+                                    IconButton(
+                                        icon: Icon(
+                                            _showRecommendations
+                                                ? Icons.remove
+                                                : Icons.add,
+                                            color: Colors.white),
+                                        onPressed: () => setState(() =>
+                                            _showRecommendations =
+                                                !_showRecommendations)),
+                                  ]),
+                              Visibility(
+                                  visible: _showRecommendations,
+                                  child: const SizedBox(height: 12)),
+                              if (_showRecommendations)
+                                const TrendingMoviesWidget(),
+                              const SizedBox(height: 20),
+                            ]))),
               ],
             ),
           ),
@@ -1284,18 +1613,70 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
     });
   }
 
-  Widget _buildStoriesTab() {
-    return Column(children: [
+Widget _buildStoriesTab() {
+  Widget _buildTileCard(String title, IconData icon, {VoidCallback? onTap}) {
+    return GestureDetector(
+      onTap: onTap ??
+          () {
+            if (mounted) {
+              ScaffoldMessenger.of(context)
+                  .showSnackBar(SnackBar(content: Text('Tapped $title')));
+            }
+          },
+      child: Container(
+        margin: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.03),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: widget.accentColor.withOpacity(0.06)),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.25), blurRadius: 6, offset: const Offset(0, 4))],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: widget.accentColor.withOpacity(0.12),
+              ),
+              child: Icon(icon, color: widget.accentColor, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+              ),
+            ),
+            Icon(Icons.chevron_right, color: Colors.white54),
+          ],
+        ),
+      ),
+    );
+  }
+
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      // Stories horizontal row inside a fixed-height container so it doesn't push things down
       SizedBox(
-        height: 110,
+        height: 120,
         child: StreamBuilder<QuerySnapshot>(
           stream: FirebaseFirestore.instance.collection('stories').snapshots(),
           builder: (context, snapshot) {
             if (snapshot.hasError) {
               debugPrint('stories stream error: ${snapshot.error}');
-              return const Center(child: Text('Failed to load stories.', style: TextStyle(color: Colors.white)));
+              return const Center(
+                child: Text('Failed to load stories.', style: TextStyle(color: Colors.white)),
+              );
             }
-            if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+
+            if (!snapshot.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+
             final stories = snapshot.data!.docs.map((doc) {
               final map = (doc.data() as Map<String, dynamic>?) ?? {};
               return {...map, 'id': doc.id};
@@ -1313,41 +1694,83 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
               grouped.putIfAbsent(uid, () => []).add(s);
             }
 
-            if (grouped.isEmpty) return const Center(child: Text('No stories available.', style: TextStyle(color: Colors.white)));
+            // If there are no stories, show an inline empty state (keeps height)
+            if (grouped.isEmpty) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(
+                  children: [
+                    _buildYourStoryTile(),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text('No stories available right now', style: TextStyle(color: Colors.white70)),
+                    ),
+                  ],
+                ),
+              );
+            }
 
             final keys = grouped.keys.toList();
-            return ListView.builder(
+
+            // Horizontal list: first item is user's "Add story" tile, then user story tiles
+            return ListView.separated(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
               scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              itemCount: keys.length,
-              itemBuilder: (context, index) {
-                final userId = keys[index];
+              itemCount: keys.length + 1,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (context, idx) {
+                // index 0 => current user "Add story" tile
+                if (idx == 0) {
+                  return _buildYourStoryTile();
+                }
+
+                final userId = keys[idx - 1];
                 final userStories = grouped[userId]!;
                 final first = userStories.first;
                 final mediaUrl = (first['media'] as String?) ?? '';
-                final isPhoto = mediaUrl.startsWith('http') && (mediaUrl.endsWith('.jpg') || mediaUrl.endsWith('.png') || mediaUrl.endsWith('.jpeg'));
-                return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: GestureDetector(
-                    onTap: () {
-                      Navigator.push(context, MaterialPageRoute(builder: (_) => StoryScreen(stories: userStories, initialIndex: 0, currentUserId: (_currentUser?['id'] ?? '').toString())));
-                    },
-                    child: Column(children: [
+                final isPhoto = mediaUrl.startsWith('http') &&
+                    (mediaUrl.endsWith('.jpg') || mediaUrl.endsWith('.png') || mediaUrl.endsWith('.jpeg'));
+
+                return GestureDetector(
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => StoryScreen(
+                          stories: userStories,
+                          initialIndex: 0,
+                          currentUserId: (_currentUser?['id'] ?? '').toString(),
+                        ),
+                      ),
+                    );
+                  },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
                       Container(
                         width: 72,
                         height: 72,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
                           image: isPhoto ? DecorationImage(image: CachedNetworkImageProvider(mediaUrl), fit: BoxFit.cover) : null,
-                          color: first['type'] == 'video' ? Colors.black : Colors.grey,
+                          color: first['type'] == 'video' ? Colors.black : Colors.grey.shade800,
                           border: Border.all(color: widget.accentColor.withOpacity(0.85), width: 2),
-                          boxShadow: [BoxShadow(color: widget.accentColor.withOpacity(0.25), blurRadius: 8, spreadRadius: 1)],
+                          boxShadow: [BoxShadow(color: widget.accentColor.withOpacity(0.22), blurRadius: 8, spreadRadius: 1)],
                         ),
                         child: first['type'] == 'video' ? const Icon(Icons.videocam, color: Colors.white, size: 20) : null,
                       ),
                       const SizedBox(height: 6),
-                      SizedBox(width: 80, child: Text(first['user'] ?? 'Unknown', style: const TextStyle(color: Colors.white, fontSize: 12), overflow: TextOverflow.ellipsis)),
-                    ]),
+                      SizedBox(
+                        width: 80,
+                        child: Text(
+                          first['user'] ?? 'Unknown',
+                          style: const TextStyle(color: Colors.white, fontSize: 12),
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 1,
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ],
                   ),
                 );
               },
@@ -1355,14 +1778,27 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
           },
         ),
       ),
+
       const SizedBox(height: 12),
+
+      // Post Story button (kept prominent)
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16),
         child: ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor, minimumSize: const Size(double.infinity, 48)),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: widget.accentColor,
+            minimumSize: const Size(double.infinity, 48),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            elevation: 4,
+          ),
           onPressed: () {
             if (_currentUser != null) {
-              Navigator.push(context, MaterialPageRoute(builder: (_) => PostStoryScreen(accentColor: widget.accentColor, currentUser: _currentUser!)));
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => PostStoryScreen(accentColor: widget.accentColor, currentUser: _currentUser!),
+                ),
+              );
             } else {
               if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User data not loaded')));
             }
@@ -1371,87 +1807,530 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
           label: const Text('Post Story', style: TextStyle(fontSize: 16)),
         ),
       ),
-    ]);
+
+      const SizedBox(height: 12),
+
+      // --- Polls: tabs on parent, each tab uses PollsSection with a filter key ---
+      DefaultTabController(
+        length: 4,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Material(
+                color: Colors.transparent,
+                child: TabBar(
+                  isScrollable: true,
+                  labelColor: widget.accentColor,
+                  unselectedLabelColor: Colors.white70,
+                  indicator: UnderlineTabIndicator(
+                    borderSide: BorderSide(width: 3.0, color: widget.accentColor),
+                    insets: const EdgeInsets.symmetric(horizontal: 12.0),
+                  ),
+                  tabs: const [
+                    Tab(text: 'All'),
+                    Tab(text: 'Weekly'),
+                    Tab(text: 'Movies'),
+                    Tab(text: 'Users'),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // give TabBarView a bounded height so it doesn't explode inside Column/Scroll
+            SizedBox(
+              height: 320,
+              child: TabBarView(
+                children: [
+                  // All
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
+                    child: PollsSection(accentColor: widget.accentColor, currentUser: _currentUser, categoryFilterKey: 'all'),
+                  ),
+                  // Weekly
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
+                    child: PollsSection(accentColor: widget.accentColor, currentUser: _currentUser, categoryFilterKey: 'weekly'),
+                  ),
+                  // Movies
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
+                    child: PollsSection(accentColor: widget.accentColor, currentUser: _currentUser, categoryFilterKey: 'movies'),
+                  ),
+                  // Users
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
+                    child: PollsSection(accentColor: widget.accentColor, currentUser: _currentUser, categoryFilterKey: 'users'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+
+      const SizedBox(height: 12),
+
+      // --- Tile Grid Cards (2 columns) ---
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12.0),
+        child: GridView.count(
+          crossAxisCount: 2,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          childAspectRatio: 3.2,
+          children: [
+            _buildTileCard('Top Polls', Icons.bar_chart, onTap: () {
+              // Example action: switch to All tab programmatically or navigate
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Open Top Polls')));
+            }),
+            _buildTileCard('Recent', Icons.history, onTap: () {
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Open Recent')));
+            }),
+            _buildTileCard('Trending', Icons.trending_up, onTap: () {
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Open Trending')));
+            }),
+            _buildTileCard('My Votes', Icons.how_to_vote, onTap: () {
+              if (_currentUser == null) {
+                if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please log in to view your votes')));
+                return;
+              }
+              // navigate to a "My Votes" screen or filter polls to user's votes
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Open My Votes')));
+            }),
+          ],
+        ),
+      ),
+
+      const SizedBox(height: 8),
+    ],
+  );
+}
+
+// Helper builder for the "Your story / Add" tile
+  Widget _buildYourStoryTile() {
+    final avatarUrl =
+        (_currentUser?['avatar'] ?? _currentUser?['photoUrl'] ?? '')
+                ?.toString() ??
+            '';
+    final username = (_currentUser?['username'] ?? 'You')?.toString() ?? 'You';
+
+    return GestureDetector(
+      onTap: () {
+        if (_currentUser != null) {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => PostStoryScreen(
+                  accentColor: widget.accentColor, currentUser: _currentUser!),
+            ),
+          );
+        } else {
+          if (mounted)
+            ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('User data not loaded')));
+        }
+      },
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.grey.shade800,
+              border: Border.all(
+                  color: widget.accentColor.withOpacity(0.9), width: 2),
+              boxShadow: [
+                BoxShadow(
+                    color: widget.accentColor.withOpacity(0.22),
+                    blurRadius: 8,
+                    spreadRadius: 1)
+              ],
+              image: avatarUrl.isNotEmpty && avatarUrl.startsWith('http')
+                  ? DecorationImage(
+                      image: CachedNetworkImageProvider(avatarUrl),
+                      fit: BoxFit.cover)
+                  : null,
+            ),
+            child: avatarUrl.isEmpty
+                ? Center(
+                    child: Text(
+                        (username.isNotEmpty ? username[0].toUpperCase() : 'U'),
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 22)))
+                : null,
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: 80,
+            child: Text(
+              'Your story',
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _promptCreateWatchParty(Map<String, dynamic> post) {
-    showDialog(context: context, builder: (context) => AlertDialog(title: const Text('Create Watch Party'), content: const Text('Do you want to create a watch party for this post?'), actions: [
-      TextButton(onPressed: () => Navigator.pop(context), child: const Text('No')),
-      TextButton(onPressed: () {
-        final code = (100000 + Random().nextInt(900000)).toString();
-        Navigator.pop(context);
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Watch Party created with code: $code')));
-        setState(() {
-          _notifications.add('${_currentUser?['username'] ?? 'User'} created a watch party with code $code');
-        });
-      }, child: const Text('Yes')),
-    ]));
+    showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+                title: const Text('Create Watch Party'),
+                content: const Text(
+                    'Do you want to create a watch party for this post?'),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('No')),
+                  TextButton(
+                      onPressed: () {
+                        final code =
+                            (100000 + Random().nextInt(900000)).toString();
+                        Navigator.pop(context);
+                        if (mounted)
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                              content: Text(
+                                  'Watch Party created with code: $code')));
+                        setState(() {
+                          _notifications.add(
+                              '${_currentUser?['username'] ?? 'User'} created a watch party with code $code');
+                        });
+                      },
+                      child: const Text('Yes')),
+                ]));
   }
 
   void _showComments(Map<String, dynamic> post) {
-    showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: const Color.fromARGB(255, 17, 25, 40), builder: (context) {
-      final controller = TextEditingController();
-      return FractionallySizedBox(
-        heightFactor: 0.9,
-        child: StreamBuilder<QuerySnapshot>(
-          stream: FirebaseFirestore.instance.collection('users').doc(post['userId']).collection('posts').doc(post['id']).collection('comments').orderBy('timestamp', descending: true).snapshots(),
-          builder: (context, snapshot) {
-            if (snapshot.hasError) return const Center(child: Text('Failed to load comments.', style: TextStyle(color: Colors.white)));
-            if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-            final comments = snapshot.data!.docs.map((d) => (d.data() as Map<String, dynamic>?) ?? {}).toList();
-            return Padding(
-              padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom + 16, left: 16, right: 16, top: 16),
-              child: Column(children: [
-                const Text('Comments', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-                Expanded(child: ListView.builder(itemCount: comments.length, itemBuilder: (_, i) => ListTile(leading: CircleAvatar(radius: 20, backgroundImage: CachedNetworkImageProvider(comments[i]['userAvatar'] ?? 'https://via.placeholder.com/50')), title: Text(comments[i]['username'] ?? 'Unknown', style: TextStyle(color: widget.accentColor)), subtitle: Text(comments[i]['text'] ?? '', style: const TextStyle(color: Colors.white70))))),
-                TextField(controller: controller, style: const TextStyle(color: Colors.white), decoration: const InputDecoration(labelText: 'Add a comment', labelStyle: TextStyle(color: Colors.white54))),
-                const SizedBox(height: 12),
-                ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: widget.accentColor, minimumSize: const Size(double.infinity, 48)), onPressed: () async {
-                  if (controller.text.isNotEmpty) {
-                    try {
-                      await FirebaseFirestore.instance.collection('users').doc(post['userId']).collection('posts').doc(post['id']).collection('comments').add({
-                        'text': controller.text,
-                        'userId': _currentUser?['id'],
-                        'username': _currentUser?['username'],
-                        'userAvatar': _currentUser?['avatar'],
-                        'timestamp': DateTime.now().toIso8601String(),
-                      });
-                      controller.clear();
-                    } catch (e) {
-                      debugPrint('comment error: $e');
-                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to post comment: $e')));
-                    }
-                  }
-                }, child: const Text('Post', style: TextStyle(fontSize: 16))),
-              ]),
-            );
-          },
-        ),
-      );
-    });
+    // open a transparent modal so we can draw our own frosted panel
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        final TextEditingController controller = TextEditingController();
+        // AnimatedPadding will animate the sheet up/down as the keyboard animates.
+        return AnimatedPadding(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+          padding:
+              EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+          child: DraggableScrollableSheet(
+            initialChildSize: 0.80,
+            minChildSize: 0.35,
+            maxChildSize: 0.95,
+            expand: false,
+            builder: (context, scrollController) {
+              return Container(
+                margin:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.black
+                      .withOpacity(0.6), // semi transparent background
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                clipBehavior: Clip.hardEdge,
+                child: Column(
+                  children: [
+                    // small drag handle
+                    Container(
+                      height: 10,
+                      alignment: Alignment.center,
+                      child: Container(
+                        width: 48,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      ),
+                    ),
+
+                    // title / caption row
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16.0, vertical: 8),
+                      child: Row(
+                        children: [
+                          const Expanded(
+                            child: Text('Comments',
+                                style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white)),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close, color: Colors.white),
+                            onPressed: () => Navigator.of(context).pop(),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    const Divider(color: Color.fromARGB(31, 255, 255, 255), height: 1),
+
+                    // COMMENTS LIST
+                    // Important: wrap the StreamBuilder with a MediaQuery that zeroes out viewInsets
+                    // so the StreamBuilder won't rebuild on keyboard insets changes.
+                    Expanded(
+                      child: MediaQuery(
+                        data: MediaQuery.of(context)
+                            .copyWith(viewInsets: EdgeInsets.zero),
+                        child: StreamBuilder<QuerySnapshot>(
+                          stream: FirebaseFirestore.instance
+                              .collection('users')
+                              .doc(post['userId'])
+                              .collection('posts')
+                              .doc(post['id'])
+                              .collection('comments')
+                              .orderBy('timestamp', descending: true)
+                              .snapshots(),
+                          builder: (context, snap) {
+                            if (snap.hasError) {
+                              debugPrint(
+                                  'comments stream error: ${snap.error}');
+                              return const Center(
+                                  child: Text('Failed to load comments.',
+                                      style: TextStyle(color: Colors.white)));
+                            }
+                            if (!snap.hasData) {
+                              return const Center(
+                                  child: CircularProgressIndicator());
+                            }
+
+                            final docs = snap.data!.docs;
+
+                            if (docs.isEmpty) {
+                              return const Center(
+                                  child: Text('No comments yet',
+                                      style: TextStyle(color: Colors.white70)));
+                            }
+
+                            // Use the provided scrollController (from DraggableScrollableSheet) for performance.
+                            return ListView.separated(
+                              controller: scrollController,
+                              padding: const EdgeInsets.symmetric(
+                                  vertical: 8, horizontal: 8),
+                              itemCount: docs.length,
+                              separatorBuilder: (_, __) =>
+                                  const Divider(color: Colors.white10),
+                              itemBuilder: (context, i) {
+                                final d =
+                                    docs[i].data() as Map<String, dynamic>;
+                                final avatar =
+                                    (d['userAvatar'] ?? '').toString();
+                                final username =
+                                    (d['username'] ?? 'Unknown').toString();
+                                final text = (d['text'] ?? '').toString();
+                                final timestamp =
+                                    (d['timestamp'] ?? '').toString();
+
+                                return RepaintBoundary(
+                                  child: ListTile(
+                                    contentPadding: const EdgeInsets.symmetric(
+                                        vertical: 6, horizontal: 12),
+                                    leading: CircleAvatar(
+                                      radius: 20,
+                                      backgroundImage: avatar.isNotEmpty &&
+                                              avatar.startsWith('http')
+                                          ? CachedNetworkImageProvider(avatar)
+                                          : null,
+                                      backgroundColor: widget.accentColor,
+                                      child: avatar.isEmpty
+                                          ? Text(
+                                              username.isNotEmpty
+                                                  ? username[0].toUpperCase()
+                                                  : '?',
+                                              style: const TextStyle(
+                                                  color: Colors.white))
+                                          : null,
+                                    ),
+                                    title: Text(username,
+                                        style: TextStyle(
+                                            color: widget.accentColor,
+                                            fontWeight: FontWeight.w600)),
+                                    subtitle: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(text,
+                                            style: const TextStyle(
+                                                color: Colors.white70)),
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          (() {
+                                            try {
+                                              final t =
+                                                  DateTime.parse(timestamp);
+                                              final diff =
+                                                  DateTime.now().difference(t);
+                                              if (diff.inSeconds < 60)
+                                                return 'just now';
+                                              if (diff.inMinutes < 60)
+                                                return '${diff.inMinutes}m';
+                                              if (diff.inHours < 24)
+                                                return '${diff.inHours}h';
+                                              return '${t.day}/${t.month}/${t.year}';
+                                            } catch (_) {
+                                              return '';
+                                            }
+                                          })(),
+                                          style: const TextStyle(
+                                              color: Colors.white38,
+                                              fontSize: 12),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+
+                    // Input row pinned to bottom of sheet
+                    SafeArea(
+                      top: false,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12.0, vertical: 10),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: controller,
+                                textInputAction: TextInputAction.send,
+                                onSubmitted: (_) =>
+                                    _postComment(controller, post, context),
+                                style: const TextStyle(color: Colors.white),
+                                decoration: InputDecoration(
+                                  hintText: 'Add a comment',
+                                  hintStyle:
+                                      const TextStyle(color: Colors.white54),
+                                  filled: true,
+                                  fillColor: Colors.white12,
+                                  border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                      borderSide: BorderSide.none),
+                                  contentPadding: const EdgeInsets.symmetric(
+                                      horizontal: 12, vertical: 12),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                  backgroundColor: widget.accentColor,
+                                  minimumSize: const Size(64, 44)),
+                              onPressed: () =>
+                                  _postComment(controller, post, context),
+                              child: const Text('Post'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+// Helper to post comment and keep UI responsive
+  Future<void> _postComment(TextEditingController controller,
+      Map<String, dynamic> post, BuildContext ctx) async {
+    final text = controller.text.trim();
+    if (text.isEmpty) return;
+    controller.clear();
+    FocusScope.of(ctx).unfocus(); // dismiss keyboard quickly
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(post['userId'])
+          .collection('posts')
+          .doc(post['id'])
+          .collection('comments')
+          .add({
+        'text': text,
+        'userId': _currentUser?['id'],
+        'username': _currentUser?['username'],
+        'userAvatar': _currentUser?['avatar'],
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+      // optional: show a lightweight confirmation
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Comment posted')));
+    } catch (e) {
+      debugPrint('comment error: $e');
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to post comment: $e')));
+    }
   }
 
   void _onTabTapped(int index) => setState(() => _selectedIndex = index);
 
   void _showFabActions() {
-    showModalBottomSheet(context: context, backgroundColor: Colors.transparent, builder: (context) => Container(
-      margin: const EdgeInsets.all(16),
-      decoration: BoxDecoration(color: Colors.black.withOpacity(0.6), borderRadius: const BorderRadius.all(Radius.circular(12))),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        ListTile(leading: const Icon(Icons.message, color: Colors.white), title: const Text('New Message', style: TextStyle(color: Colors.white)), onTap: () {
-          Navigator.pop(context);
-          if (_currentUser != null) {
-            Navigator.push(context, MaterialPageRoute(builder: (_) => NewChatScreen(currentUser: _currentUser!, otherUsers: _users.where((u) => u['email'] != _currentUser!['email']).toList(), accentColor: widget.accentColor)));
-          } else {
-            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User data not loaded')));
-          }
-        }),
-        if (!_showRecommendations) ListTile(leading: const Icon(Icons.expand, color: Colors.white), title: const Text('Expand Recommendations', style: TextStyle(color: Colors.white)), onTap: () {
-          Navigator.pop(context);
-          setState(() => _showRecommendations = true);
-        }),
-      ]),
-    ));
+    showModalBottomSheet(
+        context: context,
+        backgroundColor: Colors.transparent,
+        builder: (context) => Container(
+              margin: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.6),
+                  borderRadius: const BorderRadius.all(Radius.circular(12))),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                ListTile(
+                    leading: const Icon(Icons.message, color: Colors.white),
+                    title: const Text('New Message',
+                        style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      Navigator.pop(context);
+                      if (_currentUser != null) {
+                        Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => NewChatScreen(
+                                    currentUser: _currentUser!,
+                                    otherUsers: _users
+                                        .where((u) =>
+                                            u['email'] !=
+                                            _currentUser!['email'])
+                                        .toList(),
+                                    accentColor: widget.accentColor)));
+                      } else {
+                        if (mounted)
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('User data not loaded')));
+                      }
+                    }),
+                if (!_showRecommendations)
+                  ListTile(
+                      leading: const Icon(Icons.expand, color: Colors.white),
+                      title: const Text('Expand Recommendations',
+                          style: TextStyle(color: Colors.white)),
+                      onTap: () {
+                        Navigator.pop(context);
+                        setState(() => _showRecommendations = true);
+                      }),
+              ]),
+            ));
   }
 
   @override
@@ -1460,8 +2339,17 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
       _buildFeedTab(),
       _buildStoriesTab(),
       NotificationsSection(notifications: _notifications),
-      StreakSection(movieStreak: _movieStreak, onStreakUpdated: (newStreak) => setState(() => _movieStreak = newStreak)),
-      _currentUser != null ? UserProfileScreen(key: ValueKey(_currentUser!['id']), user: _currentUser!, showAppBar: false, accentColor: widget.accentColor) : const Center(child: CircularProgressIndicator()),
+      StreakSection(
+          movieStreak: _movieStreak,
+          onStreakUpdated: (newStreak) =>
+              setState(() => _movieStreak = newStreak)),
+      _currentUser != null
+          ? UserProfileScreen(
+              key: ValueKey(_currentUser!['id']),
+              user: _currentUser!,
+              showAppBar: false,
+              accentColor: widget.accentColor)
+          : const Center(child: CircularProgressIndicator()),
     ];
 
     return Scaffold(
@@ -1471,13 +2359,27 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: const Text('Social Section', style: TextStyle(color: Colors.white, fontSize: 20)),
+        title: const Text('Social Section',
+            style: TextStyle(color: Colors.white, fontSize: 20)),
         actions: [
-          IconButton(icon: const Icon(Icons.message, color: Colors.white, size: 22), onPressed: () {
-            if (_currentUser != null) Navigator.push(context, MaterialPageRoute(builder: (_) => MessagesScreen(currentUser: _currentUser!, accentColor: widget.accentColor)));
-            else if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User data not loaded')));
-          }),
-          IconButton(icon: const Icon(Icons.search, color: Colors.white, size: 22), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SearchScreen()))),
+          IconButton(
+              icon: const Icon(Icons.message, color: Colors.white, size: 22),
+              onPressed: () {
+                if (_currentUser != null)
+                  Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => MessagesScreen(
+                              currentUser: _currentUser!,
+                              accentColor: widget.accentColor)));
+                else if (mounted)
+                  ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('User data not loaded')));
+              }),
+          IconButton(
+              icon: const Icon(Icons.search, color: Colors.white, size: 22),
+              onPressed: () => Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => const SearchScreen()))),
           PopupMenuButton<String>(
             icon: const Icon(Icons.filter_list, color: Colors.white),
             onSelected: (s) {
@@ -1487,13 +2389,47 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
               });
             },
             itemBuilder: (_) => [
-              PopupMenuItem(value: 'for_everyone', child: Text('For Everyone (fair)', style: TextStyle(color: _feedMode == 'for_everyone' ? widget.accentColor : Colors.white))),
-              PopupMenuItem(value: 'trending', child: Text('Trending', style: TextStyle(color: _feedMode == 'trending' ? widget.accentColor : Colors.white))),
-              PopupMenuItem(value: 'fresh', child: Text('Fresh / Newest', style: TextStyle(color: _feedMode == 'fresh' ? widget.accentColor : Colors.white))),
-              PopupMenuItem(value: 'personalized', child: Text('Personalized', style: TextStyle(color: _feedMode == 'personalized' ? widget.accentColor : Colors.white))),
+              PopupMenuItem(
+                  value: 'for_everyone',
+                  child: Text('For Everyone (fair)',
+                      style: TextStyle(
+                          color: _feedMode == 'for_everyone'
+                              ? widget.accentColor
+                              : Colors.white))),
+              PopupMenuItem(
+                  value: 'trending',
+                  child: Text('Trending',
+                      style: TextStyle(
+                          color: _feedMode == 'trending'
+                              ? widget.accentColor
+                              : Colors.white))),
+              PopupMenuItem(
+                  value: 'fresh',
+                  child: Text('Fresh / Newest',
+                      style: TextStyle(
+                          color: _feedMode == 'fresh'
+                              ? widget.accentColor
+                              : Colors.white))),
+              PopupMenuItem(
+                  value: 'personalized',
+                  child: Text('Personalized',
+                      style: TextStyle(
+                          color: _feedMode == 'personalized'
+                              ? widget.accentColor
+                              : Colors.white))),
             ],
           ),
-          if (_currentUser != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Center(child: Text('Hey, ${_currentUser!['username']}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.white, fontSize: 16)))),
+          if (_currentUser != null)
+            Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Center(
+                    child: Text('Hey, ${_currentUser!['username']}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            color: Colors.white,
+                            fontSize: 16)))),
         ],
       ),
       body: Stack(children: [
@@ -1521,14 +2457,33 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Container(
               decoration: BoxDecoration(
-                gradient: RadialGradient(center: Alignment.center, radius: 1.6, colors: [widget.accentColor.withAlpha((0.12 * 255).round()), Colors.transparent], stops: const [0.0, 1.0]),
+                gradient: RadialGradient(
+                    center: Alignment.center,
+                    radius: 1.6,
+                    colors: [
+                      widget.accentColor.withAlpha((0.12 * 255).round()),
+                      Colors.transparent
+                    ],
+                    stops: const [
+                      0.0,
+                      1.0
+                    ]),
                 borderRadius: const BorderRadius.all(Radius.circular(18)),
-                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.6), blurRadius: 16, spreadRadius: 2, offset: const Offset(0, 8))],
+                boxShadow: [
+                  BoxShadow(
+                      color: Colors.black.withOpacity(0.6),
+                      blurRadius: 16,
+                      spreadRadius: 2,
+                      offset: const Offset(0, 8))
+                ],
               ),
               child: Container(
-                decoration: frostedPanelDecoration(widget.accentColor, radius: 18),
+                decoration:
+                    frostedPanelDecoration(widget.accentColor, radius: 18),
                 child: Theme(
-                  data: ThemeData.dark().copyWith(scaffoldBackgroundColor: Colors.transparent, textTheme: ThemeData.dark().textTheme),
+                  data: ThemeData.dark().copyWith(
+                      scaffoldBackgroundColor: Colors.transparent,
+                      textTheme: ThemeData.dark().textTheme),
                   child: IndexedStack(index: _selectedIndex, children: tabs),
                 ),
               ),
@@ -1536,7 +2491,10 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
           ),
         ),
       ]),
-      floatingActionButton: FloatingActionButton(backgroundColor: widget.accentColor, onPressed: _showFabActions, child: const Icon(Icons.add, color: Colors.white, size: 22)),
+      floatingActionButton: FloatingActionButton(
+          backgroundColor: widget.accentColor,
+          onPressed: _showFabActions,
+          child: const Icon(Icons.add, color: Colors.white, size: 22)),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
         onTap: _onTabTapped,
@@ -1545,11 +2503,17 @@ class _SocialReactionsScreenState extends State<_SocialReactionsScreen> with Wid
         unselectedItemColor: widget.accentColor,
         type: BottomNavigationBarType.fixed,
         items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home, size: 22), label: "Feeds"),
-          BottomNavigationBarItem(icon: Icon(Icons.history, size: 22), label: "Stories"),
-          BottomNavigationBarItem(icon: Icon(Icons.notifications, size: 22), label: "Notifications"),
-          BottomNavigationBarItem(icon: Icon(Icons.whatshot, size: 22), label: "Streaks"),
-          BottomNavigationBarItem(icon: Icon(Icons.person, size: 22), label: "Profile"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.home, size: 22), label: "Feeds"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.history, size: 22), label: "Stories"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.notifications, size: 22),
+              label: "Notifications"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.whatshot, size: 22), label: "Streaks"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.person, size: 22), label: "Profile"),
         ],
       ),
     );
@@ -1562,7 +2526,11 @@ class NewChatScreen extends StatefulWidget {
   final List<Map<String, dynamic>> otherUsers;
   final Color accentColor;
 
-  const NewChatScreen({super.key, required this.currentUser, required this.otherUsers, required this.accentColor});
+  const NewChatScreen(
+      {super.key,
+      required this.currentUser,
+      required this.otherUsers,
+      required this.accentColor});
 
   @override
   State<NewChatScreen> createState() => NewChatScreenState();
@@ -1571,39 +2539,98 @@ class NewChatScreen extends StatefulWidget {
 class NewChatScreenState extends State<NewChatScreen> {
   void _startChat(Map<String, dynamic> user) {
     final chatId = chatUtils.getChatId(widget.currentUser['id'], user['id']);
-    Navigator.push(context, MaterialPageRoute(builder: (_) => ChatScreen(chatId: chatId, currentUser: widget.currentUser, otherUser: {'id': user['id'], 'username': user['username'], 'photoUrl': user['photoUrl']}, authenticatedUser: widget.currentUser, storyInteractions: const [])));
+    Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => ChatScreen(
+                chatId: chatId,
+                currentUser: widget.currentUser,
+                otherUser: {
+                  'id': user['id'],
+                  'username': user['username'],
+                  'photoUrl': user['photoUrl']
+                },
+                authenticatedUser: widget.currentUser,
+                storyInteractions: const [])));
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       extendBodyBehindAppBar: true,
-      appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0, title: const Text('New Chat', style: TextStyle(color: Colors.white, fontSize: 20)), leading: IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context))),
+      appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          title: const Text('New Chat',
+              style: TextStyle(color: Colors.white, fontSize: 20)),
+          leading: IconButton(
+              icon: const Icon(Icons.arrow_back, color: Colors.white),
+              onPressed: () => Navigator.pop(context))),
       body: Stack(children: [
         Container(color: const Color(0xFF0B1220)),
-        Container(decoration: BoxDecoration(gradient: RadialGradient(center: const Alignment(-0.1, -0.4), radius: 1.2, colors: [widget.accentColor.withAlpha((0.35 * 255).round()), Colors.transparent], stops: const [0.0, 0.9]))),
+        Container(
+            decoration: BoxDecoration(
+                gradient: RadialGradient(
+                    center: const Alignment(-0.1, -0.4),
+                    radius: 1.2,
+                    colors: [
+              widget.accentColor.withAlpha((0.35 * 255).round()),
+              Colors.transparent
+            ],
+                    stops: const [
+              0.0,
+              0.9
+            ]))),
         Positioned.fill(
           top: kToolbarHeight + MediaQuery.of(context).padding.top,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Container(
-              decoration: BoxDecoration(gradient: RadialGradient(center: Alignment.center, radius: 1.6, colors: [widget.accentColor.withAlpha((0.12 * 255).round()), Colors.transparent], stops: const [0.0, 1.0]), borderRadius: const BorderRadius.all(Radius.circular(16)), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.6), blurRadius: 10, spreadRadius: 1, offset: const Offset(0, 4))]),
+              decoration: BoxDecoration(
+                  gradient: RadialGradient(
+                      center: Alignment.center,
+                      radius: 1.6,
+                      colors: [
+                        widget.accentColor.withAlpha((0.12 * 255).round()),
+                        Colors.transparent
+                      ],
+                      stops: const [
+                        0.0,
+                        1.0
+                      ]),
+                  borderRadius: const BorderRadius.all(Radius.circular(16)),
+                  boxShadow: [
+                    BoxShadow(
+                        color: Colors.black.withOpacity(0.6),
+                        blurRadius: 10,
+                        spreadRadius: 1,
+                        offset: const Offset(0, 4))
+                  ]),
               child: ClipRRect(
                 borderRadius: const BorderRadius.all(Radius.circular(16)),
                 child: Container(
-                  decoration: frostedPanelDecoration(widget.accentColor, radius: 16),
+                  decoration:
+                      frostedPanelDecoration(widget.accentColor, radius: 16),
                   child: ListView.separated(
                     padding: const EdgeInsets.all(16),
                     itemCount: widget.otherUsers.length,
-                    separatorBuilder: (_, __) => const Divider(height: 1, color: Colors.white12),
+                    separatorBuilder: (_, __) =>
+                        const Divider(height: 1, color: Colors.white12),
                     itemBuilder: (context, index) {
                       final user = widget.otherUsers[index];
                       return ListTile(
                         leading: CircleAvatar(
                           backgroundColor: widget.accentColor,
-                          child: Text(user['username'] != null && user['username'].isNotEmpty ? user['username'][0].toUpperCase() : '?', style: const TextStyle(color: Colors.white)),
+                          child: Text(
+                              user['username'] != null &&
+                                      user['username'].isNotEmpty
+                                  ? user['username'][0].toUpperCase()
+                                  : '?',
+                              style: const TextStyle(color: Colors.white)),
                         ),
-                        title: Text(user['username'] ?? 'Unknown', style: const TextStyle(color: Colors.white, fontSize: 14)),
+                        title: Text(user['username'] ?? 'Unknown',
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 14)),
                         onTap: () => _startChat(user),
                       );
                     },

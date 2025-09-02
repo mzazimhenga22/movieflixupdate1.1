@@ -1,4 +1,8 @@
 // streaming_service.dart
+// Updated: return direct m3u8 when available — no heavy decoding/searching
+// Selection logic improved: prefer explicit hls/file streams, probe ambiguous URLs
+// to avoid handing HTML landing pages to the player.
+
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
@@ -11,37 +15,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:universal_html/html.dart' as html;
 import 'package:path/path.dart' as p;
 import 'package:pointycastle/export.dart';
-
-/// Top-level helper types (must NOT be declared inside another class)
-class _DecodedCandidate {
-  final String? url;
-  final String? text; // raw playlist text if available
-
-  _DecodedCandidate({this.url, this.text});
-
-  bool get isPlaylistText => text != null && text!.isNotEmpty;
-  bool get isRemoteM3u8 =>
-      url != null &&
-      (url!.startsWith('http://') ||
-          url!.startsWith('https://') ||
-          url!.startsWith('file://')) &&
-      url!.contains('.m3u8');
-}
-
-class _StreamCandidate {
-  final Map<String, dynamic> origin;
-  final String rawUrl;
-  final String fieldName;
-  final String? type;
-  final String? quality;
-  _StreamCandidate({
-    required this.origin,
-    required this.rawUrl,
-    required this.fieldName,
-    this.type,
-    this.quality,
-  });
-}
 
 /// Exception
 class StreamingNotAvailableException implements Exception {
@@ -63,33 +36,41 @@ class StreamingService {
     ),
   );
 
-  /// Main public method: tries to return a usable 'url' (mp4 or m3u8) or a local
-  /// playlist path in 'url', plus optional 'playlist' text and 'subtitleUrl'.
+  /// Main public method: returns a map with 'url' (mp4 or m3u8 or local playlist path),
+  /// 'type' ('m3u8'|'mp4'), optional 'playlist' (raw playlist text), optional 'subtitleUrl'.
   static Future<Map<String, String>> getStreamingLink({
     required String tmdbId,
     required String title,
     required int releaseYear,
     required String resolution,
     required bool enableSubtitles,
+    String subtitleLanguage = 'en',
+    String? imdbId,
+    Map<String, dynamic>? externalIds,
     int? season,
     int? episode,
     String? seasonTmdbId,
     String? episodeTmdbId,
     bool forDownload = false,
+    String baseUrl = 'https://moviflxpro.onrender.com',
   }) async {
     _logger.i('Requesting streaming link for tmdbId=$tmdbId title="$title" '
-        'year=$releaseYear resolution=$resolution show=${season != null && episode != null}');
+        'year=$releaseYear resolution=$resolution show=${season != null && episode != null} imdbId=${imdbId ?? "none"}');
 
-    final url = Uri.parse('https://moviflxpro.onrender.com/media-links');
+    final url = Uri.parse('$baseUrl/media-links');
     final isShow = season != null && episode != null;
 
+    // Build body including optional imdb/external fields
     final body = <String, dynamic>{
       'type': isShow ? 'show' : 'movie',
       'tmdbId': tmdbId,
       'title': title,
       'releaseYear': releaseYear,
       'resolution': resolution,
-      'subtitleLanguage': 'en',
+      'subtitleLanguage': subtitleLanguage,
+      if (imdbId != null) 'imdbId': imdbId,
+      if (imdbId != null) 'imdb_id': imdbId,
+      'external_ids': externalIds ?? (imdbId != null ? {'imdb_id': imdbId} : {}),
       if (isShow) ...{
         'seasonNumber': season,
         'seasonTmdbId': seasonTmdbId?.toString() ?? tmdbId,
@@ -103,14 +84,18 @@ class StreamingService {
     try {
       final response = await http.post(
         url,
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
         body: jsonEncode(body),
       );
 
       _logger.i('Backend responded with status ${response.statusCode}');
       final respBodyRaw = response.body ?? '';
       _logger.d('Response headers: ${response.headers}');
-      _logger.d('Response body (first 2000 chars): ${respBodyRaw.length > 2000 ? respBodyRaw.substring(0,2000) + "..." : respBodyRaw}');
+      _logger.d(
+          'Response body (first 2000 chars): ${respBodyRaw.length > 2000 ? respBodyRaw.substring(0, 2000) + "..." : respBodyRaw}');
 
       if (response.statusCode != 200) {
         final snippet =
@@ -134,390 +119,287 @@ class StreamingService {
       }
 
       final decoded = Map<String, dynamic>.from(decodedRaw);
-      dynamic raw = decoded['streams'] ??
-          (decoded.containsKey('stream') ? [decoded['stream']] : null);
+      dynamic raw = decoded['streams'] ?? (decoded.containsKey('stream') ? [decoded['stream']] : null);
       if (raw == null) {
         _logger.w('No streams found in backend response.');
-        final snippet = respBodyRaw.length > 1000
-            ? '${respBodyRaw.substring(0, 1000)}...'
-            : respBodyRaw;
-        throw StreamingNotAvailableException(
-            'No streaming links available. Response snippet: $snippet');
+        final snippet = respBodyRaw.length > 1000 ? '${respBodyRaw.substring(0, 1000)}...' : respBodyRaw;
+        throw StreamingNotAvailableException('No streaming links available. Response snippet: $snippet');
       }
 
       final streams = List<Map<String, dynamic>>.from(raw);
       _logger.i('Found ${streams.length} stream(s) in backend response.');
 
       if (streams.isEmpty) {
-        final snippet = respBodyRaw.length > 1000
-            ? '${respBodyRaw.substring(0, 1000)}...'
-            : respBodyRaw;
+        final snippet = respBodyRaw.length > 1000 ? '${respBodyRaw.substring(0, 1000)}...' : respBodyRaw;
         throw StreamingNotAvailableException('No streams available. Response snippet: $snippet');
       }
 
-      // collect candidates to try decoding
-      final candidates = <_StreamCandidate>[];
-      for (final s in streams) {
-        final urlField = s['url']?.toString();
-        final playlistField = s['playlist']?.toString();
-        final typeField = s['type']?.toString();
-
-        if (urlField != null && urlField.isNotEmpty) {
-          candidates.add(_StreamCandidate(
-              origin: s, rawUrl: urlField, fieldName: 'url', type: typeField));
-          _logger.d('Candidate added from url: ${_short(urlField)}');
-        }
-        if (playlistField != null && playlistField.isNotEmpty) {
-          candidates.add(_StreamCandidate(
-              origin: s,
-              rawUrl: playlistField,
-              fieldName: 'playlist',
-              type: typeField));
-          _logger.d('Candidate added from playlist (may be text/url): ${_short(playlistField)}');
-        }
-
-        // qualities handling: qualities may be a map of resolution->string or object
-        try {
-          final qualRaw = s['qualities'];
-          if (qualRaw is Map) {
-            final qMap = Map<String, dynamic>.from(qualRaw);
-            qMap.forEach((qualKey, qualVal) {
-              if (qualVal == null) return;
-              if (qualVal is String) {
-                candidates.add(_StreamCandidate(
-                    origin: s,
-                    rawUrl: qualVal,
-                    fieldName: 'qualities',
-                    type: typeField,
-                    quality: qualKey));
-                _logger.d('Candidate added from qualities.$qualKey: ${_short(qualVal)}');
-              } else if (qualVal is Map) {
-                final inner = Map<String, dynamic>.from(qualVal);
-                final u = inner['url']?.toString();
-                final pstr = inner['playlist']?.toString();
-                if (u != null && u.isNotEmpty) {
-                  candidates.add(_StreamCandidate(
-                      origin: s,
-                      rawUrl: u,
-                      fieldName: 'qualities.$qualKey.url',
-                      type: typeField,
-                      quality: qualKey));
-                  _logger.d('Candidate added from qualities.$qualKey.url: ${_short(u)}');
-                }
-                if (pstr != null && pstr.isNotEmpty) {
-                  candidates.add(_StreamCandidate(
-                      origin: s,
-                      rawUrl: pstr,
-                      fieldName: 'qualities.$qualKey.playlist',
-                      type: typeField,
-                      quality: qualKey));
-                  _logger.d('Candidate added from qualities.$qualKey.playlist (text/url)');
-                }
-              } else if (qualVal is List) {
-                for (var it in qualVal) {
-                  if (it is String) {
-                    candidates.add(_StreamCandidate(
-                        origin: s,
-                        rawUrl: it,
-                        fieldName: 'qualities.$qualKey',
-                        type: typeField,
-                        quality: qualKey));
-                  } else if (it is Map && it['url'] != null) {
-                    candidates.add(_StreamCandidate(
-                        origin: s,
-                        rawUrl: it['url'].toString(),
-                        fieldName: 'qualities.$qualKey',
-                        type: typeField,
-                        quality: qualKey));
-                  }
-                }
-              } else {
-                final asStr = qualVal.toString();
-                if (asStr.contains('.m3u8') || asStr.contains('http')) {
-                  candidates.add(_StreamCandidate(
-                      origin: s,
-                      rawUrl: asStr,
-                      fieldName: 'qualities.$qualKey',
-                      type: typeField,
-                      quality: qualKey));
-                }
-              }
-            });
-          }
-        } catch (e, st) {
-          _logger.w('Failed to inspect qualities: $e\n$st');
-        }
-
-        // attempt to gather caption urls as subtitle candidates
-        try {
-          final caps = s['captions'];
-          if (caps is List && caps.isNotEmpty) {
-            for (var c in caps) {
-              if (c is String) {
-                candidates.add(_StreamCandidate(origin: s, rawUrl: c, fieldName: 'captions', type: typeField));
-              } else if (c is Map) {
-                final m = Map<String, dynamic>.from(c);
-                final u = (m['url'] ?? m['src'] ?? m['source'])?.toString();
-                if (u != null && u.isNotEmpty) {
-                  candidates.add(_StreamCandidate(origin: s, rawUrl: u, fieldName: 'captions', type: typeField));
-                }
-              }
-            }
-          }
-        } catch (e, st) {
-          _logger.w('Failed to inspect captions: $e\n$st');
-        }
-
-        // inspect JSON blob for embedded m3u8s or playlist text (and also video urls)
-        try {
-          final streamJson = jsonEncode(s);
-          final extracted = _extractPossibleM3u8s(streamJson);
-          for (final e in extracted) {
-            if (e.url != null) {
-              candidates.add(_StreamCandidate(
-                  origin: s, rawUrl: e.url!, fieldName: 'embedded', type: typeField));
-            } else if (e.text != null) {
-              candidates.add(_StreamCandidate(
-                  origin: s, rawUrl: e.text!, fieldName: 'embedded', type: typeField));
-            }
-          }
-
-          // also look for direct video links (mp4/webm/etc)
-          final extractedVideos = _extractHttpVideoUrls(streamJson);
-          for (final v in extractedVideos) {
-            candidates.add(_StreamCandidate(origin: s, rawUrl: v, fieldName: 'embeddedVideo', type: typeField));
-          }
-        } catch (e, st) {
-          _logger.w('Failed to inspect embedded blobs: $e\n$st');
-        }
-      }
-
-      _logger.i('Total candidate entries discovered: ${candidates.length}');
-
-      if (candidates.isEmpty) {
-        final snippet = respBodyRaw.length > 1000 ? respBodyRaw.substring(0, 1000) + '...' : respBodyRaw;
-        throw StreamingNotAvailableException('No candidate urls found in streams. Response snippet: $snippet');
-      }
-
+      // --------- REPLACEMENT SELECTION LOGIC ----------
+      // Build a prioritized list of candidate strings to inspect (playlist text, playlist URL, quality urls, url)
       String? chosenUrl;
       String? chosenPlaylistText;
       String streamType = 'm3u8';
       String subtitleUrl = '';
       String? chosenQuality;
 
-      final tried = <String>{};
-      // iterate candidates in original order but we bias decoding to return base64-derived results first
-      for (final c in candidates) {
-        if (tried.contains(c.rawUrl)) continue;
-        tried.add(c.rawUrl);
+      final List<Map<String, dynamic>> candidates = [];
 
-        _logger.d('Trying candidate (${c.fieldName}${c.quality != null ? '/${c.quality}' : ''}): ${_short(c.rawUrl)}');
-
-        List<_DecodedCandidate> extracted = [];
+      for (final s in streams) {
         try {
-          extracted = await _tryExtractAndDecode(c.rawUrl);
-        } catch (e, st) {
-          _logger.w('Decoding attempt failed for candidate: $e\n$st');
-          continue;
-        }
+          final String? typeField = s['type']?.toString();
 
-        if (extracted.isNotEmpty) {
-          // prefer a remote m3u8 candidate or raw playlist text
-          // but prefer first any candidate that originated from base64 decoding
-          _DecodedCandidate? pick;
-          // if any of the extracted items came from decoded base64/hex/gzip layers we'll see playlist text or url
-          // we consider the order returned by _tryExtractAndDecode; we also compensate below by probing
-          // pick first remote m3u8 else first available
-          pick = extracted.firstWhere((x) => x.isRemoteM3u8, orElse: () => extracted.first);
+          // 1) raw playlist text (highest priority)
+          final playlistField = s['playlist'];
+          if (playlistField != null && playlistField is String && _looksLikePlaylist(playlistField)) {
+            candidates.add({'kind': 'playlistText', 'value': playlistField, 'origin': s, 'priority': 100});
+            // Don't continue; still collect other candidates from same stream (but playlistText is highest priority).
+          }
 
-          if (pick.isPlaylistText) {
-            final tmp = await _writePlaylistToTempFile(tmdbId, pick.text!);
-            chosenUrl = tmp;
-            chosenPlaylistText = pick.text;
-            streamType = 'm3u8';
-            chosenQuality = c.quality;
-            _logger.i('Selected candidate: playlist text -> saved to $tmp');
-            break;
-          } else if (pick.url != null && pick.url!.isNotEmpty) {
-            // Before accepting remote http(s) URLs, probe to ensure it looks like real media
-            final candidateUrl = pick.url!;
-            if (candidateUrl.startsWith('http://') || candidateUrl.startsWith('https://')) {
-              final probeOk = await _probePlayableUrl(candidateUrl, headers: {
-                // sensible default headers; adjust if your service requires specific referer/cookies
-                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)',
-              });
-              if (!probeOk) {
-                _logger.w('Probe rejected candidate url (skipping): ${_short(candidateUrl)}');
-                continue; // try next candidate
+          // 2) explicit playlist URL
+          if (playlistField != null && playlistField is String && (playlistField.startsWith('http://') || playlistField.startsWith('https://') || playlistField.startsWith('file://'))) {
+            candidates.add({'kind': 'playlistUrl', 'value': playlistField, 'origin': s, 'priority': 90});
+          }
+
+          // 3) qualities map (collect top candidates)
+          final qualRaw = s['qualities'];
+          if (qualRaw is Map) {
+            for (final entry in qualRaw.entries) {
+              final qKey = entry.key?.toString() ?? '';
+              final qVal = entry.value;
+              String? candidateUrl;
+              if (qVal is String) candidateUrl = qVal;
+              else if (qVal is Map && qVal['url'] != null) candidateUrl = qVal['url'].toString();
+              if (candidateUrl != null && candidateUrl.isNotEmpty) {
+                final pr = candidateUrl.contains('.m3u8') ? 95 : (candidateUrl.contains('.mp4') ? 80 : 50);
+                candidates.add({'kind': 'quality', 'value': candidateUrl, 'origin': s, 'priority': pr, 'qualityKey': qKey});
               }
             }
-            chosenUrl = candidateUrl;
-            streamType = chosenUrl.endsWith('.mp4') ? 'mp4' : 'm3u8';
-            chosenQuality = c.quality;
-            _logger.i('Selected candidate url: $chosenUrl (type: $streamType)');
-            break;
           }
+
+          // 4) url field
+          final urlField = s['url'];
+          if (urlField != null) {
+            final us = urlField.toString();
+            if (us.isNotEmpty) {
+              final pr = us.contains('.m3u8') ? 90 : (us.contains('.mp4') ? 75 : (typeField == 'hls' ? 88 : 40));
+              candidates.add({'kind': 'url', 'value': us, 'origin': s, 'priority': pr});
+            }
+          }
+
+          // small heuristic to prefer explicit types
+          if (typeField == 'hls' && playlistField == null && (s['url'] == null || s['url'].toString().isEmpty)) {
+            // maybe there are nested urls in object - add dump of object as candidate string to be probed later
+            try {
+              candidates.add({'kind': 'jsonDump', 'value': jsonEncode(s), 'origin': s, 'priority': 30});
+            } catch (_) {}
+          }
+        } catch (_) {}
+      }
+
+      // sort candidates by priority desc and take top N to avoid too many probes
+      candidates.sort((a, b) => (b['priority'] as int).compareTo(a['priority'] as int));
+      const int maxProbes = 8;
+      final List<Map<String, dynamic>> scanList = candidates.take(maxProbes).toList();
+
+      // helper to accept a playlist text
+      Future<void> _acceptPlaylistText(String txt, {String? qualityKey}) async {
+        final tmp = await _writePlaylistToTempFile(tmdbId, txt);
+        chosenUrl = tmp;
+        chosenPlaylistText = txt;
+        streamType = 'm3u8';
+        chosenQuality = qualityKey;
+        _logger.i('Selected playlist text -> $tmp');
+      }
+
+      Future<bool> _tryUrlCandidate(String candidateUrl, {String? qualityKey}) async {
+        final s = candidateUrl.trim();
+        if (s.isEmpty) return false;
+
+        // raw m3u8 string in candidate? (unlikely here)
+        if (_looksLikePlaylist(s)) {
+          await _acceptPlaylistText(s, qualityKey: qualityKey);
+          return true;
+        }
+
+        // obvious m3u8 url -> accept immediately (frontend will handle)
+        if ((s.startsWith('http://') || s.startsWith('https://') || s.startsWith('file://')) && s.contains('.m3u8')) {
+          chosenUrl = s;
+          streamType = 'm3u8';
+          chosenQuality = qualityKey;
+          _logger.i('Selected m3u8 url -> ${_short(s)}');
+          return true;
+        }
+
+        // obvious mp4 -> accept (fast)
+        if ((s.startsWith('http://') || s.startsWith('https://') || s.startsWith('file://')) && s.contains('.mp4')) {
+          chosenUrl = s;
+          streamType = 'mp4';
+          chosenQuality = qualityKey;
+          _logger.i('Selected mp4 url -> ${_short(s)}');
+          return true;
+        }
+
+        // For ambiguous URLs (landing pages, redirectors) use probe
+        _logger.d('Probing ambiguous candidate -> ${_short(s)}');
+        final ok = await _probePlayableUrl(s);
+        if (ok) {
+          chosenUrl = s;
+          streamType = s.endsWith('.mp4') ? 'mp4' : (s.contains('.m3u8') ? 'm3u8' : 'mp4');
+          chosenQuality = qualityKey;
+          _logger.i('Probe accepted -> ${_short(s)} (type=${streamType})');
+          return true;
+        } else {
+          _logger.w('Probe rejected -> ${_short(s)}');
+          return false;
         }
       }
 
-      // fallback scan entire response for inline m3u8s or video urls
-      if (chosenUrl == null) {
-        _logger.d('No candidate produced a usable url; scanning entire backend payload for m3u8s and video urls...');
-        final allText = jsonEncode(decoded);
-        final rawFound = _extractPossibleM3u8s(allText);
-        if (rawFound.isNotEmpty) {
-          final pick = rawFound.first;
-          if (pick.isPlaylistText) {
-            final tmp = await _writePlaylistToTempFile(tmdbId, pick.text!);
-            chosenUrl = tmp;
-            chosenPlaylistText = pick.text;
-            streamType = 'm3u8';
-            _logger.i('Fallback: found embedded playlist text -> saved to $tmp');
-          } else {
-            // probe fallback url too
-            final fallbackUrl = pick.url!;
-            if (fallbackUrl.startsWith('http://') || fallbackUrl.startsWith('https://')) {
-              final probeOk = await _probePlayableUrl(fallbackUrl, headers: {
-                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)',
-              });
-              if (probeOk) {
-                chosenUrl = fallbackUrl;
-                streamType = chosenUrl.endsWith('.mp4') ? 'mp4' : 'm3u8';
-                _logger.i('Fallback: found embedded url -> $chosenUrl');
-              } else {
-                _logger.w('Fallback probe rejected $fallbackUrl');
-              }
-            } else {
-              chosenUrl = fallbackUrl;
-              streamType = chosenUrl.endsWith('.mp4') ? 'mp4' : 'm3u8';
-              _logger.i('Fallback: found embedded url -> $chosenUrl (non-http)');
-            }
+      // iterate scanList and pick first acceptable candidate
+      for (final c in scanList) {
+        try {
+          final kind = c['kind'] as String? ?? 'url';
+          final value = (c['value'] ?? '').toString();
+          final qualityKey = c['qualityKey']?.toString();
+          if (kind == 'playlistText') {
+            await _acceptPlaylistText(value, qualityKey: qualityKey);
+            break;
           }
-        } else {
-          // also try generic video links
-          final foundVideos = _extractHttpVideoUrls(allText);
-          for (var v in foundVideos) {
-            final probeOk = await _probePlayableUrl(v, headers: {
-              'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64)',
-            });
-            if (probeOk) {
-              chosenUrl = v;
-              streamType = chosenUrl.endsWith('.mp4') ? 'mp4' : 'm3u8';
-              _logger.i('Fallback: found embedded video url -> $chosenUrl');
+          if (kind == 'playlistUrl') {
+            final ps = value;
+            if (ps.contains('.m3u8')) {
+              chosenUrl = ps;
+              streamType = 'm3u8';
+              chosenQuality = qualityKey;
+              _logger.i('Selected playlist url -> ${_short(ps)}');
               break;
             } else {
-              _logger.w('Fallback probe rejected video url: ${_short(v)}');
+              final ok = await _tryUrlCandidate(ps, qualityKey: qualityKey);
+              if (ok) break;
+            }
+          } else {
+            final ok = await _tryUrlCandidate(value, qualityKey: qualityKey);
+            if (ok) break;
+          }
+        } catch (e, st) {
+          _logger.w('Candidate check threw: $e\n$st');
+        }
+      }
+
+      // If still nothing chosen, try a second pass for lower-priority candidates (without extra probes),
+      // but only accept raw playlist text or explicit .m3u8/.mp4 urls.
+      if (chosenUrl == null) {
+        for (final c in candidates.skip(maxProbes)) {
+          try {
+            final v = (c['value'] ?? '').toString();
+            if (v.contains('.m3u8') || v.contains('.mp4')) {
+              chosenUrl = v;
+              streamType = v.contains('.m3u8') ? 'm3u8' : 'mp4';
+              chosenQuality = c['qualityKey']?.toString();
+              _logger.i('Second-pass selected -> ${_short(v)}');
+              break;
+            }
+            if (_looksLikePlaylist(v)) {
+              final tmp = await _writePlaylistToTempFile(tmdbId, v);
+              chosenUrl = tmp;
+              chosenPlaylistText = v;
+              streamType = 'm3u8';
+              chosenQuality = c['qualityKey']?.toString();
+              _logger.i('Second-pass playlist text selected -> $tmp');
+              break;
+            }
+          } catch (_) {}
+        }
+      }
+
+      if (chosenUrl == null || chosenUrl!.isEmpty) {
+        final bodySnippet =
+            respBodyRaw.length > 1000 ? '${respBodyRaw.substring(0, 1000)}...' : respBodyRaw;
+        _logger.w('No usable streamUrl found after probing. snippet: $bodySnippet');
+        throw StreamingNotAvailableException(
+          'No stream URL available. Response snippet: $bodySnippet',
+        );
+      }
+      // ---------- end replacement selection logic ----------
+
+      // Subtitles handling (simple: take first caption that matches language or first available)
+      for (final s in streams) {
+        try {
+          final caps = s['captions'];
+          if (enableSubtitles && caps != null) {
+            if (caps is List && caps.isNotEmpty) {
+              dynamic selectedCap;
+              for (var c in caps) {
+                if (c is Map &&
+                    ((c['language'] == subtitleLanguage) || (c['lang'] == subtitleLanguage))) {
+                  selectedCap = c;
+                  break;
+                }
+              }
+              selectedCap ??= caps.first;
+              String srtUrlRaw = '';
+              if (selectedCap is String) {
+                srtUrlRaw = selectedCap;
+              } else if (selectedCap is Map) {
+                srtUrlRaw = (selectedCap['url'] ?? selectedCap['src'] ?? selectedCap['source'] ?? '').toString();
+              }
+              if (srtUrlRaw.isNotEmpty) {
+                // We purposely do NOT attempt heavy decoding here. If it's a direct URL, return it.
+                subtitleUrl = srtUrlRaw;
+                _logger.i('Selected subtitle URL -> ${_short(subtitleUrl)}');
+                break;
+              }
+            } else if (caps is Map) {
+              final srt = (caps['url'] ?? caps['src'] ?? caps['source'])?.toString();
+              if (srt != null && srt.isNotEmpty) {
+                subtitleUrl = srt;
+                _logger.i('Selected subtitle from map -> ${_short(subtitleUrl)}');
+                break;
+              }
+            } else if (caps is String) {
+              subtitleUrl = caps;
+              _logger.i('Selected subtitle string -> ${_short(subtitleUrl)}');
+              break;
             }
           }
+        } catch (e, st) {
+          _logger.w('Failed to inspect subtitles for a stream: $e\n$st');
         }
       }
 
       // If chosenUrl is remote m3u8 and forDownload requested, attempt to download playlist to temp file
       if (chosenUrl != null &&
-          chosenUrl.isNotEmpty &&
-          chosenUrl.endsWith('.m3u8') &&
+          chosenUrl!.isNotEmpty &&
+          chosenUrl!.contains('.m3u8') &&
           forDownload &&
-          !kIsWeb) {
+          !kIsWeb &&
+          (chosenUrl!.startsWith('http://') || chosenUrl!.startsWith('https://'))) {
         try {
           _logger.d('forDownload=true, fetching remote playlist to store locally...');
-          final playlistResponse = await http.get(Uri.parse(chosenUrl));
+          final cUrl = chosenUrl!; // safe unwrap here
+          final playlistResponse = await http.get(Uri.parse(cUrl));
           if (playlistResponse.statusCode == 200) {
             final file = File('${(await getTemporaryDirectory()).path}/$tmdbId-playlist.m3u8');
             await file.writeAsString(playlistResponse.body);
             chosenPlaylistText = playlistResponse.body;
-            chosenUrl = file.path;
+            chosenUrl = file.path; // now a valid local file path
             _logger.i('Saved remote playlist to ${file.path} for download mode.');
           } else {
-            _logger.w('Failed to fetch remote playlist for download mode: ${playlistResponse.statusCode}');
+            _logger.w(
+              'Failed to fetch remote playlist for download mode: ${playlistResponse.statusCode}',
+            );
           }
         } catch (e, st) {
           _logger.w('Failed to fetch remote playlist for download mode: $e\n$st');
         }
       }
-
-      // Subtitles handling (try to decode if needed)
-      for (final s in streams) {
-        try {
-          final captionsList = s['captions'] as List<dynamic>?;
-          if (enableSubtitles && captionsList != null && captionsList.isNotEmpty) {
-            // attempt to find english or first available caption with url
-            dynamic selectedCap;
-            for (var c in captionsList) {
-              if (c is Map && (c['language'] == 'en' || c['lang'] == 'en')) {
-                selectedCap = c;
-                break;
-              }
-            }
-            selectedCap ??= captionsList.first;
-            String srtUrlRaw = '';
-            if (selectedCap is String) {
-              srtUrlRaw = selectedCap;
-            } else if (selectedCap is Map) {
-              srtUrlRaw = (selectedCap['url'] ?? selectedCap['src'] ?? selectedCap['source'] ?? '').toString();
-            }
-
-            if (srtUrlRaw.isNotEmpty) {
-              _logger.d('Attempting to decode subtitle candidate: ${_short(srtUrlRaw)}');
-              try {
-                final decodedSubs = await _tryExtractAndDecodeSingle(srtUrlRaw);
-                if (decodedSubs.isPlaylistText) {
-                  final vfile = File('${(await getTemporaryDirectory()).path}/$tmdbId-subtitles.vtt');
-                  await vfile.writeAsString(decodedSubs.text ?? '');
-                  subtitleUrl = vfile.path;
-                  _logger.i('Decoded inline subtitle text -> saved to ${vfile.path}');
-                } else if (decodedSubs.url != null && decodedSubs.url!.isNotEmpty) {
-                  try {
-                    final sresp = await http.get(Uri.parse(decodedSubs.url!));
-                    if (sresp.statusCode == 200) {
-                      final bodyBytes = sresp.bodyBytes;
-                      final extCandidate = p.extension(decodedSubs.url!);
-                      String vttContent = '';
-                      if (extCandidate.toLowerCase().contains('srt') ||
-                          utf8.decode(bodyBytes, allowMalformed: true).contains('-->')) {
-                        final srtContent = utf8.decode(bodyBytes);
-                        vttContent = _convertSrtToVtt(srtContent);
-                      } else {
-                        vttContent = utf8.decode(bodyBytes);
-                      }
-                      final vfile = File('${(await getTemporaryDirectory()).path}/$tmdbId-subtitles.vtt');
-                      await vfile.writeAsString(vttContent);
-                      subtitleUrl = vfile.path;
-                      _logger.i('Fetched & converted subtitle to VTT -> ${vfile.path}');
-                    } else {
-                      _logger.w('Failed to download subtitle: ${sresp.statusCode}');
-                    }
-                  } catch (e, st) {
-                    _logger.w('Failed to fetch/convert subtitle: $e\n$st');
-                  }
-                }
-              } catch (e, st) {
-                _logger.w('Subtitle decode attempt failed: $e\n$st');
-              }
-            } else {
-              _logger.d('Subtitle object did not contain url or src.');
-            }
-          }
-        } catch (e, st) {
-          _logger.w('Failed to inspect subtitles: $e\n$st');
-        }
-      }
-
-      if (chosenUrl == null || chosenUrl.isEmpty) {
-        final bodySnippet = respBodyRaw.length > 1000
-            ? '${respBodyRaw.substring(0, 1000)}...'
-            : respBodyRaw;
-        _logger.w('No usable streamUrl found. snippet: $bodySnippet');
-        throw StreamingNotAvailableException('No stream URL available. Response snippet: $bodySnippet');
-      }
-
       final result = <String, String>{
-        'url': chosenUrl,
+        'url': chosenUrl!,
         'type': streamType,
         'title': title,
       };
-      if (chosenPlaylistText != null) result['playlist'] = chosenPlaylistText;
+      if (chosenPlaylistText != null) result['playlist'] = chosenPlaylistText!;
       if (subtitleUrl.isNotEmpty) result['subtitleUrl'] = subtitleUrl;
-      if (chosenQuality != null) result['quality'] = chosenQuality;
+      if (chosenQuality != null) result['quality'] = chosenQuality!;
 
       _logger.i('Streaming link resolved: ${result['url']} (type=${result['type']}) '
           '${result.containsKey('quality') ? 'quality=${result['quality']}' : ''}');
@@ -530,11 +412,29 @@ class StreamingService {
   }
 
   // ------------------------------------------------------------
-  // Probe helper: lightweight checks that remote url is likely playable
+  // Write playlist text to a temporary file and return path
   // ------------------------------------------------------------
-  /// Probe a remote URL to check whether it actually looks like a playable media stream.
-  /// Returns true if it looks playable (mp4, m3u8, webm, mkv), false otherwise.
-  /// Accepts optional headers (for referer/user-agent, etc).
+  static Future<String> _writePlaylistToTempFile(String tmdbId, String playlist) async {
+    if (kIsWeb) {
+      final bytes = utf8.encode(playlist);
+      final blob = html.Blob([bytes], 'application/vnd.apple.mpegurl');
+      return html.Url.createObjectUrlFromBlob(blob);
+    } else {
+      final file = File('${(await getTemporaryDirectory()).path}/$tmdbId-playlist-${DateTime.now().millisecondsSinceEpoch}.m3u8');
+      await file.writeAsString(playlist);
+      return file.path;
+    }
+  }
+
+  // Helper to detect raw playlist text
+  static bool _looksLikePlaylist(String s) {
+    final upper = s.toUpperCase();
+    return upper.contains('#EXTM3U') || upper.contains('#EXT-X-STREAM-INF') || upper.contains('#EXTINF');
+  }
+
+  // ------------------------------------------------------------
+  // Probe helper kept for optional external uses (used in selection)
+  // ------------------------------------------------------------
   static Future<bool> _probePlayableUrl(String url, {Map<String, String>? headers}) async {
     try {
       final uri = Uri.parse(url);
@@ -549,7 +449,13 @@ class StreamingService {
       }
 
       final ct = headResp?.headers['content-type']?.toLowerCase() ?? '';
-      if (ct.isNotEmpty && !(ct.contains('video') || ct.contains('mpegurl') || ct.contains('application/vnd.apple.mpegurl') || ct.contains('application/octet-stream') || ct.contains('audio') || ct.contains('application'))) {
+      if (ct.isNotEmpty &&
+          !(ct.contains('video') ||
+              ct.contains('mpegurl') ||
+              ct.contains('application/vnd.apple.mpegurl') ||
+              ct.contains('application/octet-stream') ||
+              ct.contains('audio') ||
+              ct.contains('application'))) {
         if (ct.contains('text') || ct.contains('html')) {
           _logger.w('Probe HEAD/content-type indicates non-media: $ct for $url');
           client.close();
@@ -624,431 +530,8 @@ class StreamingService {
   }
 
   // ------------------------------------------------------------
-  // Decoding / Extraction helpers
+  // Subtitle conversion helper (kept for offline converting)
   // ------------------------------------------------------------
-
-  // Write playlist text to a temporary file and return path
-  static Future<String> _writePlaylistToTempFile(String tmdbId, String playlist) async {
-    if (kIsWeb) {
-      final bytes = utf8.encode(playlist);
-      final blob = html.Blob([bytes], 'application/vnd.apple.mpegurl');
-      return html.Url.createObjectUrlFromBlob(blob);
-    } else {
-      final file = File('${(await getTemporaryDirectory()).path}/$tmdbId-playlist-${DateTime.now().millisecondsSinceEpoch}.m3u8');
-      await file.writeAsString(playlist);
-      return file.path;
-    }
-  }
-
-  // Try many decoding strategies on a single raw string and return one decoded candidate.
-static Future<_DecodedCandidate> _tryExtractAndDecodeSingle(String raw) async {
-  final trimmed = raw.trim();
-  if (trimmed.isEmpty) return _DecodedCandidate(url: null, text: null);
-
-  // --- NEW: Handle data: URIs (e.g. data:application/vnd.apple.mpegurl;base64,...) ---
-  try {
-    final dataMatch = RegExp(r'^data:([^,;]+)(;base64)?,(.*)$', dotAll: true).firstMatch(trimmed);
-    if (dataMatch != null) {
-      final isBase64 = dataMatch.group(2) != null;
-      final payload = dataMatch.group(3) ?? '';
-      if (isBase64) {
-        try {
-          final bytes = base64Decode(payload);
-          final decoded = utf8.decode(bytes, allowMalformed: true);
-          if (_looksLikePlaylist(decoded)) return _DecodedCandidate(url: null, text: decoded);
-          final vids = _extractHttpVideoUrls(decoded);
-          if (vids.isNotEmpty) return _DecodedCandidate(url: vids.first, text: null);
-        } catch (_) {
-          // fall through
-        }
-      } else {
-        // non-base64 data URIs (percent-encoded text)
-        final decoded = Uri.decodeFull(payload);
-        if (_looksLikePlaylist(decoded)) return _DecodedCandidate(url: null, text: decoded);
-        final vids = _extractHttpVideoUrls(decoded);
-        if (vids.isNotEmpty) return _DecodedCandidate(url: vids.first, text: null);
-      }
-    }
-  } catch (_) {
-    // defensive: if regex/decoding fails, continue with normal path
-  }
-
-  // Prioritize base64: attempt to decode the whole string as base64 first
-  try {
-    final bytes = base64Decode(trimmed);
-    final text = utf8.decode(bytes, allowMalformed: true).trim();
-    if (text.isNotEmpty) {
-      final foundVideo = _extractHttpVideoUrls(text);
-      if (foundVideo.isNotEmpty) return _DecodedCandidate(url: foundVideo.first, text: null);
-
-      final foundM3u8 = _extractHttpM3u8Urls(text);
-      if (foundM3u8.isNotEmpty) return _DecodedCandidate(url: foundM3u8.first, text: null);
-
-      if (_looksLikePlaylist(text)) return _DecodedCandidate(url: null, text: text);
-    }
-  } catch (_) {
-    // not pure-base64, continue
-  }
-
-  // First: if raw contains a direct http(s) video or m3u8 link, return it immediately.
-  final directVideo = _extractHttpVideoUrls(trimmed);
-  if (directVideo.isNotEmpty) return _DecodedCandidate(url: directVideo.first, text: null);
-
-  // raw playlist markers
-  if (_looksLikePlaylist(trimmed)) return _DecodedCandidate(url: null, text: trimmed);
-
-  // try decoding layers safely
-  List<String?> decoded;
-  try {
-    decoded = _tryDecodeLayers(trimmed, depth: 4);
-  } catch (e, st) {
-    _logger.w('Decoding layers threw: $e\n$st');
-    decoded = [trimmed];
-  }
-
-  for (final d in decoded) {
-    if (d == null) continue;
-    final t = d.trim();
-    if (t.isEmpty) continue;
-
-    final foundVideo = _extractHttpVideoUrls(t);
-    if (foundVideo.isNotEmpty) return _DecodedCandidate(url: foundVideo.first, text: null);
-
-    final found = _extractHttpM3u8Urls(t);
-    if (found.isNotEmpty) return _DecodedCandidate(url: found.first, text: null);
-    if (_looksLikePlaylist(t)) return _DecodedCandidate(url: null, text: t);
-  }
-
-  // local file path fallback
-  if (trimmed.endsWith('.m3u8') && (trimmed.startsWith('/') || trimmed.startsWith('file://'))) {
-    return _DecodedCandidate(url: trimmed, text: null);
-  }
-
-  return _DecodedCandidate(url: null, text: null);
-}
-
-
-  // Try to decode raw into multiple candidates (http/url/playlist)
-  static Future<List<_DecodedCandidate>> _tryExtractAndDecode(String raw) async {
-    final out = <_DecodedCandidate>[];
-
-    final direct = await _tryExtractAndDecodeSingle(raw);
-    if (direct.url != null || direct.text != null) {
-      out.add(direct);
-      return out;
-    }
-
-    final extracted = _extractPossibleM3u8s(raw);
-    if (extracted.isNotEmpty) out.addAll(extracted);
-
-    final layers = _tryDecodeLayers(raw, depth: 4);
-    for (final layer in layers) {
-      if (layer == null) continue;
-      if (layer == raw) continue;
-      final d = await _tryExtractAndDecodeSingle(layer);
-      if (d.url != null || d.text != null) {
-        out.add(d);
-      } else {
-        final ext = _extractPossibleM3u8s(layer);
-        if (ext.isNotEmpty) out.addAll(ext);
-      }
-    }
-
-    return out;
-  }
-
-  // multiple-decode BFS
-  // Modified to prioritize base64-derived layers early in the queue.
-  static List<String?> _tryDecodeLayers(String input, {int depth = 3}) {
-    final results = <String?>[input];
-    final seen = <String>{input};
-
-    // decoders: note that base64/gzip-base64 are not pure string->string decoders here
-    // We'll still include safe decoders in the main list, and handle base64/gzip/hex as special high-priority transforms.
-    final decoders = <String Function(String)>[
-      (s) => s, // identity
-      (s) => _safeDecodeComponent(s),
-      (s) => s.replaceAll('[dot]', '.').replaceAll('[slash]', '/').replaceAll('(dot)', '.'),
-      (s) => String.fromCharCodes(s.runes.toList().reversed), // reverse
-      (s) => _rot13(s),
-    ];
-
-    String? tryBase64(String s) {
-      try {
-        final bytes = base64Decode(s);
-        final text = utf8.decode(bytes, allowMalformed: true);
-        if (text.isNotEmpty) return text;
-      } catch (_) {}
-      return null;
-    }
-
-    String? tryHex(String s) {
-      try {
-        final clean = s.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
-        if (clean.length % 2 != 0) return null;
-        final bytes = Uint8List(clean.length ~/ 2);
-        for (var i = 0; i < clean.length; i += 2) {
-          bytes[i ~/ 2] = int.parse(clean.substring(i, i + 2), radix: 16);
-        }
-        final text = utf8.decode(bytes, allowMalformed: true);
-        if (text.isNotEmpty) return text;
-      } catch (_) {}
-      return null;
-    }
-
-    String? tryGzipBase64(String s) {
-      try {
-        final bytes = base64Decode(s);
-        final dec = gzip.decode(bytes);
-        final text = utf8.decode(dec, allowMalformed: true);
-        if (text.isNotEmpty) return text;
-      } catch (_) {}
-      return null;
-    }
-
-    var queue = <String>[input];
-    var currentDepth = 0;
-    while (queue.isNotEmpty && currentDepth < depth) {
-      final nextQueue = <String>[];
-      for (final item in queue) {
-        // normal decoders
-        for (final dec in decoders) {
-          String outStr;
-          try {
-            outStr = dec(item);
-          } catch (_) {
-            // guard against any decoder throwing
-            continue;
-          }
-          if (outStr.isNotEmpty && !seen.contains(outStr)) {
-            results.add(outStr);
-            seen.add(outStr);
-            nextQueue.add(outStr);
-          }
-        }
-
-        // base64 (high-priority): if it decodes, push to front of nextQueue
-        final b64 = tryBase64(item);
-        if (b64 != null && b64.isNotEmpty && !seen.contains(b64)) {
-          results.add(b64);
-          seen.add(b64);
-          nextQueue.insert(0, b64); // high priority
-        }
-
-        // gzip-base64 next
-        final gz = tryGzipBase64(item);
-        if (gz != null && gz.isNotEmpty && !seen.contains(gz)) {
-          results.add(gz);
-          seen.add(gz);
-          nextQueue.insert(0, gz); // high priority
-        }
-
-        // hex decode
-        final hx = tryHex(item);
-        if (hx != null && hx.isNotEmpty && !seen.contains(hx)) {
-          results.add(hx);
-          seen.add(hx);
-          nextQueue.add(hx);
-        }
-
-        // unquote fallback
-        if ((item.startsWith('"') && item.endsWith('"')) ||
-            (item.startsWith("'") && item.endsWith("'"))) {
-          final unq = item.substring(1, item.length - 1);
-          if (!seen.contains(unq)) {
-            results.add(unq);
-            seen.add(unq);
-            nextQueue.add(unq);
-          }
-        }
-      }
-      queue = nextQueue;
-      currentDepth++;
-    }
-
-    return results;
-  }
-
-  // extract http(s) m3u8 urls or playlists
-static List<_DecodedCandidate> _extractPossibleM3u8s(String input) {
-  final found = <_DecodedCandidate>[];
-  if (input.isEmpty) return found;
-
-  // 1) data: URI with base64 payload (common in some backends)
-  try {
-    final dataUriRegex = RegExp(r'data:([^,;]+)(;base64)?,([A-Za-z0-9+/=\s-]+)', dotAll: true);
-    for (final m in dataUriRegex.allMatches(input)) {
-      final isBase64 = m.group(2) != null;
-      final payload = (m.group(3) ?? '').replaceAll(RegExp(r'\s+'), '');
-      if (isBase64 && payload.isNotEmpty) {
-        try {
-          final bytes = base64Decode(payload);
-          final text = utf8.decode(bytes, allowMalformed: true);
-          if (_looksLikePlaylist(text)) {
-            found.add(_DecodedCandidate(url: null, text: text));
-          } else {
-            // may contain m3u8/video links
-            for (final u in _extractHttpM3u8Urls(text)) found.add(_DecodedCandidate(url: u, text: null));
-            for (final v in _extractHttpVideoUrls(text)) found.add(_DecodedCandidate(url: v, text: null));
-          }
-        } catch (_) {
-          // ignore invalid base64 chunk
-        }
-      }
-    }
-  } catch (_) {}
-
-  // direct http(s) m3u8 links
-  final urlRegex = RegExp(
-    r'(https?:\/\/[^\s"<>]+?\.m3u8[^\s"<>]*)',
-    caseSensitive: false,
-  );
-
-  for (final m in urlRegex.allMatches(input)) {
-    final s = m.group(0);
-    if (s != null && s.isNotEmpty) {
-      found.add(_DecodedCandidate(url: s, text: null));
-    }
-  }
-
-  // file:// or absolute local paths (capture group 1 keeps the path)
-  final fileRegex = RegExp(
-    r'((?:file:\/\/)?\/[^\s"<>]*?\.m3u8)',
-    caseSensitive: false,
-  );
-
-  for (final m in fileRegex.allMatches(input)) {
-    final s = m.group(1) ?? m.group(0);
-    if (s != null && s.isNotEmpty) {
-      found.add(_DecodedCandidate(url: s, text: null));
-    }
-  }
-
-  // raw playlist text (#EXTM3U etc.)
-  if (_looksLikePlaylist(input)) {
-    found.add(_DecodedCandidate(url: null, text: input));
-  }
-
-  // base64-ish chunks (long ones) that ARE NOT embedded in data: URIs (fallback)
-  final b64Regex = RegExp(r'([A-Za-z0-9+/=]{60,})');
-  for (final m in b64Regex.allMatches(input)) {
-    final chunk = m.group(0);
-    if (chunk == null) continue;
-    try {
-      final dec = base64Decode(chunk);
-      final text = utf8.decode(dec, allowMalformed: true);
-      if (_looksLikePlaylist(text)) {
-        found.add(_DecodedCandidate(url: null, text: text));
-      } else if (text.contains('.m3u8')) {
-        for (final u in _extractHttpM3u8Urls(text)) {
-          found.add(_DecodedCandidate(url: u, text: null));
-        }
-      } else {
-        final vids = _extractHttpVideoUrls(text);
-        for (final v in vids) found.add(_DecodedCandidate(url: v, text: null));
-      }
-    } catch (_) {
-      // ignore invalid base64
-    }
-  }
-
-  // hex-ish chunks that decode to playlist/text
-  final hexRegex = RegExp(r'([0-9A-Fa-f]{80,})');
-  for (final m in hexRegex.allMatches(input)) {
-    final chunk = m.group(0);
-    if (chunk == null) continue;
-    try {
-      final bytes = Uint8List(chunk.length ~/ 2);
-      for (var i = 0; i < chunk.length; i += 2) {
-        bytes[i ~/ 2] = int.parse(chunk.substring(i, i + 2), radix: 16);
-      }
-      final text = utf8.decode(bytes, allowMalformed: true);
-      if (_looksLikePlaylist(text)) {
-        found.add(_DecodedCandidate(url: null, text: text));
-      } else if (text.contains('.m3u8')) {
-        for (final u in _extractHttpM3u8Urls(text)) {
-          found.add(_DecodedCandidate(url: u, text: null));
-        }
-      } else {
-        final vids = _extractHttpVideoUrls(text);
-        for (final v in vids) found.add(_DecodedCandidate(url: v, text: null));
-      }
-    } catch (_) {
-      // ignore invalid hex
-    }
-  }
-
-  // try simple obfuscation replacements and recurse once
-  final replaced = input.replaceAll('[dot]', '.').replaceAll('(dot)', '.').replaceAll('[slash]', '/');
-  if (replaced != input) {
-    // avoid infinite recursion by not repeating replacement forever
-    found.addAll(_extractPossibleM3u8s(replaced));
-  }
-
-  return found;
-}
-
-
-  // extract general http(s) video urls (mp4/webm/mkv/m3u8)
-  static List<String> _extractHttpVideoUrls(String input) {
-    final urls = <String>[];
-    if (input.isEmpty) return urls;
-
-    final regex = RegExp(
-      r'(https?:\/\/[^\s"<>]+?\.(?:m3u8|mp4|webm|mkv)[^\s"<>]*)',
-      caseSensitive: false,
-    );
-
-    for (final m in regex.allMatches(input)) {
-      final s = m.group(0);
-      if (s != null && s.isNotEmpty) urls.add(s);
-    }
-    return urls;
-  }
-
-  static List<String> _extractHttpM3u8Urls(String input) {
-    final urls = <String>[];
-    if (input.isEmpty) return urls;
-
-    final regex = RegExp(
-      r'(https?:\/\/[^\s"<>]+?\.m3u8[^\s"<>]*)',
-      caseSensitive: false,
-    );
-
-    for (final m in regex.allMatches(input)) {
-      final s = m.group(0);
-      if (s != null && s.isNotEmpty) urls.add(s);
-    }
-    return urls;
-  }
-
-  static bool _looksLikePlaylist(String s) {
-    final upper = s.toUpperCase();
-    return upper.contains('#EXTM3U') ||
-        upper.contains('#EXT-X-STREAM-INF') ||
-        upper.contains('#EXTINF');
-  }
-
-  // Safe decode wrapper that returns original string if decodeComponent fails
-  static String _safeDecodeComponent(String s) {
-    try {
-      return Uri.decodeComponent(s);
-    } catch (_) {
-      return s;
-    }
-  }
-
-  static String _rot13(String s) {
-    return s.replaceAllMapped(RegExp(r'[A-Za-z]'), (Match m) {
-      final ch = m.group(0)!;
-      final code = ch.codeUnitAt(0);
-      final base = (code >= 97) ? 97 : 65;
-      return String.fromCharCode(((code - base + 13) % 26) + base);
-    });
-  }
-
-  // ------------------------------------------------------------
-  // Subtitle conversion helper
   static String _convertSrtToVtt(String srtContent) {
     final lines = srtContent.split('\n');
     final buffer = StringBuffer()..writeln('WEBVTT\n');
@@ -1077,7 +560,7 @@ static List<_DecodedCandidate> _extractPossibleM3u8s(String input) {
 }
 
 // =========================
-// Offline downloader below
+// Offline downloader below (unchanged from previous working implementation)
 // =========================
 
 class CancelToken {
@@ -1121,7 +604,7 @@ class OfflineDownloader {
     CancelToken? cancelToken,
   }) async {
     final url = streamInfo['url']!;
-    if (url.endsWith('.m3u8')) {
+    if (url.contains('.m3u8')) {
       return _downloadHls(
         m3u8Url: url,
         id: id,
@@ -1521,7 +1004,7 @@ class OfflineDownloader {
   }
 
   // -------------------------
-  // Helpers
+  // Helpers (resolve URIs, parse attrs, AES, etc.)
   // -------------------------
   static String _resolveUri(Uri playlistUri, String line) {
     final trimmed = line.trim();
