@@ -23,7 +23,9 @@
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <!-- Features -->
-    <uses-feature android:name="android.software.picture_in_picture" android:required="false" />
+    <uses-feature
+        android:name="android.software.picture_in_picture"
+        android:required="false" />
 
     <application
         android:name="${applicationName}"
@@ -32,6 +34,11 @@
         android:usesCleartextTraffic="true"
         android:enableOnBackInvokedCallback="true"
         tools:replace="android:icon,android:label">
+
+        <!-- ✅ Google Mobile Ads App ID -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-8084762253148740~7217978912" />
 
         <!-- ✅ Firebase Messaging Foreground Service -->
         <service
@@ -78,7 +85,7 @@
             android:grantUriPermissions="true">
             <meta-data
                 android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/provider_paths"/>
+                android:resource="@xml/provider_paths" />
         </provider>
 
         <!-- Flutter Embedding Version -->
