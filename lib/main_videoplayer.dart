@@ -222,8 +222,8 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
   // shared buffering configuration for all data sources
   late final BetterPlayerBufferingConfiguration _bufferingConfig;
 
-  // network timeout used for backend and HTTP calls
-  final Duration _networkTimeout = const Duration(seconds: 10);
+  // network timeout used for backend and HTTP calls (increased)
+  final Duration _networkTimeout = const Duration(seconds: 25);
 
   // watchdog timeout after a switch (seconds)
   final int _playbackStartTimeoutSeconds = 8;
@@ -403,6 +403,60 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
     }
   }
 
+  /// Normalize URL strings (handle protocol-relative, whitespace, etc.)
+  String _normalizeUrl(String url) {
+    if (url.isEmpty) return url;
+    var u = url.trim();
+    if (u.startsWith('//')) return 'https:$u';
+    return u;
+  }
+
+  /// Mobile-like User-Agent commonly accepted by CDNs
+  String _mobileUserAgent() {
+    return 'Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116 Mobile Safari/537.36';
+  }
+
+  /// Do a lightweight HEAD request and follow redirects to resolve final URL and server headers.
+  /// Returns a map: {'url': finalUrl, 'statusCode': int?, 'headers': Map<String,String>}
+  Future<Map<String, dynamic>> _preflightUrl(String url, {Map<String, String>? extraHeaders}) async {
+    try {
+      final normalized = _normalizeUrl(url);
+      final uri = Uri.parse(normalized);
+      final headers = <String, String>{
+        'User-Agent': _mobileUserAgent(),
+        'Accept': '*/*',
+        if (extraHeaders != null) ...extraHeaders,
+      };
+
+      final response = await http.head(uri, headers: headers).timeout(_networkTimeout);
+      final finalUrl = response.request?.url.toString() ?? normalized;
+      return {
+        'url': finalUrl,
+        'statusCode': response.statusCode,
+        'headers': response.headers,
+      };
+    } catch (e) {
+      debugPrint('Preflight failed for $url: $e');
+      return {'url': _normalizeUrl(url), 'statusCode': null, 'headers': {}};
+    }
+  }
+
+  Map<String, String> _buildHeadersForUrl(String url, {bool forceReferer = false}) {
+    final headers = <String, String>{
+      'Accept': '*/*',
+      'User-Agent': _mobileUserAgent(),
+    };
+    try {
+      final uri = Uri.parse(url);
+      if (forceReferer || uri.host.isNotEmpty) {
+        final origin = '${uri.scheme}://${uri.host}';
+        headers['Referer'] = origin;
+        headers['Origin'] = origin;
+      }
+    } catch (_) {}
+    return headers;
+  }
+
   Future<void> _initializeVideo() async {
     if (_currentVideoPath.isEmpty) {
       if (mounted) {
@@ -439,7 +493,11 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
         _streamingInfo = {'url': _currentVideoPath, 'creditsStartTime': null};
       }
 
-      final actualUrl = (_streamingInfo?['url'] as String?) ?? _currentVideoPath;
+      final rawUrl = (_streamingInfo?['url'] as String?) ?? _currentVideoPath;
+      final preflight = await _preflightUrl(rawUrl);
+      final actualUrl = (preflight['url'] as String?) ?? rawUrl;
+      debugPrint('Resolved URL: $rawUrl -> $actualUrl ; status=${preflight['statusCode']}');
+
       if (actualUrl.isEmpty) {
         if (mounted) {
           setState(() {
@@ -687,22 +745,6 @@ class MainVideoPlayerState extends State<MainVideoPlayer>
     }
   }
 
-  Map<String, String> _buildHeadersForUrl(String url, {bool forceReferer = false}) {
-    final headers = <String, String>{
-      'Accept': '*/*',
-      'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    };
-    try {
-      final uri = Uri.parse(url);
-      if ((forceReferer || uri.host.isNotEmpty)) {
-        // use the origin as referer - many CDNs accept origin/referer
-        headers['Referer'] = '${uri.scheme}://${uri.host}';
-      }
-    } catch (_) {}
-    return headers;
-  }
-
   /// Returns true if controller became initialized within timeoutSeconds.
   Future<bool> _waitForInitialization({int timeoutSeconds = 10}) async {
     final completer = Completer<bool>();
@@ -871,6 +913,18 @@ void _betterPlayerEventListener(BetterPlayerEvent event) {
     // Surface exception events (BetterPlayer uses `exception` for player-side failures)
     if (event.betterPlayerEventType == BetterPlayerEventType.exception) {
       debugPrint('BetterPlayer reported an exception: $params');
+      try {
+        final msg = (params != null && params is Map && params['exceptionMessage'] != null)
+            ? params['exceptionMessage'].toString()
+            : params.toString();
+        if (mounted) {
+          setState(() {
+            _errorMessage = 'Playback error: $msg';
+          });
+        }
+      } catch (e) {
+        debugPrint('Error extracting exception params: $e');
+      }
     }
   } catch (e) {
     debugPrint("BetterPlayer event listener error: $e");
@@ -1859,13 +1913,18 @@ void _betterPlayerEventListener(BetterPlayerEvent event) {
         }
       }
 
-      final headers = _buildHeadersForUrl(videoPath, forceReferer: false);
+      // Preflight target path to resolve redirects and host
+      final pre = await _preflightUrl(videoPath);
+      final resolvedPath = (pre['url'] as String?) ?? videoPath;
+      debugPrint('Switch video preflight: $videoPath -> $resolvedPath (status=${pre['statusCode']})');
 
-      final isFile = (!videoPath.startsWith('http') && !videoPath.startsWith('https'));
+      final headers = _buildHeadersForUrl(resolvedPath, forceReferer: false);
+
+      final isFile = (!resolvedPath.startsWith('http') && !resolvedPath.startsWith('https'));
 
       final dataSource = BetterPlayerDataSource(
         isFile ? BetterPlayerDataSourceType.file : BetterPlayerDataSourceType.network,
-        videoPath,
+        resolvedPath,
         headers: headers,
         liveStream: isHls,
         useAsmsSubtitles: true,
@@ -1890,7 +1949,7 @@ void _betterPlayerEventListener(BetterPlayerEvent event) {
       } on PlatformException catch (e) {
         debugPrint('PlatformException setting data source: $e');
         // Try retry with referer header
-        final altHeaders = _buildHeadersForUrl(videoPath, forceReferer: true);
+        final altHeaders = _buildHeadersForUrl(resolvedPath, forceReferer: true);
         final altDataSource = dataSource.copyWith(
           headers: altHeaders,
           bufferingConfiguration: _bufferingConfig,

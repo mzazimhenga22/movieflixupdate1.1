@@ -3,6 +3,7 @@
 // and save resolved variant for download-mode so downloader doesn't re-fetch.
 // Selection logic: prefer explicit hls/file streams, probe ambiguous URLs,
 // prefer streams labeled 'en' at stream-level and inside master playlists.
+// Added: robust sanitization of backend-provided URLs (strip metadata after `|`, handle %7C, token extraction).
 
 import 'dart:convert';
 import 'dart:async';
@@ -39,6 +40,7 @@ class StreamingService {
 
   /// Main public method: returns a map with 'url' (mp4 or m3u8 or local playlist path),
   /// 'type' ('m3u8'|'mp4'), optional 'playlist' (raw playlist text), optional 'subtitleUrl'.
+  /// Adds optional 'backendToken' when the backend embedded metadata like "url|token".
   static Future<Map<String, String>> getStreamingLink({
     required String tmdbId,
     required String title,
@@ -382,6 +384,31 @@ class StreamingService {
         }
       }
 
+      // --- NEW: sanitize chosenUrl before further processing or returning ---
+      String? chosenBackendToken;
+      try {
+        if (chosenUrl != null && chosenUrl!.isNotEmpty) {
+          final sanitized = _sanitizeStreamingUrl(chosenUrl!);
+          final cleaned = sanitized['url'];
+          final token = sanitized['token'];
+          if (cleaned == null || cleaned.isEmpty) {
+            _logger.w('Sanitizer produced empty URL for chosenUrl="$chosenUrl" — keeping original as fallback.');
+          } else {
+            if (cleaned != chosenUrl) {
+              _logger.i('Sanitized chosenUrl: ${_short(chosenUrl!)} -> ${_short(cleaned)}');
+            }
+            chosenUrl = cleaned;
+          }
+          if (token != null && token.isNotEmpty) {
+            chosenBackendToken = token;
+            _logger.d('Extracted backend token from chosenUrl (length=${token.length})');
+          }
+        }
+      } catch (e, st) {
+        _logger.w('Sanitization step threw: $e\n$st — continuing with un-sanitized chosenUrl.');
+      }
+      // --- END sanitize ---
+
       // If chosenUrl is remote m3u8 and forDownload requested, attempt to download playlist to temp file,
       // and resolve master -> variant preferring English where possible.
       if (chosenUrl != null &&
@@ -461,6 +488,7 @@ class StreamingService {
       if (chosenPlaylistText != null) result['playlist'] = chosenPlaylistText!;
       if (subtitleUrl.isNotEmpty) result['subtitleUrl'] = subtitleUrl;
       if (chosenQuality != null) result['quality'] = chosenQuality!;
+      if (chosenBackendToken != null && chosenBackendToken.isNotEmpty) result['backendToken'] = chosenBackendToken;
 
       _logger.i('Streaming link resolved: ${result['url']} (type=${result['type']}) '
           '${result.containsKey('quality') ? 'quality=${result['quality']}' : ''}');
@@ -504,6 +532,121 @@ class StreamingService {
     if (lc.contains('hindi')) return 'hi';
     return lc; // return raw-ish fallback
   }
+
+  // ------------------------------------------------------------
+  // Sanitize a raw backend streaming URL.
+  // - normalizes %7C -> |
+  // - splits off metadata after first '|' and returns token (rest)
+  // - ensures protocol-relative URLs get a scheme
+  // Returns { 'url': cleanedUrl, 'token': tokenOrNull }
+  // ------------------------------------------------------------
+  static Map<String, String?> _sanitizeStreamingUrl(String raw) {
+    try {
+      var s = raw.trim();
+
+      // Strip wrapping quotes (single or double) and whitespace
+      if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+        s = s.substring(1, s.length - 1).trim();
+      }
+
+      // Normalize common encoding of pipe
+      s = s.replaceAll('%7C', '|').replaceAll('%7c', '|');
+
+      // If the backend wrapped the url inside JSON-ish wrappers, quickly trim stray brackets
+
+  s = s.replaceAll(RegExp(r'''^[\[\]"']+'''), '');
+  s = s.replaceAll(RegExp(r'''[\]\s"']+$'''), '');
+
+
+      // remove fragment (after '#') — not needed for HTTP fetch
+      final hashIndex = s.indexOf('#');
+      if (hashIndex >= 0) s = s.substring(0, hashIndex);
+
+      // split off token after first '|'
+      String left;
+      String? token;
+      if (s.contains('|')) {
+        final parts = s.split('|');
+        left = parts.first.trim();
+        token = parts.sublist(1).join('|').trim();
+        if (token.isEmpty) token = null;
+        else {
+          try {
+            token = Uri.decodeComponent(token);
+          } catch (_) {}
+        }
+      } else {
+        left = s.trim();
+      }
+
+      // swap if left empty but token contains a URL
+      if ((left.isEmpty || left == 'null') &&
+          token != null &&
+          (token.startsWith('http://') || token.startsWith('https://') || token.startsWith('//'))) {
+        left = token;
+        token = null;
+      }
+
+      // If protocol-relative, add https:
+      if (left.startsWith('//')) left = 'https:$left';
+
+      // If left looks like a Windows/Unix absolute file path, leave it alone.
+      final looksLikeFile = left.startsWith('/') ||
+          left.startsWith('file://') ||
+          RegExp(r'^[a-zA-Z]:(\\|/)').hasMatch(left); // windows drive
+
+      // Otherwise, if it already starts with http(s) or file, keep; else be conservative:
+      if (!looksLikeFile && !left.startsWith('http://') && !left.startsWith('https://') && !left.startsWith('file://')) {
+        // only add https if it looks like host/path (contains '.' and '/')
+        if (left.contains('.') && left.contains('/')) {
+          left = 'https://$left';
+        }
+      }
+
+      // Validate parse
+      final parsed = Uri.tryParse(left);
+      if (parsed == null) {
+        // if parse failed, return raw inputs (best-effort)
+        return {'url': left, 'token': token};
+      }
+
+      // Return cleaned values
+      return {'url': left, 'token': token};
+    } catch (e) {
+      _logger.w('Sanitizer threw: $e — returning raw input as url');
+      return {'url': raw, 'token': null};
+    }
+  }
+
+  /// Public wrapper usable by other modules to sanitize a URL.
+  /// Returns a Map with keys 'url' and 'token' (token may be null).
+  static Map<String, String?> sanitizeUrlLocally(String raw) => _sanitizeStreamingUrl(raw);
+
+  // ------------------------------------------------------------
+  // Attach token as a query parameter (fallback if server requires it)
+  // ------------------------------------------------------------
+  static String _attachTokenAsQuery(String url, String token) {
+    if (token.isEmpty) return url;
+    try {
+      final uri = Uri.parse(url);
+      final newQueryParameters = Map<String, String>.from(uri.queryParameters);
+      if (!newQueryParameters.containsKey('token')) {
+        newQueryParameters['token'] = token;
+      } else if (!newQueryParameters.containsKey('t')) {
+        newQueryParameters['t'] = token;
+      } else {
+        newQueryParameters['backendToken'] = token;
+      }
+      final newUri = uri.replace(queryParameters: newQueryParameters);
+      return newUri.toString();
+    } catch (e) {
+      final sep = url.contains('?') ? '&' : '?';
+      return '$url${sep}token=${Uri.encodeComponent(token)}';
+    }
+  }
+
+  /// Public wrapper to attach a token to a URL as a query parameter.
+  static String attachTokenToUrl(String url, String token) => _attachTokenAsQuery(url, token);
 
   // ------------------------------------------------------------
   // Pick variant from master playlist preferring language/resolution
@@ -550,14 +693,6 @@ class StreamingService {
       if (variants.isEmpty) return null;
 
       // Try to find variant with matching english audio:
-      // Heuristics:
-      // 1) If variant ATTRS contains AUDIO attribute pointing to group id which maps to LANGUAGE=en => choose that variant.
-      // 2) If there exists an EXT-X-MEDIA item with LANGUAGE en and URI that is exactly one of the variant URIs or relates -> choose associated variant.
-      // 3) If variant NAME or ATTRS contain 'english' or 'en' -> pick.
-      // 4) Else pick variant matching preferResolution if possible.
-      // 5) Else fallback to first variant.
-
-      // 1) Check AUDIO group attribute
       for (final v in variants) {
         final attrs = Map<String, String>.from(v['attrs'] as Map<String, String>);
         final audioGroup = (attrs['AUDIO'] ?? attrs['AUDIO-GROUP'] ?? '').toString();
@@ -577,8 +712,6 @@ class StreamingService {
         final lang = (attrs['LANGUAGE'] ?? attrs['LANG'] ?? '').toString().toLowerCase();
         final mediaUri = attrs['URI'];
         if (mediaUri != null && lang.startsWith(preferLanguage)) {
-          // if mediaUri points to a playlist which itself points to variant(s), try to find variant referencing that audio group; else fallback
-          // naive scan: if a variant uri contains the same filename as mediaUri, prefer it
           for (final v in variants) {
             if (v['uri'] != null && v['uri'].toString().contains(p.basename(mediaUri))) {
               final resolved = _resolveUri(base, v['uri'].toString());
@@ -588,7 +721,7 @@ class StreamingService {
         }
       }
 
-      // 3) NAME/other heuristics, or CODECS containing 'eng' (rare)
+      // 3) NAME/other heuristics
       for (final v in variants) {
         final attrs = Map<String, String>.from(v['attrs'] as Map<String, String>);
         final name = (attrs['NAME'] ?? attrs['VIDEO-RANGE'] ?? '').toString().toLowerCase();
@@ -682,10 +815,15 @@ class StreamingService {
 
   // ------------------------------------------------------------
   // Probe helper kept for optional external uses (used in selection)
+  // Updated: probe sanitized URL to avoid sending pipe-containing URLs to servers/Exo.
   // ------------------------------------------------------------
   static Future<bool> _probePlayableUrl(String url, {Map<String, String>? headers}) async {
     try {
-      final uri = Uri.parse(url);
+      final sanitized = _sanitizeStreamingUrl(url);
+      final cleanedUrl = sanitized['url'] ?? url;
+      final token = sanitized['token'];
+
+      final uri = Uri.parse(cleanedUrl);
       final client = http.Client();
 
       // Try HEAD first
@@ -705,7 +843,7 @@ class StreamingService {
               ct.contains('audio') ||
               ct.contains('application'))) {
         if (ct.contains('text') || ct.contains('html')) {
-          _logger.w('Probe HEAD/content-type indicates non-media: $ct for $url');
+          _logger.w('Probe HEAD/content-type indicates non-media: $ct for $cleanedUrl');
           client.close();
           return false;
         }
@@ -720,14 +858,26 @@ class StreamingService {
       final resp = await client.get(uri, headers: rangeHeaders);
 
       if (resp.statusCode != 200 && resp.statusCode != 206) {
-        _logger.w('Probe ranged GET returned ${resp.statusCode} for $url');
+        _logger.w('Probe ranged GET returned ${resp.statusCode} for $cleanedUrl');
         client.close();
+        // If token exists, try attaching token as query param and probe again (one quick attempt)
+        if (token != null && token.isNotEmpty) {
+          final withToken = _attachTokenAsQuery(cleanedUrl, token);
+          try {
+            final resp2 = await client.get(Uri.parse(withToken), headers: rangeHeaders);
+            if (resp2.statusCode == 200 || resp2.statusCode == 206) {
+              _logger.i('Probe with token succeeded for $withToken');
+              client.close();
+              return true;
+            }
+          } catch (_) {}
+        }
         return false;
       }
 
       final bodyBytes = resp.bodyBytes;
       if (bodyBytes.isEmpty) {
-        _logger.w('Probe returned empty body for $url');
+        _logger.w('Probe returned empty body for $cleanedUrl');
         client.close();
         return false;
       }
@@ -735,7 +885,7 @@ class StreamingService {
       // check for HTML (Cloudflare / anti-bot pages often start with '<' or contain 'cf-ray' etc)
       final headText = utf8.decode(bodyBytes.length > 512 ? bodyBytes.sublist(0, 512) : bodyBytes, allowMalformed: true).toLowerCase();
       if (headText.contains('<!doctype') || headText.contains('<html') || headText.contains('cloudflare') || headText.contains('captcha')) {
-        _logger.w('Probe body looks like HTML/anti-bot page for $url');
+        _logger.w('Probe body looks like HTML/anti-bot page for $cleanedUrl');
         client.close();
         return false;
       }
@@ -768,7 +918,7 @@ class StreamingService {
         return true;
       }
 
-      _logger.w('Probe could not validate media signature for $url (prefixHex: $prefixHex, ct="$rangedCt")');
+      _logger.w('Probe could not validate media signature for $cleanedUrl (prefixHex: $prefixHex, ct="$rangedCt")');
       client.close();
       return false;
     } catch (e, st) {
@@ -784,7 +934,7 @@ class StreamingService {
   }
 
   // -------------------------
-  // Reused helpers below
+  // Reused helpers below (kept as static so OfflineDownloader can call StreamingService._...)
   // -------------------------
   static String _resolveUri(Uri playlistUri, String line) {
     final trimmed = line.trim();
@@ -826,10 +976,50 @@ class StreamingService {
     }
     return map;
   }
+
+  static Uint8List _hexToBytes(String hex) {
+    final clean = hex.length % 2 == 1 ? '0$hex' : hex;
+    final bytes = Uint8List(clean.length ~/ 2);
+    for (var i = 0; i < clean.length; i += 2) {
+      bytes[i ~/ 2] = int.parse(clean.substring(i, i + 2), radix: 16);
+    }
+    return bytes;
+  }
+
+  static Uint8List _ivFromSequence(int seq) {
+    final iv = Uint8List(16);
+    final seqBytes = ByteData(8)..setUint64(0, seq, Endian.big);
+    for (var i = 0; i < 8; i++) iv[8 + i] = seqBytes.getUint8(i);
+    return iv;
+  }
+
+  static Uint8List _aes128CbcDecrypt(Uint8List data, Uint8List key, Uint8List iv) {
+    final params = ParametersWithIV(KeyParameter(key), iv);
+    final cipher = CBCBlockCipher(AESEngine())..init(false, params);
+
+    final out = Uint8List(data.length);
+    final blockSize = cipher.blockSize;
+    var offset = 0;
+    final input = Uint8List(blockSize);
+    final output = Uint8List(blockSize);
+
+    while (offset < data.length) {
+      final inLen = ((offset + blockSize) <= data.length) ? blockSize : data.length - offset;
+      input.fillRange(0, blockSize, 0);
+      input.setRange(0, inLen, data, offset);
+      cipher.processBlock(input, 0, output, 0);
+      final writeLen = (inLen == blockSize) ? blockSize : inLen;
+      out.setRange(offset, offset + writeLen, output, 0);
+      offset += inLen;
+    }
+    return out;
+  }
 }
 
 // =========================
 // Offline downloader below (unchanged logic but full implementation included)
+// Note: OfflineDownloader consumes the returned map from StreamingService.getStreamingLink.
+// If you want offline downloader to also sanitize, you can call StreamingService._sanitizeStreamingUrl(streamInfo['url']!) prior to use.
 // =========================
 
 class CancelToken {
@@ -872,7 +1062,17 @@ class OfflineDownloader {
     void Function(DownloadProgress)? onProgress,
     CancelToken? cancelToken,
   }) async {
-    final url = streamInfo['url']!;
+    var url = streamInfo['url']!;
+    // Safety: sanitize again inside downloader as a defensive step
+    try {
+      final sanitized = StreamingService._sanitizeStreamingUrl(url);
+      url = sanitized['url'] ?? url;
+      if (sanitized['token'] != null && sanitized['token']!.isNotEmpty) {
+        // if downloader needs token to fetch segments, it can attach it as a query param using _attachTokenAsQuery
+        // For now we just keep the sanitized url; callers may choose to attach token if remote origin requires it.
+      }
+    } catch (_) {}
+
     if (url.contains('.m3u8')) {
       return _downloadHls(
         m3u8Url: url,
@@ -1056,7 +1256,6 @@ class OfflineDownloader {
       }
 
       // Master playlist detection
-// ---- master/variant handling ----
       if (playlist.contains('#EXT-X-STREAM-INF')) {
         final lines = playlist.split('\n');
         String? pickedVariant;
@@ -1078,7 +1277,7 @@ class OfflineDownloader {
         if (pickedVariant == null) throw Exception('No variant streams found in master playlist.');
 
         // Resolve variant URL robustly
-        String variantUrl = _resolveUri(baseUri, pickedVariant);
+        String variantUrl = StreamingService._resolveUri(baseUri, pickedVariant);
         Uri variantUri = Uri.parse(variantUrl);
 
         // If parsed URI lacks scheme but base is http(s), re-resolve via baseUri.resolve()
@@ -1145,7 +1344,7 @@ class OfflineDownloader {
         if (line.startsWith('#EXT-X-KEY')) {
           lastKeyLine = line;
         } else if (!line.startsWith('#')) {
-          final segUrl = _resolveUri(baseUri, line);
+          final segUrl = StreamingService._resolveUri(baseUri, line);
           final seq = segments.length;
           segments.add(_Segment(url: segUrl, seq: seq, keyLine: lastKeyLine));
         }
@@ -1158,11 +1357,11 @@ class OfflineDownloader {
       for (var seg in segments) {
         final kl = seg.keyLine;
         if (kl != null) {
-          final attrs = _parseAttributes(kl.substring('#EXT-X-KEY:'.length));
+          final attrs = StreamingService._parseAttributes(kl.substring('#EXT-X-KEY:'.length));
           final method = attrs['METHOD'];
           final uriRaw = attrs['URI']?.replaceAll('"', '');
           if (method != null && method.toUpperCase() == 'AES-128' && uriRaw != null) {
-            final keyUri = _resolveUri(baseUri, uriRaw);
+            final keyUri = StreamingService._resolveUri(baseUri, uriRaw);
             uniqueKeyUris.add(keyUri);
           }
         }
@@ -1225,21 +1424,21 @@ class OfflineDownloader {
 
             // AES-128 decrypt if required
             if (seg.keyLine != null) {
-              final attrs = _parseAttributes(seg.keyLine!.substring('#EXT-X-KEY:'.length));
+              final attrs = StreamingService._parseAttributes(seg.keyLine!.substring('#EXT-X-KEY:'.length));
               final method = attrs['METHOD'];
               final uriRaw = attrs['URI']?.replaceAll('"', '');
               final ivRaw = attrs['IV'];
               if (method != null && method.toUpperCase() == 'AES-128' && uriRaw != null) {
-                final keyUri = _resolveUri(baseUri, uriRaw);
+                final keyUri = StreamingService._resolveUri(baseUri, uriRaw);
                 final key = keyCache[keyUri];
                 if (key == null) throw Exception('Key missing for AES-128 segment');
                 Uint8List iv;
                 if (ivRaw != null) {
-                  iv = _hexToBytes(ivRaw.replaceFirst('0x', ''));
+                  iv = StreamingService._hexToBytes(ivRaw.replaceFirst('0x', ''));
                 } else {
-                  iv = _ivFromSequence(seg.seq);
+                  iv = StreamingService._ivFromSequence(seg.seq);
                 }
-                data = _aes128CbcDecrypt(data, key, iv);
+                data = StreamingService._aes128CbcDecrypt(data, key, iv);
               }
             }
 
@@ -1281,7 +1480,7 @@ class OfflineDownloader {
         } else if (line.startsWith('#')) {
           rewritten.add(line);
         } else {
-          final resolved = _resolveUri(baseUri, line);
+          final resolved = StreamingService._resolveUri(baseUri, line);
           final name = p.basename(Uri.parse(resolved).path);
           rewritten.add(name);
         }
@@ -1341,90 +1540,11 @@ class OfflineDownloader {
       client.close();
     }
   }
-
-  // -------------------------
-  // Helpers (resolve URIs, parse attrs, AES, etc.)
-  // -------------------------
-  static String _resolveUri(Uri playlistUri, String line) {
-    final trimmed = line.trim();
-    if (trimmed.isEmpty) return trimmed;
-
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
-
-    if (trimmed.startsWith('//')) {
-      final scheme = (playlistUri.scheme.isNotEmpty) ? playlistUri.scheme : 'https';
-      return '$scheme:$trimmed';
-    }
-
-    if (playlistUri.hasScheme && playlistUri.scheme == 'file') {
-      final basePath = playlistUri.toFilePath();
-      final resolvedPath = p.normalize(p.join(p.dirname(basePath), trimmed));
-      return Uri.file(resolvedPath).toString();
-    }
-
-    if (trimmed.startsWith('/')) {
-      return '${playlistUri.scheme}://${playlistUri.authority}$trimmed';
-    }
-
-    try {
-      final resolved = playlistUri.resolve(trimmed);
-      return resolved.toString();
-    } catch (e) {
-      return '${playlistUri.scheme}://${playlistUri.authority}/$trimmed';
-    }
-  }
-
-  static Map<String, String> _parseAttributes(String input) {
-    final map = <String, String>{};
-    final parts = RegExp(r'([A-Z0-9-]+)=("(?:[^"]*)"|[^,]*)', caseSensitive: false).allMatches(input);
-    for (final m in parts) {
-      final key = m.group(1)!;
-      var value = m.group(2)!;
-      if (value.startsWith('"') && value.endsWith('"')) value = value.substring(1, value.length - 1);
-      map[key] = value;
-    }
-    return map;
-  }
-
-  static Uint8List _hexToBytes(String hex) {
-    final clean = hex.length % 2 == 1 ? '0$hex' : hex;
-    final bytes = Uint8List(clean.length ~/ 2);
-    for (var i = 0; i < clean.length; i += 2) {
-      bytes[i ~/ 2] = int.parse(clean.substring(i, i + 2), radix: 16);
-    }
-    return bytes;
-  }
-
-  static Uint8List _ivFromSequence(int seq) {
-    final iv = Uint8List(16);
-    final seqBytes = ByteData(8)..setUint64(0, seq, Endian.big);
-    for (var i = 0; i < 8; i++) iv[8 + i] = seqBytes.getUint8(i);
-    return iv;
-  }
-
-  static Uint8List _aes128CbcDecrypt(Uint8List data, Uint8List key, Uint8List iv) {
-    final params = ParametersWithIV(KeyParameter(key), iv);
-    final cipher = CBCBlockCipher(AESEngine())..init(false, params);
-
-    final out = Uint8List(data.length);
-    final blockSize = cipher.blockSize;
-    var offset = 0;
-    final input = Uint8List(blockSize);
-    final output = Uint8List(blockSize);
-
-    while (offset < data.length) {
-      final inLen = ((offset + blockSize) <= data.length) ? blockSize : data.length - offset;
-      input.fillRange(0, blockSize, 0);
-      input.setRange(0, inLen, data, offset);
-      cipher.processBlock(input, 0, output, 0);
-      final writeLen = (inLen == blockSize) ? blockSize : inLen;
-      out.setRange(offset, offset + writeLen, output, 0);
-      offset += inLen;
-    }
-    return out;
-  }
 }
 
+// -------------------------
+// Small utilities used by downloader
+// -------------------------
 class _Segment {
   final String url;
   final int seq;

@@ -23,6 +23,9 @@ import 'package:visibility_detector/visibility_detector.dart';
 import 'package:movie_app/settings_provider.dart';
 import 'package:movie_app/tv_show_episodes_section.dart';
 
+/// AD: google_mobile_ads
+import 'package:google_mobile_ads/google_mobile_ads.dart';
+
 /// MovieDetailScreen with a Netflix-like persistent download overlay.
 /// Passes the full m3u8 returned by StreamingService to MainVideoPlayer.
 
@@ -37,6 +40,7 @@ class MovieDetailScreen extends StatefulWidget {
 
 class MovieDetailScreenState extends State<MovieDetailScreen> {
   Future<Map<String, dynamic>>? _tvDetailsFuture;
+  Future<Map<String, dynamic>>? _processedDetailsFuture; // COMPUTE: processed ui data
   String _selectedResolution = "720p";
   bool _enableSubtitles = false;
   late final bool _isTvShow;
@@ -58,14 +62,33 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
   Future<String>? _backgroundMergeFuture;
   String? _backgroundTitle;
 
+  // ---------- AD: RewardedAd for loading period ----------
+  RewardedAd? _loadingRewardedAd;
+  bool _adShownDuringLoad = false;
+  bool _isAdLoading = false;
+
   @override
   void initState() {
     super.initState();
+
     _isTvShow = (widget.movie['media_type']?.toString().toLowerCase() == 'tv') ||
         (widget.movie['seasons'] != null && (widget.movie['seasons'] as List).isNotEmpty);
 
+    /// AD: initialize Mobile Ads
+    MobileAds.instance.initialize();
+
     if (_isTvShow) {
       _tvDetailsFuture = tmdb.TMDBApi.fetchTVShowDetails(widget.movie['id']);
+      // chain compute once tv details are present
+      _processedDetailsFuture = _tvDetailsFuture!.then((tvData) {
+        final merged = {...widget.movie, ...?tvData};
+        return compute<Map<String, dynamic>, Map<String, dynamic>>(prepareDetailsWorker, merged);
+      }).catchError((_) {
+        // fallback to computing from original movie map
+        return compute<Map<String, dynamic>, Map<String, dynamic>>(prepareDetailsWorker, widget.movie);
+      });
+    } else {
+      _processedDetailsFuture = compute<Map<String, dynamic>, Map<String, dynamic>>(prepareDetailsWorker, widget.movie);
     }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -78,15 +101,22 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
   void dispose() {
     _downloadProgressNotifier.dispose();
     _removeDownloadOverlay();
+
+    // AD cleanup
+    _loadingRewardedAd = null;
     super.dispose();
   }
 
-  // ------------------ modal-loading helpers ------------------
+  // ------------------ modal-loading helpers (AD integrated) ------------------
 
   void showModalLoading() {
     if (!mounted) return;
     if (_isModalLoadingVisible) return;
     _isModalLoadingVisible = true;
+
+    // Start loading an ad while the dialog is visible
+    _loadRewardedAd();
+
     showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -105,6 +135,60 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
       Navigator.of(context, rootNavigator: true).pop();
     } catch (_) {}
     _isModalLoadingVisible = false;
+  }
+
+  /// AD: Load RewardedAd and show it while loading dialog is up
+  void _loadRewardedAd() {
+    if (_isAdLoading || _loadingRewardedAd != null || _adShownDuringLoad) return;
+    _isAdLoading = true;
+
+    final adUnitId = Platform.isAndroid
+        ? 'ca-app-pub-3940256099942544/5224354917' // test rewarded ad - Android
+        : 'ca-app-pub-3940256099942544/1712485313'; // test rewarded ad - iOS
+
+    RewardedAd.load(
+      adUnitId: adUnitId,
+      request: const AdRequest(),
+      rewardedAdLoadCallback: RewardedAdLoadCallback(
+        onAdLoaded: (ad) {
+          if (!mounted) return;
+          _loadingRewardedAd = ad;
+          _isAdLoading = false;
+
+          // show ad if still showing loading dialog
+          if (_isModalLoadingVisible && !_adShownDuringLoad) {
+            try {
+              _loadingRewardedAd!.fullScreenContentCallback = FullScreenContentCallback(
+                onAdShowedFullScreenContent: (ad) {
+                  _adShownDuringLoad = true;
+                },
+                onAdDismissedFullScreenContent: (ad) {
+                  // once dismissed, release
+                  _loadingRewardedAd = null;
+                },
+                onAdFailedToShowFullScreenContent: (ad, err) {
+                  debugPrint('Ad failed to show: $err');
+                  _loadingRewardedAd = null;
+                },
+              );
+
+              _loadingRewardedAd!.show(onUserEarnedReward: (ad, reward) {
+                // optional: you could grant a small reward or track metrics
+                debugPrint('User earned reward during loading: ${reward.amount} ${reward.type}');
+              });
+            } catch (e) {
+              debugPrint('Exception showing rewarded ad: $e');
+              _loadingRewardedAd = null;
+            }
+          }
+        },
+        onAdFailedToLoad: (err) {
+          debugPrint('RewardedAd failed to load: $err');
+          _isAdLoading = false;
+          _loadingRewardedAd = null;
+        },
+      ),
+    );
   }
 
   // ------------------ end modal-loading helpers -----------------------
@@ -812,7 +896,7 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
 
   // ----- UI sections: renamed to lowerCamelCase -----
   Widget _titleSection(Map<String, dynamic> details, bool isTvShow) {
-    final title = isTvShow ? (details['name'] ?? details['title'] ?? 'No Title') : (details['title'] ?? details['name'] ?? 'No Title');
+    final title = details['_title'] ?? (isTvShow ? (details['name'] ?? details['title'] ?? 'No Title') : (details['title'] ?? details['name'] ?? 'No Title'));
     return RepaintBoundary(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -852,13 +936,13 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
           ),
         ),
       );
-    } else if (details['tags'] != null && (details['tags'] as List).isNotEmpty) {
+    } else if (details['_tags'] != null && (details['_tags'] as List).isNotEmpty) {
       return RepaintBoundary(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
           child: Wrap(
             spacing: 8,
-            children: (details['tags'] as List)
+            children: (details['_tags'] as List)
                 .map((tag) => Chip(label: Text(tag.toString(), style: const TextStyle(color: Colors.white)), backgroundColor: Colors.grey[800]))
                 .toList(),
           ),
@@ -905,7 +989,7 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
                 ),
               ),
             )
-          : Text(details['synopsis'] ?? details['overview'] ?? 'No overview available.', style: const TextStyle(fontSize: 16, color: Colors.white)),
+          : Text(details['_synopsis'] ?? details['synopsis'] ?? details['overview'] ?? 'No overview available.', style: const TextStyle(fontSize: 16, color: Colors.white)),
     );
   }
 
@@ -932,7 +1016,7 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
           ],
         ),
       );
-    } else if (details['cast'] != null && (details['cast'] as List).isNotEmpty) {
+    } else if (details['_castList'] != null && (details['_castList'] as List).isNotEmpty) {
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Column(
@@ -942,7 +1026,7 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
             const SizedBox(height: 8),
             Wrap(
               spacing: 8,
-              children: (details['cast'] as List)
+              children: (details['_castList'] as List)
                   .asMap()
                   .entries
                   .map((entry) => Chip(
@@ -1093,7 +1177,7 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
   }
 
   Widget _buildDetailScreen(Map<String, dynamic> details) {
-    final posterUrl = 'https://image.tmdb.org/t/p/w500${details['poster'] ?? details['poster_path'] ?? ''}';
+    final posterUrl = details['_posterUrl'] ?? 'https://image.tmdb.org/t/p/w500${details['poster'] ?? details['poster_path'] ?? ''}';
     final settings = Provider.of<SettingsProvider>(context);
 
     final detailsWidgets = _buildDetailsContent(details, _isTvShow, false);
@@ -1277,24 +1361,32 @@ class MovieDetailScreenState extends State<MovieDetailScreen> {
   Widget build(BuildContext context) {
     return Consumer<SettingsProvider>(
       builder: (context, settings, child) {
-        if (_isTvShow && _tvDetailsFuture != null) {
-          return FutureBuilder<Map<String, dynamic>>(
-            future: _tvDetailsFuture,
-            builder: (context, snapshot) {
-              final details = snapshot.connectionState == ConnectionState.waiting ? widget.movie : {...widget.movie, ...?snapshot.data};
-              if (snapshot.hasError) {
-                return const Scaffold(
-                  backgroundColor: Colors.black,
-                  body: Center(
-                    child: Text('Unable to load details. Please try again later.', style: TextStyle(color: Colors.white)),
-                  ),
-                );
-              }
-              return _buildDetailScreen(details);
-            },
-          );
-        }
-        return _buildDetailScreen(widget.movie);
+        // If TV show: show tv details future -> then processed details future is already chained in initState
+        // Use processed details future to build UI (COMPUTE reduces expensive processing)
+        return FutureBuilder<Map<String, dynamic>>(
+          future: _processedDetailsFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              // show skeleton screen until processed details ready
+              return const Scaffold(
+                backgroundColor: Colors.black,
+                body: Center(child: CircularProgressIndicator()),
+              );
+            } else if (snapshot.hasError) {
+              return const Scaffold(
+                backgroundColor: Colors.black,
+                body: Center(
+                  child: Text('Unable to load details. Please try again later.', style: TextStyle(color: Colors.white)),
+                ),
+              );
+            } else if (snapshot.hasData) {
+              return _buildDetailScreen(snapshot.data!);
+            } else {
+              // fallback to raw movie map
+              return _buildDetailScreen(widget.movie);
+            }
+          },
+        );
       },
     );
   }
@@ -1707,4 +1799,56 @@ Future<String> mergeSegmentsWorker(Map<String, String> args) async {
 
 Future<String> _mergeSegmentsOnMainIsolate(String playlistPath, String outDir, String id) async {
   return await mergeSegmentsWorker({'playlist': playlistPath, 'outDir': outDir, 'id': id});
+}
+
+/// COMPUTE: prepare details for UI on background isolate
+/// runs via compute(...) with a plain Map (must be encodable)
+Map<String, dynamic> prepareDetailsWorker(Map<String, dynamic> rawDetails) {
+  // Make defensive copy
+  final details = Map<String, dynamic>.from(rawDetails);
+
+  // poster url
+  final poster = details['poster'] ?? details['poster_path'] ?? '';
+  details['_posterUrl'] = poster.toString().isNotEmpty ? 'https://image.tmdb.org/t/p/w500$poster' : '';
+
+  // title normalization
+  details['_title'] = (details['title'] ?? details['name'] ?? 'Untitled').toString();
+
+  // synopsis trimming
+  final synopsis = (details['synopsis'] ?? details['overview'] ?? '').toString();
+  details['_synopsis'] = synopsis.length > 1000 ? '${synopsis.substring(0, 1000)}...' : synopsis;
+
+  // tags extraction (ensure list of strings)
+  List<String> tags = [];
+  try {
+    if (details['tags'] is List) {
+      tags = (details['tags'] as List).map((t) => t?.toString() ?? '').where((t) => t.isNotEmpty).toList();
+    } else if (details['genres'] is List) {
+      tags = (details['genres'] as List).map((g) => (g is Map && g['name'] != null) ? g['name'].toString() : g.toString()).where((t) => t.isNotEmpty).toList();
+    }
+  } catch (_) {
+    tags = [];
+  }
+  details['_tags'] = tags;
+
+  // cast extraction
+  List<String> castList = [];
+  try {
+    if (details['cast'] is List) {
+      castList = (details['cast'] as List).map((c) {
+        if (c == null) return '';
+        if (c is Map) {
+          return (c['name'] ?? c['original_name'] ?? c['character'] ?? '').toString();
+        }
+        return c.toString();
+      }).where((s) => s.isNotEmpty).toList();
+    } else if (details['credits'] is Map && details['credits']['cast'] is List) {
+      castList = (details['credits']['cast'] as List).map((c) => (c is Map && c['name'] != null) ? c['name'].toString() : c.toString()).where((s) => s.isNotEmpty).toList();
+    }
+  } catch (_) {
+    castList = [];
+  }
+  details['_castList'] = castList;
+
+  return details;
 }

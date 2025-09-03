@@ -392,6 +392,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "5.0.3"
+  facebook_audience_network:
+    dependency: "direct main"
+    description:
+      path: "facebook_audience_network-1.0.1"
+      relative: true
+    source: path
+    version: "1.0.1"
   fake_async:
     dependency: transitive
     description:
@@ -948,6 +955,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.3.3+1"
+  google_mobile_ads:
+    dependency: "direct main"
+    description:
+      name: google_mobile_ads
+      sha256: a4f59019f2c32769fb6c60ed8aa321e9c21a36297e2c4f23452b3e779a3e7a26
+      url: "https://pub.dev"
+    source: hosted
+    version: "6.0.0"
   google_sign_in:
     dependency: "direct main"
     description:
@@ -1929,6 +1944,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.4.0"
+  unity_ads_plugin:
+    dependency: "direct main"
+    description:
+      name: unity_ads_plugin
+      sha256: "419a314c3b2b851e0978f9adf5e45807548b1c0d42b06ea6f0504cbf158ff4cc"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.27"
   universal_html:
     dependency: "direct main"
     description:

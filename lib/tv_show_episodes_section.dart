@@ -451,78 +451,95 @@ class TVShowEpisodesSectionState extends State<TVShowEpisodesSection> with Autom
           initialResolution: '720p',
           initialSubtitles: false,
           onPlay: (resolution, subtitles) async {
-            // bottom sheet closed by modal widget itself before calling this callback
-            // Use parent's centralized modal if available to avoid popping wrong navigator.
-            if (parentState != null) {
-              parentState.showModalLoading();
-            } else {
-              // fallback local dialog
-              _showLocalLoadingDialog();
-            }
+  // bottom sheet closed by modal widget itself before calling this callback
+  final parentState = context.findAncestorStateOfType<MovieDetailScreenState>();
+  final settings = Provider.of<SettingsProvider>(context, listen: false);
+  final bool allowAds = (settings as dynamic).allowAds ?? true; // add allowAds to SettingsProvider if you want to control ads
 
-            final episodeNumber = (episode['episode_number'] as int?) ?? 1;
-            final episodeName = episode['name'] as String? ?? 'Untitled';
-            Map<String, String> streamingInfo = <String, String>{};
+  Timer? delayedLoader;
+  bool loadingShown = false;
 
-            try {
-              streamingInfo = await StreamingService.getStreamingLink(
-                tmdbId: widget.tvId.toString(),
-                title: widget.tvShowName.isNotEmpty ? widget.tvShowName : episodeName,
-                releaseYear: _releaseYear ?? 1970,
-                season: seasonNumber,
-                episode: episodeNumber,
-                resolution: resolution,
-                enableSubtitles: subtitles,
-              );
-            } catch (e) {
-              if (parentState != null) {
-                parentState.dismissModalLoading();
-              } else {
-                _dismissLocalLoadingDialog();
-              }
-              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Unable to start streaming. Please try again later.")));
-              return;
-            }
+  // Start delayed-show: only show loading/ad if streaming call takes longer than 400ms
+  if (parentState != null && allowAds) {
+    delayedLoader = Timer(const Duration(milliseconds: 400), () {
+      if (!mounted) return;
+      parentState.showModalLoading();
+      loadingShown = true;
+    });
+  } else if (parentState == null) {
+    // local fallback: show local dialog after same delay
+    delayedLoader = Timer(const Duration(milliseconds: 400), () {
+      if (!mounted) return;
+      _showLocalLoadingDialog();
+      loadingShown = true;
+    });
+  }
 
-            // got response — if no URL, dismiss and show message
-            final streamUrl = streamingInfo['url'] ?? '';
-            final urlType = streamingInfo['type'] ?? 'unknown';
-            final subtitleUrl = streamingInfo['subtitleUrl'];
+  final episodeNumber = (episode['episode_number'] as int?) ?? 1;
+  final episodeName = episode['name'] as String? ?? 'Untitled';
+  Map<String, String> streamingInfo = <String, String>{};
 
-            if (streamUrl.isEmpty) {
-              if (parentState != null) {
-                parentState.dismissModalLoading();
-              } else {
-                _dismissLocalLoadingDialog();
-              }
-              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Streaming unavailable at this time.")));
-              return;
-            }
+  try {
+    streamingInfo = await StreamingService.getStreamingLink(
+      tmdbId: widget.tvId.toString(),
+      title: widget.tvShowName.isNotEmpty ? widget.tvShowName : episodeName,
+      releaseYear: _releaseYear ?? 1970,
+      season: seasonNumber,
+      episode: episodeNumber,
+      resolution: resolution,
+      enableSubtitles: subtitles,
+    );
+  } catch (e) {
+    // cancel delayed loader and dismiss if it already showed
+    delayedLoader?.cancel();
+    if (loadingShown) {
+      if (parentState != null) parentState.dismissModalLoading();
+      else _dismissLocalLoadingDialog();
+    }
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Unable to start streaming. Please try again later.")));
+    return;
+  }
 
-            // success: dismiss loading and navigate to player
-            if (parentState != null) {
-              parentState.dismissModalLoading();
-            } else {
-              _dismissLocalLoadingDialog();
-            }
+  // cancel timer if still pending
+  delayedLoader?.cancel();
 
-            if (!mounted) return;
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => MainVideoPlayer(
-                  videoPath: streamUrl,
-                  title: streamingInfo['title'] ?? episodeName,
-                  releaseYear: _releaseYear ?? 1970,
-                  isFullSeason: true,
-                  episodeFiles: const [],
-                  similarMovies: const [],
-                  subtitleUrl: subtitleUrl,
-                  isHls: urlType == 'm3u8',
-                ),
-              ),
-            );
-          },
+  final streamUrl = streamingInfo['url'] ?? '';
+  final urlType = streamingInfo['type'] ?? 'unknown';
+  final subtitleUrl = streamingInfo['subtitleUrl'];
+
+  if (streamUrl.isEmpty) {
+    if (loadingShown) {
+      if (parentState != null) parentState.dismissModalLoading();
+      else _dismissLocalLoadingDialog();
+    }
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Streaming unavailable at this time.")));
+    return;
+  }
+
+  // success: dismiss loading and navigate to player
+  if (loadingShown) {
+    if (parentState != null) parentState.dismissModalLoading();
+    else _dismissLocalLoadingDialog();
+  }
+
+  if (!mounted) return;
+  Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (context) => MainVideoPlayer(
+        videoPath: streamUrl,
+        title: streamingInfo['title'] ?? episodeName,
+        releaseYear: _releaseYear ?? 1970,
+        isFullSeason: true,
+        episodeFiles: const [],
+        similarMovies: const [],
+        subtitleUrl: subtitleUrl,
+        isHls: urlType == 'm3u8',
+      ),
+    ),
+  );
+},
+
           onDownload: (resolution, subtitles) async {
             // sheet closed inside modal; call parent state's download method if available
             final episodeNumber = (episode['episode_number'] as int?) ?? 1;
