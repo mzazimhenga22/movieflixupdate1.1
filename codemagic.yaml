@@ -1,13 +1,12 @@
 workflows:
   flutter-workflow:
-    name: Build Flutter App with Skia
+    name: Build Flutter iOS App with Skia
     max_build_duration: 120
     environment:
       flutter: stable
       xcode: latest
       cocoapods: default
       vars:
-        # Example env var. Add your own secrets in Codemagic UI (NOT here).
         ENABLE_IMPELLER: false
 
     scripts:
@@ -36,15 +35,14 @@ workflows:
         script: |
           echo "Cleaning previous build artifacts"
           flutter clean
-          rm -rf android/app/build || true
+          rm -rf ios/Pods ios/Runner.xcworkspace || true
 
-      - name: Ensure Gradle JVM args
+      - name: Install CocoaPods
         script: |
-          echo "Ensuring Gradle JVM args for memory"
-          mkdir -p android
-          touch android/gradle.properties
-          grep -qxF 'org.gradle.jvmargs=-Xmx4608m' android/gradle.properties \
-            || echo 'org.gradle.jvmargs=-Xmx4608m' >> android/gradle.properties
+          echo "Installing CocoaPods dependencies"
+          cd ios
+          pod install --repo-update
+          cd ..
 
       - name: Warm up SKSL cache (optional)
         script: |
@@ -57,16 +55,18 @@ workflows:
             echo "flutter_01.sksl.json not found — skipping SKSL warm-up"
           fi
 
-      - name: Build APK with Skia (guard SKSL)
+      - name: Build iOS app with Skia (guard SKSL)
         script: |
-          echo "Building APK — will use SKSL bundle if available"
+          echo "Building iOS app — will use SKSL bundle if available"
           if [ -f flutter_01.sksl.json ]; then
             echo "Building with --bundle-sksl-path=flutter_01.sksl.json"
-            flutter build apk --release --bundle-sksl-path=flutter_01.sksl.json
+            flutter build ipa --release --bundle-sksl-path=flutter_01.sksl.json
           else
             echo "SKSL file not present — building without --bundle-sksl-path"
-            flutter build apk --release
+            flutter build ipa --release
           fi
 
     artifacts:
-      - build/app/outputs/flutter-apk/app-release.apk
+      - build/ios/ipa/*.ipa
+      - build/ios/ipa/*.dSYM.zip
+      - build/ios/ipa/*.app
