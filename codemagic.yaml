@@ -1,0 +1,72 @@
+workflows:
+  flutter-workflow:
+    name: Build Flutter App with Skia
+    max_build_duration: 120
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      vars:
+        # Example env var. Add your own secrets in Codemagic UI (NOT here).
+        ENABLE_IMPELLER: false
+
+    scripts:
+      - name: Install dependencies
+        script: |
+          echo "== Flutter version =="
+          flutter --version
+          echo "== pub get =="
+          flutter pub get
+
+      - name: Generate app icons
+        script: |
+          if [ -f pubspec.yaml ]; then
+            echo "Running flutter_launcher_icons (if configured)"
+            flutter pub run flutter_launcher_icons:main || true
+          else
+            echo "pubspec.yaml not found; skipping icon generation"
+          fi
+
+      - name: Debug working dir & files
+        script: |
+          echo "Working directory: $(pwd)"
+          ls -la
+
+      - name: Clean previous build artifacts
+        script: |
+          echo "Cleaning previous build artifacts"
+          flutter clean
+          rm -rf android/app/build || true
+
+      - name: Ensure Gradle JVM args
+        script: |
+          echo "Ensuring Gradle JVM args for memory"
+          mkdir -p android
+          touch android/gradle.properties
+          grep -qxF 'org.gradle.jvmargs=-Xmx4608m' android/gradle.properties \
+            || echo 'org.gradle.jvmargs=-Xmx4608m' >> android/gradle.properties
+
+      - name: Warm up SKSL cache (optional)
+        script: |
+          echo "Attempting to warm up SKSL cache (if file present)"
+          if [ -f flutter_01.sksl.json ]; then
+            echo "Found flutter_01.sksl.json — warm-up starting"
+            flutter run --profile --no-pub --no-resident --purge-persistent-cache \
+              --bundle-sksl-path=flutter_01.sksl.json || true
+          else
+            echo "flutter_01.sksl.json not found — skipping SKSL warm-up"
+          fi
+
+      - name: Build APK with Skia (guard SKSL)
+        script: |
+          echo "Building APK — will use SKSL bundle if available"
+          if [ -f flutter_01.sksl.json ]; then
+            echo "Building with --bundle-sksl-path=flutter_01.sksl.json"
+            flutter build apk --release --bundle-sksl-path=flutter_01.sksl.json
+          else
+            echo "SKSL file not present — building without --bundle-sksl-path"
+            flutter build apk --release
+          fi
+
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk

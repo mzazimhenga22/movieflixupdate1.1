@@ -1,0 +1,69 @@
+{
+  "@@locale": "es",
+  "settings": "Configuraciones",
+  "@settings": {
+    "description": "Etiqueta para el título de la pantalla de configuración"
+  },
+  "homeScreenStyle": "Estilo de Pantalla Principal",
+  "@homeScreenStyle": {
+    "description": "Etiqueta para seleccionar el estilo de pantalla principal en configuración"
+  },
+
+  "homeScreenType": "Tipo de pantalla de inicio",
+  "@homeScreenType": {
+    "description": "Etiqueta para seleccionar el tipo de pantalla de inicio en la configuración"
+  },
+
+  "downloadQuality": "Calidad de Descarga",
+  "@downloadQuality": {
+    "description": "Etiqueta para seleccionar la calidad de descarga en configuración"
+  },
+  "wifiOnlyDownloads": "Descargas Solo por Wi-Fi",
+  "@wifiOnlyDownloads": {
+    "description": "Etiqueta para habilitar descargas solo con Wi-Fi en configuración"
+  },
+  "playbackQuality": "Calidad de Reproducción",
+  "@playbackQuality": {
+    "description": "Etiqueta para seleccionar la calidad de reproducción en configuración"
+  },
+  "subtitles": "Subtítulos",
+  "@subtitles": {
+    "description": "Etiqueta para habilitar subtítulos en configuración"
+  },
+  "language": "Idioma",
+  "@language": {
+    "description": "Etiqueta para seleccionar idioma en configuración"
+  },
+  "autoPlayTrailers": "Reproducción Automática de Tráilers",
+  "@autoPlayTrailers": {
+    "description": "Etiqueta para habilitar la reproducción automática de tráilers en configuración"
+  },
+  "notifications": "Notificaciones",
+  "@notifications": {
+    "description": "Etiqueta para habilitar notificaciones en configuración"
+  },
+  "parentalControl": "Control Parental",
+  "@parentalControl": {
+    "description": "Etiqueta para habilitar control parental en configuración"
+  },
+  "dataSaverMode": "Modo Ahorro de Datos",
+  "@dataSaverMode": {
+    "description": "Etiqueta para habilitar modo ahorro de datos en configuración"
+  },
+  "clearCache": "Borrar Caché",
+  "@clearCache": {
+    "description": "Etiqueta para borrar caché en configuración"
+  },
+  "cacheSize": "Tamaño de la Caché",
+  "@cacheSize": {
+    "description": "Etiqueta para mostrar el tamaño de caché en configuración"
+  },
+  "cacheCleared": "Caché Borrada",
+  "@cacheCleared": {
+    "description": "Mensaje mostrado cuando se borra el caché"
+  },
+  "backgroundColor": "Color de Fondo",
+  "@backgroundColor": {
+    "description": "Etiqueta para seleccionar color de fondo en configuración"
+  }
+}
