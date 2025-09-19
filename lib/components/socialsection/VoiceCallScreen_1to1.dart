@@ -1,11 +1,23 @@
-// voice_call_screen_1to1.dart
+// lib/components/socialsection/voice_call_screen_1to1.dart
+// Updated for robust WhatsApp-like voice calling behavior.
+// - Ringtone playback from assets
+// - Wakelock via wakelock_plus while connected
+// - Audio session attempt on answer (wrapped in try/catch)
+// - Defensive lifecycle and error handling
+// - Safer attach loop and fallback behavior
+
 import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:movie_app/webrtc/rtc_manager.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:animate_do/animate_do.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_sound/flutter_sound.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:audio_session/audio_session.dart'; // optional, non-fatal if missing
 
 class VoiceCallScreen1to1 extends StatefulWidget {
   final String callId;
@@ -29,12 +41,14 @@ class VoiceCallScreen1to1 extends StatefulWidget {
   State<VoiceCallScreen1to1> createState() => _VoiceCallScreen1to1State();
 }
 
+enum VoiceCallUiState { ringing, connecting, connected, ended }
+
 class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   bool isMuted = false;
   bool isSpeakerOn = false;
-  bool isRinging = false;
-  bool isAnswered = false;
+
+  VoiceCallUiState _uiState = VoiceCallUiState.ringing;
 
   Timer? _timer;
   int _callDuration = 0;
@@ -43,9 +57,11 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
   AnimationController? _pulseController;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _callStatusSubscription;
 
-  // Small recorder probe to safely close any recorder sessions that might exist
-  // elsewhere in the app (prevents "recorder already close" crashes).
   final FlutterSoundRecorder _recorderProbe = FlutterSoundRecorder();
+
+  // ringtone player
+  final FlutterSoundPlayer _ringtonePlayer = FlutterSoundPlayer();
+  Uint8List? _ringtoneBuffer;
 
   bool _isDisposed = false;
   bool _localHungUp = false;
@@ -53,25 +69,103 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
   @override
   void initState() {
     super.initState();
-    // Initially both caller and receiver see ringing UI
-    _startOrAnswerCall();
-    _listenForCallStatus();
+    WidgetsBinding.instance.addObserver(this);
+    _prepareRecorderProbe();
+    _initRingtone();
+    // initial UI based on call doc (useful if reopening screen mid-call)
+    _initFromCallDoc().whenComplete(() {
+      if (!_isDisposed) {
+        _listenForCallStatus();
+        _attemptAttachLoop();
+      }
+    });
   }
 
-  Future<void> _safelyStopRecorderIfAny() async {
-    // Close recorder if it's open; swallow expected errors like "already closed".
+  Future<void> _prepareRecorderProbe() async {
     try {
-      // open/close calls can throw depending on underlying platform state.
-      await _recorderProbe.closeRecorder();
-    } catch (e, st) {
-      debugPrint('[VoiceCall] recorder close attempt failed (likely already closed): $e\n$st');
+      await _recorderProbe.openRecorder();
+      // we don't start recording; this is only to ensure the recorder is ready/closed safely later
+    } catch (e) {
+      // ignore - just a probe
+      debugPrint('[VoiceCall] recorder probe open error: $e');
+    } finally {
+      try {
+        await _recorderProbe.closeRecorder();
+      } catch (_) {}
     }
   }
 
-  Future<void> _startOrAnswerCall() async {
-    if (widget.currentUserId == widget.callerId ||
-        widget.currentUserId == widget.receiverId) {
-      setState(() => isRinging = true);
+  Future<void> _initRingtone() async {
+    try {
+      await _ringtonePlayer.openPlayer();
+      final ByteData bd = await rootBundle.load('assets/ringtone.mp3');
+      _ringtoneBuffer = bd.buffer.asUint8List();
+    } catch (e, st) {
+      debugPrint('[VoiceCall] ringtone init error: $e\n$st');
+      _ringtoneBuffer = null;
+    }
+  }
+
+  Future<void> _playRingtone() async {
+    try {
+      if (_ringtonePlayer.isPlaying) return;
+      if (_ringtoneBuffer != null) {
+        await _ringtonePlayer.startPlayer(
+          fromDataBuffer: _ringtoneBuffer!,
+          codec: Codec.mp3,
+          whenFinished: () {},
+        );
+      } else {
+        // fallback - start silent URI to avoid exceptions (platform-dependent)
+        await _ringtonePlayer.startPlayer(fromURI: null);
+      }
+    } catch (e, st) {
+      debugPrint('[VoiceCall] ringtone play error: $e\n$st');
+    }
+  }
+
+  Future<void> _stopRingtone() async {
+    try {
+      if (_ringtonePlayer.isPlaying) await _ringtonePlayer.stopPlayer();
+    } catch (e) {
+      debugPrint('[VoiceCall] ringtone stop error: $e');
+    }
+  }
+
+  Future<void> _initFromCallDoc() async {
+    try {
+      final doc = await FirebaseFirestore.instance.collection('calls').doc(widget.callId).get();
+      if (!doc.exists) {
+        // no call doc — show ended state and pop
+        if (mounted) {
+          setState(() => _uiState = VoiceCallUiState.ended);
+          Navigator.of(context).maybePop();
+        }
+        return;
+      }
+      final status = doc.data()?['status'] as String?;
+      if (status == 'answered') {
+        if (mounted) setState(() => _uiState = VoiceCallUiState.connecting);
+      } else if (status == 'ringing') {
+        if (mounted) setState(() => _uiState = VoiceCallUiState.ringing);
+        // play ringtone if we're the receiver
+        if (widget.currentUserId != widget.callerId) {
+          await _playRingtone();
+        }
+      } else {
+        // ended/rejected/missed -> close
+        if (mounted) Navigator.of(context).maybePop();
+      }
+    } catch (e) {
+      debugPrint('[VoiceCall] initFromCallDoc error: $e');
+    }
+  }
+
+  Future<void> _safelyStopRecorderIfAny() async {
+    try {
+      await _recorderProbe.closeRecorder();
+    } catch (e, st) {
+      debugPrint('[VoiceCall] recorder close attempt failed (likely already closed): $e\n$st');
     }
   }
 
@@ -81,43 +175,39 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
         .doc(widget.callId)
         .snapshots()
         .listen((snapshot) async {
+      if (_isDisposed) return;
       try {
         final data = snapshot.data();
-        if (data == null || !mounted) return;
+        if (data == null) return;
         final status = data['status'] as String?;
+        debugPrint('[VoiceCall] status snapshot: $status');
 
-        // Handle terminal states conservatively by verifying with a fresh read
-        if (status == 'ended' || status == 'rejected') {
-          try {
-            final fresh = await FirebaseFirestore.instance.collection('calls').doc(widget.callId).get();
-            final freshStatus = fresh.exists ? (fresh.get('status') as String?) : null;
-            if (freshStatus == 'ended' || freshStatus == 'rejected') {
-              if (!_localHungUp && mounted) {
-                try {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(freshStatus == 'ended' ? 'Call ended' : 'Call rejected')),
-                  );
-                } catch (_) {}
-                await Future.delayed(const Duration(milliseconds: 300));
-                if (mounted) Navigator.of(context).pop();
-              } else {
-                if (mounted) Navigator.of(context).pop();
-              }
-            } else {
-              debugPrint('[VoiceCall] Terminal snapshot transient - ignoring');
-            }
-          } catch (e) {
-            debugPrint('[VoiceCall] Error verifying terminal status: $e');
+        if (status == 'ringing') {
+          if (mounted) setState(() => _uiState = VoiceCallUiState.ringing);
+          // start ringtone only if we are a callee
+          if (widget.currentUserId != widget.callerId) {
+            await _playRingtone();
           }
-          return;
-        }
-
-        if (status == 'answered' && !isAnswered) {
-          setState(() {
-            isAnswered = true;
-            isRinging = false;
-          });
-          _startTimer();
+        } else if (status == 'answered') {
+          if (mounted) setState(() => _uiState = VoiceCallUiState.connecting);
+          await _stopRingtone();
+          // configure audio session (best-effort)
+          try {
+            final session = await AudioSession.instance;
+            await session.configure(const AudioSessionConfiguration.speech());
+            await session.setActive(true);
+          } catch (e) {
+            debugPrint('[VoiceCall] audio session configure non-fatal error: $e');
+          }
+          await _attemptAttachLoop();
+        } else if (status == 'rejected' || status == 'ended' || status == 'missed') {
+          await _stopRingtone();
+          if (!_localHungUp && mounted) {
+            final String msg = status == 'rejected' ? 'Call rejected' : 'Call ended';
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+          }
+          // ensure we pop only once
+          if (mounted) Navigator.of(context).maybePop();
         }
       } catch (e, st) {
         debugPrint('[VoiceCall] call status handler error: $e\n$st');
@@ -127,8 +217,43 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
     });
   }
 
-  void _startTimer() {
-    _timer?.cancel();
+  /// Try to find remote audio stream. If found, mark connected. If not found after attempts,
+  /// still progress to connected to avoid UI stuckness (WhatsApp-like).
+  Future<void> _attemptAttachLoop({int maxAttempts = 20, Duration delay = const Duration(milliseconds: 300)}) async {
+    for (int i = 0; i < maxAttempts && !_isDisposed; i++) {
+      try {
+        final remote = RtcManager.getAnyRemoteAudioStream(widget.callId);
+        if (remote != null) {
+          if (mounted) {
+            setState(() {
+              _uiState = VoiceCallUiState.connected;
+            });
+            _startTimerIfNeeded();
+            // ensure wakelock while connected
+            try {
+              WakelockPlus.enable();
+            } catch (_) {}
+          }
+          return;
+        }
+      } catch (e) {
+        debugPrint('[VoiceCall] attach attempt error: $e');
+      }
+      await Future.delayed(delay);
+    }
+
+    // fallback to connected even if no stream found
+    if (!_isDisposed && mounted) {
+      setState(() => _uiState = VoiceCallUiState.connected);
+      _startTimerIfNeeded();
+      try {
+        WakelockPlus.enable();
+      } catch (_) {}
+    }
+  }
+
+  void _startTimerIfNeeded() {
+    if (_timer != null) return;
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       _callDuration++;
@@ -145,10 +270,8 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
 
   Future<void> _answerCall() async {
     try {
-      // Stop/close any recorder session that might conflict with WebRTC audio
       await _safelyStopRecorderIfAny();
 
-      // Request microphone permission (UI prompt)
       final micStatus = await Permission.microphone.request();
       if (!micStatus.isGranted) {
         if (mounted) {
@@ -159,23 +282,30 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
         return;
       }
 
-      await RtcManager.answerCall(
-        callId: widget.callId,
-        peerId: widget.currentUserId,
-      );
+      if (mounted) setState(() => _uiState = VoiceCallUiState.connecting);
 
-      if (mounted) {
-        setState(() {
-          isRinging = false;
-          isAnswered = true;
-        });
+      try {
+        await RtcManager.answerCall(callId: widget.callId, peerId: widget.currentUserId);
+      } catch (e) {
+        debugPrint('[VoiceCall] RtcManager.answerCall error: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to answer call')));
+          setState(() => _uiState = VoiceCallUiState.ended);
+          Navigator.of(context).maybePop();
+        }
+        return;
       }
 
-      _startTimer();
+      // small delay and then attempt to attach
+      await Future.delayed(const Duration(milliseconds: 300));
+      await _attemptAttachLoop();
+      await _stopRingtone();
     } catch (e, st) {
       debugPrint('[VoiceCall] answer error: $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to answer call')));
+        setState(() => _uiState = VoiceCallUiState.ended);
+        Navigator.of(context).maybePop();
       }
     }
   }
@@ -183,14 +313,11 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
   Future<void> _rejectCall() async {
     try {
       await _safelyStopRecorderIfAny();
-      await RtcManager.rejectCall(
-        callId: widget.callId,
-        peerId: widget.currentUserId,
-      );
+      await RtcManager.rejectCall(callId: widget.callId, peerId: widget.currentUserId);
     } catch (e, st) {
       debugPrint('[VoiceCall] reject error: $e\n$st');
     } finally {
-      if (mounted) Navigator.of(context).pop();
+      if (mounted) Navigator.of(context).maybePop();
     }
   }
 
@@ -202,51 +329,59 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
     } catch (e, st) {
       debugPrint('[VoiceCall] hangUp error: $e\n$st');
     } finally {
-      if (mounted) Navigator.of(context).pop();
+      // stop timer + wakelock
+      _timer?.cancel();
+      try {
+        WakelockPlus.disable();
+      } catch (_) {}
+      if (mounted) Navigator.of(context).maybePop();
     }
   }
 
   @override
-  void dispose() {
+  void didChangeAppLifecycleState(AppLifecycleState state) {
     if (_isDisposed) return;
+    // if backgrounded, it's fine to leave audio running (CallKit/PushKit handles wake).
+    // We avoid heavy resource usage here.
+    super.didChangeAppLifecycleState(state);
+  }
+
+  @override
+  void dispose() {
+    if (_isDisposed) {
+      super.dispose();
+      return;
+    }
     _isDisposed = true;
+    WidgetsBinding.instance.removeObserver(this);
 
     try {
-      // Stop & dispose pulse controller if we created it
-      if (_pulseController != null) {
-        try {
-          _pulseController!.stop();
-        } catch (_) {}
-        try {
-          _pulseController!.dispose();
-        } catch (_) {}
-      }
+      _pulseController?.stop();
+    } catch (_) {}
+    try {
+      _pulseController?.dispose();
+    } catch (_) {}
 
-      _timer?.cancel();
-      _callStatusSubscription?.cancel();
+    _timer?.cancel();
+    _callStatusSubscription?.cancel();
 
-      // Ensure recorder is closed (safe)
-      try {
-        _safelyStopRecorderIfAny();
-      } catch (e) {
-        debugPrint('[VoiceCall] recorder safe close error during dispose: $e');
-      }
+    // stop ringtone and recorder safely
+    _stopRingtone().catchError((_) {});
+    _safelyStopRecorderIfAny().catchError((_) {});
 
-      // Hang up the call if active and we didn't already hang up locally
-      if (isAnswered && !_localHungUp) {
-        try {
-          RtcManager.hangUp(widget.callId);
-        } catch (e) {
-          debugPrint('[VoiceCall] hangUp error during dispose: $e');
-        }
-      }
-    } catch (e) {
-      debugPrint('[VoiceCall] dispose error: $e');
+    // if connected and we didn't hang up locally, attempt to hang up to keep server state consistent
+    if (_uiState == VoiceCallUiState.connected && !_localHungUp) {
+      RtcManager.hangUp(widget.callId).catchError((e) => debugPrint('[VoiceCall] hangUp during dispose error: $e'));
     }
+
+    try {
+      WakelockPlus.disable();
+    } catch (_) {}
 
     super.dispose();
   }
 
+  // UI builders
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -261,8 +396,22 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
         child: SafeArea(
           child: Stack(
             children: [
-              isRinging ? _buildRingingScreen() : _buildCallScreen(),
-              if (!isRinging) _buildControlButtons(),
+              if (_uiState == VoiceCallUiState.ringing) _buildRingingScreen() else _buildCallScreen(),
+              if (_uiState != VoiceCallUiState.ringing) _buildControlButtons(),
+              if (_uiState == VoiceCallUiState.connecting)
+                Positioned(
+                  top: 20,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration:
+                          BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(20)),
+                      child: const Text('Connecting...', style: TextStyle(color: Colors.white70)),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -275,9 +424,7 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
     final String username = isCaller
         ? (widget.receiver?['username'] as String? ?? 'Unknown')
         : (widget.caller?['username'] as String? ?? 'Unknown');
-    final String? photoUrl = isCaller
-        ? (widget.receiver?['photoUrl'] as String?)
-        : (widget.caller?['photoUrl'] as String?);
+    final String? photoUrl = isCaller ? (widget.receiver?['photoUrl'] as String?) : (widget.caller?['photoUrl'] as String?);
 
     return Center(
       child: FadeIn(
@@ -293,11 +440,7 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
             const SizedBox(height: 20),
             Text(
               isCaller ? 'Calling $username…' : 'Incoming Voice Call from $username',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-              ),
+              style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 40),
             if (isCaller)
@@ -307,10 +450,15 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
                   shape: const CircleBorder(),
                   padding: const EdgeInsets.all(20),
                 ),
-                onPressed: () {
+                onPressed: () async {
                   _localHungUp = true;
-                  RtcManager.hangUp(widget.callId);
-                  if (mounted) Navigator.of(context).pop();
+                  try {
+                    await RtcManager.hangUp(widget.callId);
+                  } catch (e) {
+                    debugPrint('[VoiceCall] caller hangUp error: $e');
+                  } finally {
+                    if (mounted) Navigator.of(context).maybePop();
+                  }
                 },
                 child: const Icon(Icons.call_end, size: 30, color: Colors.white),
               )
@@ -382,9 +530,9 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
             style: const TextStyle(color: Colors.white70, fontSize: 20),
           ),
           const SizedBox(height: 10),
-          Text(
+          const Text(
             'Voice Call',
-            style: TextStyle(color: Colors.grey.withOpacity(0.6), fontSize: 16),
+            style: TextStyle(color: Colors.grey, fontSize: 16),
           ),
         ],
       ),
@@ -413,7 +561,11 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
               ),
               onPressed: () {
                 setState(() => isMuted = !isMuted);
-                RtcManager.toggleMute(widget.callId, isMuted);
+                try {
+                  RtcManager.toggleMute(widget.callId, isMuted);
+                } catch (e) {
+                  debugPrint('[VoiceCall] toggleMute error: $e');
+                }
               },
             ),
             IconButton(
@@ -424,7 +576,11 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
               ),
               onPressed: () {
                 setState(() => isSpeakerOn = !isSpeakerOn);
-                // TODO: Implement platform-specific audio routing (Android/iOS MethodChannel or plugin)
+                try {
+                  RtcManager.setSpeakerphone(widget.callId, isSpeakerOn);
+                } catch (e) {
+                  debugPrint('[VoiceCall] setSpeakerphone error: $e');
+                }
               },
             ),
             ElevatedButton(
@@ -442,4 +598,3 @@ class _VoiceCallScreen1to1State extends State<VoiceCallScreen1to1>
     );
   }
 }
-

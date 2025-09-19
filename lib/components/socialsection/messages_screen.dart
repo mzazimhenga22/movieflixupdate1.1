@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show kIsWeb, compute, setEquals;
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import 'messages_controller.dart';
 import 'chat_screen.dart';
@@ -16,7 +17,6 @@ import 'forward_message_screen.dart';
 import 'package:movie_app/components/socialsection/stories.dart';
 import 'package:movie_app/components/socialsection/social_reactions_screen.dart';
 import 'post_review_screen.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 
 /// --- Top-level compute worker (unchanged) ---
 List<Map<String, dynamic>> _processUserList(Map<String, dynamic> payload) {
@@ -173,7 +173,8 @@ class MessagesScreen extends StatefulWidget {
   MessagesScreenState createState() => MessagesScreenState();
 }
 
-class MessagesScreenState extends State<MessagesScreen> with SingleTickerProviderStateMixin {
+/// MessagesScreenState now observes app lifecycle to re-sync on resume.
+class MessagesScreenState extends State<MessagesScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final ScrollController _scrollController = ScrollController();
   late TabController _tabController;
   late MessagesController controller;
@@ -186,9 +187,19 @@ class MessagesScreenState extends State<MessagesScreen> with SingleTickerProvide
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _storiesSubTop;
   final ValueNotifier<bool> _rebuildNotifier = ValueNotifier(false);
 
+  // Presence tracking
+  final Map<String, bool> _onlineMap = {};
+  final Map<String, DateTime?> _lastSeenMap = {};
+  final Map<String, StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>> _userPresenceSubs = {};
+
+  // conversation-level snapshot to trigger refresh when any convo changes server-side
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _conversationsSub;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
     controller = MessagesController(widget.currentUser, context);
     controller.addListener(_onControllerUpdate);
 
@@ -219,10 +230,47 @@ class MessagesScreenState extends State<MessagesScreen> with SingleTickerProvide
     }, onError: (e) {
       debugPrint('stories top-level listener error: $e');
     });
+
+    // conversations query - listen for any changes to conversations the user participates in
+    try {
+      final uid = widget.currentUser['id']?.toString();
+      if (uid != null && uid.isNotEmpty) {
+        _conversationsSub = FirebaseFirestore.instance
+            .collection('conversations')
+            .where('participants', arrayContains: uid)
+            .snapshots()
+            .listen((snap) {
+          // Whenever server-side conversations change, try to refresh the controller/UI.
+          _refreshFromFirestore();
+        }, onError: (e) {
+          debugPrint('conversations listener error: $e');
+        });
+      }
+    } catch (e) {
+      debugPrint('Failed to subscribe to conversations: $e');
+    }
+
+    // initial presence subscriptions (based on initial controller state)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _updatePresenceSubsFromSummaries();
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // app returned to foreground -> force a refresh/sync from Firestore
+      _refreshFromFirestore();
+    }
+    super.didChangeAppLifecycleState(state);
   }
 
   void _onControllerUpdate() {
-    if (mounted) _rebuildNotifier.value = !_rebuildNotifier.value;
+    if (mounted) {
+      _rebuildNotifier.value = !_rebuildNotifier.value;
+      // Whenever controller changes (chats list changed), refresh presence subscriptions
+      _updatePresenceSubsFromSummaries();
+    }
   }
 
   void _onScroll() {
@@ -231,13 +279,21 @@ class MessagesScreenState extends State<MessagesScreen> with SingleTickerProvide
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _storiesSubGroup?.cancel();
     _storiesSubTop?.cancel();
+    _conversationsSub?.cancel();
     _scrollController.dispose();
     _tabController.dispose();
     controller.removeListener(_onControllerUpdate);
-    controller.dispose();
+    try {
+      controller.dispose();
+    } catch (_) {}
     _rebuildNotifier.dispose();
+
+    // cancel presence subscriptions
+    _clearPresenceSubs();
+
     super.dispose();
   }
 
@@ -423,6 +479,8 @@ class MessagesScreenState extends State<MessagesScreen> with SingleTickerProvide
                     try {
                       if (hasStory) await _openStoriesForUser(id);
                       else await controller.openOrCreateDirectChat(context, u);
+                      // after opening a chat, refresh summaries/presence
+                      _refreshFromFirestore();
                     } finally {
                       _openingChatIds.remove(id);
                     }
@@ -444,11 +502,9 @@ class MessagesScreenState extends State<MessagesScreen> with SingleTickerProvide
     ImageProvider? avatarProvider;
     if (avatarStr.isNotEmpty) {
       if (kIsWeb || avatarStr.startsWith('http')) {
-        // CachedNetworkImageProvider returns ImageProvider<Object> — cast to ImageProvider
-        avatarProvider = CachedNetworkImageProvider(avatarStr) as ImageProvider;
+        avatarProvider = CachedNetworkImageProvider(avatarStr);
       } else {
-        // FileImage is ImageProvider<File>, cast to ImageProvider
-        avatarProvider = FileImage(File(avatarStr)) as ImageProvider;
+        avatarProvider = FileImage(File(avatarStr));
       }
     } else {
       avatarProvider = null;
@@ -585,36 +641,56 @@ class MessagesScreenState extends State<MessagesScreen> with SingleTickerProvide
         final s = visibleChats[i];
         return RepaintBoundary(
           key: ValueKey(s.id),
-          child: ChatTile(
-            summary: s,
-            accentColor: widget.accentColor,
-            controller: controller,
-            hasStory: _usersWithActiveStories.contains(s.otherUser?['id'] ?? ''),
-            isSelected: false,
-            onAvatarTap: () async {
-              final otherId = (s.otherUser?['id'] ?? '').toString();
-              if (otherId.isNotEmpty) await _openStoriesForUser(otherId);
-            },
-            onTap: () async {
-              if (_openingChatIds.contains(s.id)) return;
-              _openingChatIds.add(s.id);
-              try {
-                if (s.unreadCount > 0) await controller.markAsRead(s.id, isGroup: s.isGroup);
-                if (s.isGroup) {
-                  Navigator.push(context, MaterialPageRoute(builder: (_) => GroupChatScreen(chatId: s.id, currentUser: widget.currentUser, authenticatedUser: widget.currentUser, accentColor: widget.accentColor)));
-                } else {
-                  final other = s.otherUser ?? {};
-                  Navigator.push(context, MaterialPageRoute(builder: (_) => ChatScreen(chatId: s.id, currentUser: widget.currentUser, otherUser: other, authenticatedUser: widget.currentUser, storyInteractions: const [], accentColor: widget.accentColor)));
+          child: Builder(builder: (context) {
+            // Inject online status & lastSeen from our presence map into the otherUser map passed to ChatTile.
+            Map<String, dynamic>? otherUserCopy;
+            if (s.otherUser != null) {
+              otherUserCopy = Map<String, dynamic>.from(s.otherUser as Map<String, dynamic>);
+              final otherId = (otherUserCopy['id'] ?? '').toString();
+              if (otherId.isNotEmpty) {
+                if (_onlineMap.containsKey(otherId)) {
+                  otherUserCopy['isOnline'] = _onlineMap[otherId];
                 }
-              } finally {
-                _openingChatIds.remove(s.id);
+                if (_lastSeenMap.containsKey(otherId)) {
+                  final dt = _lastSeenMap[otherId];
+                  if (dt != null) otherUserCopy['lastSeen'] = dt.toIso8601String();
+                }
               }
-            },
-            onLongPress: () {
-              _showSelectionActions(chatId: s.id, otherUser: s.otherUser, isGroup: s.isGroup);
-            },
-            onChatOpened: () => _rebuildNotifier.value = !_rebuildNotifier.value,
-          ),
+            }
+
+            return ChatTile(
+              summary: s,
+              accentColor: widget.accentColor,
+              controller: controller,
+              hasStory: _usersWithActiveStories.contains(s.otherUser?['id'] ?? ''),
+              isSelected: false,
+              onAvatarTap: () async {
+                final otherId = (s.otherUser?['id'] ?? '').toString();
+                if (otherId.isNotEmpty) await _openStoriesForUser(otherId);
+              },
+              onTap: () async {
+                if (_openingChatIds.contains(s.id)) return;
+                _openingChatIds.add(s.id);
+                try {
+                  if (s.unreadCount > 0) await controller.markAsRead(s.id, isGroup: s.isGroup);
+                  if (s.isGroup) {
+                    Navigator.push(context, MaterialPageRoute(builder: (_) => GroupChatScreen(chatId: s.id, currentUser: widget.currentUser, authenticatedUser: widget.currentUser, accentColor: widget.accentColor)));
+                  } else {
+                    final other = otherUserCopy ?? (s.otherUser ?? {});
+                    Navigator.push(context, MaterialPageRoute(builder: (_) => ChatScreen(chatId: s.id, currentUser: widget.currentUser, otherUser: other, authenticatedUser: widget.currentUser, storyInteractions: const [], accentColor: widget.accentColor)));
+                  }
+                  // ensure UI refresh after opening chat (read flag / unread counts)
+                  _refreshFromFirestore();
+                } finally {
+                  _openingChatIds.remove(s.id);
+                }
+              },
+              onLongPress: () {
+                _showSelectionActions(chatId: s.id, otherUser: s.otherUser, isGroup: s.isGroup);
+              },
+              onChatOpened: () => _rebuildNotifier.value = !_rebuildNotifier.value,
+            );
+          }),
         );
       },
     );
@@ -635,6 +711,8 @@ class MessagesScreenState extends State<MessagesScreen> with SingleTickerProvide
                   Navigator.pop(ctx);
                   final isPinned = controller.chatSummaries.any((s) => s.id == chatId && s.isPinned);
                   if (isPinned) await controller.unpinConversation(chatId); else await controller.pinConversation(chatId);
+                  // refresh so UI updates right away
+                  _refreshFromFirestore();
                 }),
                 ListTile(leading: Icon(Icons.volume_off, color: widget.accentColor), title: const Text('Mute / Unmute', style: TextStyle(color: Colors.white)), onTap: () async {
                   Navigator.pop(ctx);
@@ -648,14 +726,17 @@ class MessagesScreenState extends State<MessagesScreen> with SingleTickerProvide
                     final wasMuted = controller.chatSummaries.any((s) => s.id == chatId && s.isMuted);
                     if (wasMuted) await controller.unmute(chatId); else await controller.mute(chatId);
                   }
+                  _refreshFromFirestore();
                 }),
                 ListTile(leading: Icon(Icons.delete, color: widget.accentColor), title: Text(isGroup ? 'Leave Group' : 'Delete Conversation', style: const TextStyle(color: Colors.white)), onTap: () async {
                   Navigator.pop(ctx);
                   await controller.deleteConversation(chatId, isGroup: isGroup);
+                  _refreshFromFirestore();
                 }),
                 ListTile(leading: Icon(Icons.block, color: widget.accentColor), title: const Text('Block', style: TextStyle(color: Colors.white)), onTap: () async {
                   Navigator.pop(ctx);
                   if (otherUser != null && otherUser['id'] != null) await controller.blockUser(otherUser['id'] as String, chatId: chatId);
+                  _refreshFromFirestore();
                 }),
                 ListTile(leading: Icon(Icons.forward, color: widget.accentColor), title: const Text('Forward', style: TextStyle(color: Colors.white)), onTap: () async {
                   Navigator.pop(ctx);
@@ -734,6 +815,8 @@ class MessagesScreenState extends State<MessagesScreen> with SingleTickerProvide
                   _lastSuggestedUsers = l;
                   return l;
                 });
+                // explicit refresh from Firestore too
+                await _refreshFromFirestore();
                 setState(() {});
                 await Future.delayed(const Duration(milliseconds: 300));
               },
@@ -811,6 +894,118 @@ class MessagesScreenState extends State<MessagesScreen> with SingleTickerProvide
         ),
       ],
     );
+  }
+
+  /// ---------------------------
+  /// Presence helpers
+  /// ---------------------------
+
+  // Create / remove presence subscriptions so we only listen to users currently shown in the list
+  void _updatePresenceSubsFromSummaries() {
+    try {
+      final ids = <String>{};
+      for (final s in controller.chatSummaries) {
+        final otherId = (s.otherUser?['id'] ?? '').toString();
+        if (otherId.isNotEmpty) ids.add(otherId);
+      }
+
+      // Add subscriptions for ids that aren't subscribed
+      for (final id in ids) {
+        if (!_userPresenceSubs.containsKey(id)) {
+          final sub = FirebaseFirestore.instance.collection('users').doc(id).snapshots().listen((doc) {
+            try {
+              if (!doc.exists) return;
+              final data = doc.data() as Map<String, dynamic>? ?? {};
+              final isOnline = data['isOnline'] == true;
+              final prev = _onlineMap[id];
+              DateTime? lastSeen;
+              final ls = data['lastSeen'];
+              if (ls is Timestamp) lastSeen = ls.toDate();
+              else if (ls is String) lastSeen = DateTime.tryParse(ls);
+              else if (ls is int) lastSeen = DateTime.fromMillisecondsSinceEpoch(ls);
+              final prevLastSeen = _lastSeenMap[id];
+              var changed = false;
+              if (prev != isOnline) {
+                _onlineMap[id] = isOnline;
+                changed = true;
+              }
+              if (lastSeen != prevLastSeen) {
+                _lastSeenMap[id] = lastSeen;
+                changed = true;
+              }
+              if (changed && mounted) setState(() {});
+            } catch (e) {
+              debugPrint('presence listener parse error for $id: $e');
+            }
+          }, onError: (e) {
+            debugPrint('presence listen error for $id: $e');
+          });
+          _userPresenceSubs[id] = sub;
+        }
+      }
+
+      // Remove subscriptions for ids that are no longer in the visible set
+      final toRemove = <String>[];
+      for (final existing in _userPresenceSubs.keys) {
+        if (!ids.contains(existing)) toRemove.add(existing);
+      }
+      for (final r in toRemove) {
+        try {
+          _userPresenceSubs.remove(r)?.cancel();
+        } catch (_) {}
+        _onlineMap.remove(r);
+        _lastSeenMap.remove(r);
+      }
+    } catch (e) {
+      debugPrint('_updatePresenceSubsFromSummaries error: $e');
+    }
+  }
+
+  void _clearPresenceSubs() {
+    for (final sub in _userPresenceSubs.values) {
+      try {
+        sub.cancel();
+      } catch (_) {}
+    }
+    _userPresenceSubs.clear();
+    _onlineMap.clear();
+    _lastSeenMap.clear();
+  }
+
+  /// Attempts to refresh UI/controller state from Firestore.
+  /// If your MessagesController exposes a `.refresh()` or `.reload()` method it will call it.
+  /// Otherwise it falls back to safely recreating the controller instance.
+  Future<void> _refreshFromFirestore() async {
+    try {
+      // If controller implements refresh (user's MessagesController might), call it.
+      // Use dynamic to avoid analyzer errors if refresh doesn't exist.
+      final dyn = controller as dynamic;
+      if (dyn != null) {
+        try {
+          if (dyn.refresh is Function) {
+            await dyn.refresh();
+            // controller should notify listeners; ensure we update presence subs too
+            _updatePresenceSubsFromSummaries();
+            _rebuildNotifier.value = !_rebuildNotifier.value;
+            return;
+          }
+        } catch (_) {
+          // ignore and fallback
+        }
+      }
+
+      // fallback: safely recreate controller to ensure fresh listeners
+      controller.removeListener(_onControllerUpdate);
+      try {
+        controller.dispose();
+      } catch (_) {}
+      controller = MessagesController(widget.currentUser, context);
+      controller.addListener(_onControllerUpdate);
+      _updatePresenceSubsFromSummaries();
+      _rebuildNotifier.value = !_rebuildNotifier.value;
+    } catch (e) {
+      debugPrint('Failed to refresh controller: $e');
+    }
   }
 }
 

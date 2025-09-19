@@ -4,7 +4,7 @@ import 'dart:isolate';
 import 'dart:ui';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode, defaultTargetPlatform;
+import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode, defaultTargetPlatform, compute;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -36,6 +36,124 @@ import 'package:movie_app/components/socialsection/chat_screen.dart';
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+/// -------------------- NEW: compute helpers (top-level, JSON-serializable safe) --------------------
+/// These helpers perform CPU/string/JSON parsing and lightweight selection logic that can be safely
+/// executed in a background isolate via `compute`. They DO NOT use platform channels or plugins.
+
+@pragma('vm:entry-point')
+Map<String, dynamic> _normalizeData(Map<dynamic, dynamic> raw) {
+  // Ensure keys are strings and common fields have predictable types
+  final Map<String, dynamic> data = {};
+  try {
+    raw.forEach((k, v) {
+      final key = k?.toString() ?? '';
+      if (v is Map || v is List) {
+        // try to deep-serialize nested structures
+        try {
+          data[key] = jsonDecode(jsonEncode(v));
+        } catch (_) {
+          data[key] = v.toString();
+        }
+      } else {
+        data[key] = v;
+      }
+    });
+
+    // normalize duration to int (milliseconds)
+    if (data.containsKey('duration')) {
+      final d = data['duration'];
+      if (d is int) {
+        data['duration'] = d;
+      } else if (d is String) {
+        final parsed = int.tryParse(d);
+        data['duration'] = parsed ?? 30000;
+      } else {
+        data['duration'] = 30000;
+      }
+    }
+
+    // make sure callType/key typed as string
+    if (data.containsKey('callType')) data['callType'] = data['callType']?.toString() ?? '';
+    if (data.containsKey('type')) data['type'] = data['type']?.toString() ?? '';
+
+  } catch (_) {}
+  return data;
+}
+
+@pragma('vm:entry-point')
+Map<String, dynamic> _parseDownloaderMessage(Map<dynamic, dynamic> msg) {
+  final Map<String, dynamic> out = {'id': '<unknown>', 'statusInt': -1, 'progress': 0};
+  try {
+    final id = msg['id']?.toString() ?? '<unknown>';
+    out['id'] = id;
+
+    final rawStatus = msg['status'];
+    int statusInt = -1;
+    if (rawStatus is int) {
+      statusInt = rawStatus;
+    } else if (rawStatus is String) {
+      statusInt = int.tryParse(rawStatus) ?? -1;
+    }
+    out['statusInt'] = statusInt;
+
+    final rawProgress = msg['progress'];
+    int progress = 0;
+    if (rawProgress is int) {
+      progress = rawProgress;
+    } else if (rawProgress is String) {
+      progress = int.tryParse(rawProgress) ?? 0;
+    } else if (rawProgress is double) {
+      progress = rawProgress.toInt();
+    }
+    out['progress'] = progress;
+  } catch (_) {}
+  return out;
+}
+
+@pragma('vm:entry-point')
+Map<String, dynamic> _determineOtherUser(Map<dynamic, dynamic> args) {
+  // args: { 'chatData': <Map or null>, 'currentUserId': '...', 'payloadData': <Map> }
+  try {
+    final chatData = (args['chatData'] is Map) ? Map<String, dynamic>.from(args['chatData']) : <String, dynamic>{};
+    final currentUserId = args['currentUserId']?.toString() ?? '';
+    final payload = (args['payloadData'] is Map) ? Map<String, dynamic>.from(args['payloadData']) : <String, dynamic>{};
+
+    String? otherUserId;
+    if (chatData.isNotEmpty) {
+      final userIdsRaw = chatData['userIds'];
+      if (userIdsRaw is List) {
+        final List<String> userIds = userIdsRaw.map((e) => e.toString()).toList();
+        for (final id in userIds) {
+          if (id != currentUserId) {
+            otherUserId = id;
+            break;
+          }
+        }
+      }
+      if (otherUserId == null || otherUserId.isEmpty) {
+        otherUserId = payload['senderId'] ?? payload['sender_id'] ?? payload['sender'] ?? null;
+      }
+    } else {
+      otherUserId = payload['senderId'] ?? payload['sender_id'] ?? payload['sender'] ?? null;
+    }
+    return {'otherUserId': otherUserId?.toString() ?? ''};
+  } catch (_) {
+    return {'otherUserId': ''};
+  }
+}
+
+@pragma('vm:entry-point')
+String _snackPreview(Map<dynamic, dynamic> args) {
+  final body = (args['body'] ?? '').toString();
+  final maxLen = (args['max'] is int) ? args['max'] as int : int.tryParse(args['max']?.toString() ?? '') ?? 80;
+  if (body.length <= maxLen) return body;
+  return body.substring(0, maxLen) + '…';
+}
+
+/// -------------------- End compute helpers --------------------
+
+/* Remaining code unchanged logically, but calls the compute helpers where appropriate. */
 
 // A port to receive messages from the background isolate
 final ReceivePort _port = ReceivePort();
@@ -109,7 +227,10 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     debugPrint('[BG] Firebase App Check activation failed: $e\n$st');
   }
 
-  final data = message.data ?? <String, dynamic>{};
+  // Use compute to normalize and sanitize incoming data (light CPU work)
+  final rawData = (message.data ?? <String, dynamic>{});
+  final data = await compute(_normalizeData, Map<String, dynamic>.from(rawData));
+
   debugPrint('[BG] background message received data=$data');
 
   // Handle incoming call data-only pushes (background)
@@ -265,8 +386,13 @@ Future<void> openChatFromNotification(Map<String, dynamic> data) async {
     String? otherUserId;
     if (chatDocSnap.exists) {
       final chatData = chatDocSnap.data()!;
-      final userIds = List<String>.from(chatData['userIds'] ?? []);
-      otherUserId = userIds.firstWhere((id) => id != currentUserId, orElse: () => '');
+      // Use compute to determine other user id (light CPU)
+      final result = await compute(_determineOtherUser, {
+        'chatData': chatData,
+        'currentUserId': currentUserId,
+        'payloadData': data,
+      });
+      otherUserId = result['otherUserId'] as String?;
       if (otherUserId == '') otherUserId = data['senderId'] ?? data['sender_id'] ?? null;
     } else {
       otherUserId = data['senderId'] ?? data['sender_id'] ?? null;
@@ -574,16 +700,12 @@ void main() async {
   if (useSoftwareRendering) debugPrint('✅ Using software rendering');
 
   // Listen for download updates on main isolate port.
-  _port.listen((dynamic message) {
+  _port.listen((dynamic message) async {
     try {
-      final taskId = message['id']?.toString() ?? '<unknown>';
-      final rawStatus = message['status'];
-      int statusInt = -1;
-      if (rawStatus is int) {
-        statusInt = rawStatus;
-      } else if (rawStatus is String) {
-        statusInt = int.tryParse(rawStatus) ?? -1;
-      }
+      // Offload parsing to background isolate
+      final parsed = await compute(_parseDownloaderMessage, Map<String, dynamic>.from(message));
+      final taskId = parsed['id']?.toString() ?? '<unknown>';
+      final statusInt = parsed['statusInt'] as int? ?? -1;
 
       DownloadTaskStatus status = DownloadTaskStatus.undefined;
       try {
@@ -592,7 +714,7 @@ void main() async {
         }
       } catch (_) {}
 
-      final progress = (message['progress'] is int) ? message['progress'] as int : int.tryParse(message['progress']?.toString() ?? '0') ?? 0;
+      final progress = (parsed['progress'] is int) ? parsed['progress'] as int : 0;
       debugPrint('[Downloader] task=$taskId status=$status progress=$progress');
     } catch (e, st) {
       debugPrint('[Downloader] parse error: $e\n$st');
@@ -605,14 +727,17 @@ void main() async {
       FlutterCallkitIncoming.onEvent.listen((event) async {
         if (event == null) return;
         final data = (event.body is Map) ? Map<String, dynamic>.from(event.body as Map) : <String, dynamic>{};
-        final callId = data['id'] as String? ?? '';
-        final callerId = data['handle'] as String? ?? '';
-        final extra = (data['extra'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
+        // Normalize callkit event data in background (light CPU)
+        final normData = await compute(_normalizeData, data);
+
+        final callId = normData['id'] as String? ?? '';
+        final callerId = normData['handle'] as String? ?? '';
+        final extra = (normData['extra'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
         final userId = extra['userId'] as String? ?? '';
-        final callType = data['type'] == 1 ? 'video' : 'voice';
+        final callType = normData['type'] == 1 ? 'video' : 'voice';
 
         try {
-          switch (data['event']) {
+          switch (normData['event']) {
             case 'ACTION_CALL_ACCEPT':
               Map<String, dynamic>? callerData;
               Map<String, dynamic>? receiverData;
@@ -777,7 +902,8 @@ class _MyAppState extends State<MyApp> {
         FirebaseMessaging.onMessage.listen((RemoteMessage msg) async {
           debugPrint('[FCM] onMessage: ${msg.messageId} data=${msg.data} notification=${msg.notification}');
           try {
-            final data = msg.data ?? <String, dynamic>{};
+            // Normalize data in background
+            final data = await compute(_normalizeData, Map<String, dynamic>.from(msg.data ?? <String, dynamic>{}));
             final title = msg.notification?.title ?? data['title'] ?? '';
             final body = msg.notification?.body ?? data['body'] ?? '';
 
@@ -828,10 +954,12 @@ class _MyAppState extends State<MyApp> {
             // Optional in-app SnackBar (still useful for quick glance)
             final ctx = navigatorKey.currentState?.context;
             if (ctx != null) {
+              // Build a short preview in background
+              final preview = await compute(_snackPreview, {'body': body, 'max': 80});
               ScaffoldMessenger.of(ctx).showSnackBar(
                 SnackBar(
                   behavior: SnackBarBehavior.floating,
-                  content: Text('$title\n${body.length > 80 ? body.substring(0, 80) + '…' : body}'),
+                  content: Text('$title\n$preview'),
                   action: SnackBarAction(
                     label: 'Open',
                     onPressed: () async {

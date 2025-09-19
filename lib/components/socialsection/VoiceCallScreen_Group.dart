@@ -1,4 +1,4 @@
-// voice_call_screen_group.dart
+// lib/components/socialsection/voice_call_screen_group.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:movie_app/webrtc/rtc_manager.dart';
@@ -45,6 +45,9 @@ class _VoiceCallScreenState extends State<VoiceCallScreen>
 
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _statusSub;
 
+  /// Whether client has already joined (answered) the group
+  bool _hasJoined = false;
+
   String get _groupKey => widget.groupId ?? widget.callId;
 
   @override
@@ -75,25 +78,69 @@ class _VoiceCallScreenState extends State<VoiceCallScreen>
   }
 
   Future<void> _initCallState() async {
-    // If group, consider ourselves answered (we should have joined via GroupRtcManager elsewhere)
+    // If group, only join when another participant has joined (host waits for participants)
     if (widget.groupId != null) {
-      // Ensure published audio track exists
       try {
-        await GroupRtcManager.ensurePublishedTracks(_groupKey, wantVideo: false);
+        final doc = await FirebaseFirestore.instance.collection('groupCalls').doc(widget.callId).get();
+        if (doc.exists) {
+          final data = doc.data()!;
+          final host = data['host']?.toString();
+          final isHost = host == widget.callerId;
+          final Map<String, dynamic>? statusMap = (data['participantStatus'] as Map?)?.cast<String, dynamic>();
+
+          // populate local statuses
+          if (statusMap != null) {
+            statusMap.forEach((k, v) {
+              if (k == widget.callerId) return;
+              _participantStatus[k] = v?.toString() ?? 'ringing';
+            });
+          }
+
+          final someoneJoined = _anyOtherJoined(statusMap);
+          if (someoneJoined) {
+            // safe to join now
+            await GroupRtcManager.answerGroupCall(groupId: _groupKey, peerId: widget.callerId);
+            _hasJoined = true;
+            setState(() { isAnswered = true; isRinging = false; });
+            _startDurationTimer();
+          } else {
+            // wait: host shows "calling", others show "ringing" (they can tap to answer)
+            setState(() {
+              isAnswered = false;
+              isRinging = !isHost; // host sees calling overlay (not ringing)
+            });
+          }
+        } else {
+          // no doc found — behave as ringing to be safe
+          setState(() {
+            isAnswered = false;
+            isRinging = true;
+          });
+        }
       } catch (e) {
-        debugPrint('[VoiceGroup] ensurePublishedTracks error: $e');
+        debugPrint('[VoiceGroup] initCallState error: $e');
+        // fallback to ringing for non-hosts
+        setState(() {
+          isAnswered = false;
+          isRinging = true;
+        });
       }
-      setState(() {
-        isAnswered = true;
-        isRinging = false;
-      });
-      _startDurationTimer();
     } else {
       // 1:1 call: show ringing until answered locally
       setState(() {
         isRinging = true;
       });
     }
+  }
+
+  bool _anyOtherJoined(Map<String, dynamic>? statusMap) {
+    if (statusMap == null) return false;
+    for (final entry in statusMap.entries) {
+      final id = entry.key;
+      final s = entry.value?.toString() ?? '';
+      if (id != widget.callerId && s == 'joined') return true;
+    }
+    return false;
   }
 
   void _listenForCallStatus() {
@@ -131,6 +178,25 @@ class _VoiceCallScreenState extends State<VoiceCallScreen>
             }
           });
           if (shouldSet && mounted) setState(() {});
+          // If we're in a group and haven't joined, and someone else became 'joined' -> join now
+          if (widget.groupId != null && !_hasJoined) {
+            final someoneJoined = _anyOtherJoined(statusMap);
+            if (someoneJoined) {
+              try {
+                await GroupRtcManager.answerGroupCall(groupId: _groupKey, peerId: widget.callerId);
+                _hasJoined = true;
+                if (mounted) {
+                  setState(() {
+                    isAnswered = true;
+                    isRinging = false;
+                  });
+                }
+                _startDurationTimer();
+              } catch (e) {
+                debugPrint('[VoiceGroup] error auto-joining when someone joined: $e');
+              }
+            }
+          }
         }
 
         if (status == 'answered' && !isAnswered) {
@@ -176,7 +242,9 @@ class _VoiceCallScreenState extends State<VoiceCallScreen>
       }
 
       if (widget.groupId != null) {
+        // If user explicitly taps "answer", join immediately (even if host was waiting)
         await GroupRtcManager.answerGroupCall(groupId: _groupKey, peerId: widget.callerId);
+        _hasJoined = true;
       } else {
         await RtcManager.answerCall(callId: widget.callId, peerId: widget.callerId);
       }
@@ -241,7 +309,7 @@ class _VoiceCallScreenState extends State<VoiceCallScreen>
     } catch (_) {}
 
     try {
-      if (isAnswered) {
+      if (_hasJoined) {
         if (widget.groupId != null) {
           GroupRtcManager.hangUpGroupCall(_groupKey);
         } else {
@@ -285,7 +353,7 @@ class _VoiceCallScreenState extends State<VoiceCallScreen>
           ),
           const SizedBox(height: 20),
           Text(
-            'Incoming Voice Call from $username',
+            widget.groupId != null ? 'Incoming Group Call' : 'Incoming Voice Call from $username',
             style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 40),

@@ -121,6 +121,7 @@ dependencies:
 
   # --- Math & Transforms (needed for Matrix4) ---
   vector_math: ^2.1.4
+  wakelock_plus: ^1.4.0
 
 dev_dependencies:
   flutter_test:

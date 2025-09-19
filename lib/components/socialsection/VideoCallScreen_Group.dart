@@ -1,4 +1,4 @@
-// video_call_screen_group.dart
+// lib/components/socialsection/video_call_screen_group.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -24,7 +24,8 @@ class VideoCallScreenGroup extends StatefulWidget {
   State<VideoCallScreenGroup> createState() => _VideoCallScreenGroupState();
 }
 
-class _VideoCallScreenGroupState extends State<VideoCallScreenGroup> with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+class _VideoCallScreenGroupState extends State<VideoCallScreenGroup>
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final Map<String, RTCVideoRenderer> _remoteRenderers = {};
   final Map<String, bool> _rendererInitialized = {};
@@ -38,8 +39,15 @@ class _VideoCallScreenGroupState extends State<VideoCallScreenGroup> with Widget
   int _callDuration = 0;
   String _formattedDuration = '00:00';
 
-  bool isAnswered = false;
+  /// Whether this client has actually joined (published tracks / answered)
+  bool _hasJoined = false;
+
+  /// Whether the host (caller) started the call (read from Firestore host field)
+  bool _isHost = false;
+
+  /// Focused participant id to show large video
   String? _focusedParticipantId;
+
   AnimationController? _pulseController;
 
   final Map<String, String> _participantStatus = {};
@@ -59,7 +67,7 @@ class _VideoCallScreenGroupState extends State<VideoCallScreenGroup> with Widget
     _pulseController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1000))..repeat(reverse: true);
 
     _initRenderersAndState();
-    _listenForCallStatus();
+    _listenForCallStatus(); // keep listening; will trigger join when a participant becomes 'joined'
   }
 
   Future<void> _initRenderersAndState() async {
@@ -96,14 +104,58 @@ class _VideoCallScreenGroupState extends State<VideoCallScreenGroup> with Widget
       _focusedParticipantId = widget.callerId;
     }
 
-    // Attach local stream if available and attempt to answer (join) the group
+    // Attach local stream if available
     await _attachLocalStream();
-    await _joinGroupIfNeeded();
+
+    // Read Firestore once to decide whether to join right away.
+    await _fetchCallDocAndPossiblyJoin();
 
     // start an attach retry loop to attach remote streams for a short while
     _startAttachRetryLoop();
-    // start duration timer when answered
+    // start duration timer when answered/joined
     _maybeStartDurationTimer();
+  }
+
+  Future<void> _fetchCallDocAndPossiblyJoin() async {
+    try {
+      final doc = await FirebaseFirestore.instance.collection('groupCalls').doc(widget.callId).get();
+      if (!doc.exists) return;
+      final data = doc.data();
+      if (data == null) return;
+      final host = data['host']?.toString();
+      _isHost = (host != null && host == widget.callerId);
+
+      final Map<String, dynamic>? statusMap = (data['participantStatus'] as Map?)?.cast<String, dynamic>();
+      if (statusMap != null) {
+        // populate local participantStatus map for UI
+        statusMap.forEach((k, v) {
+          if (k == widget.callerId) return;
+          _participantStatus[k] = v?.toString() ?? 'ringing';
+        });
+      }
+
+      // If any other participant already 'joined', it's safe to join
+      final someoneJoined = _anyOtherJoined(statusMap);
+      if (someoneJoined && !_hasJoined) {
+        await _joinGroupIfNeeded();
+      } else {
+        // If host, show "Calling..." UI and wait for someone to join (do not join the room yet)
+        // If non-host, show ringing/incoming UI and allow user to answer (we don't auto-answer).
+        setState(() {}); // refresh participant statuses
+      }
+    } catch (e) {
+      debugPrint('[VideoGroup] fetchCallDocAndPossiblyJoin error: $e');
+    }
+  }
+
+  bool _anyOtherJoined(Map<String, dynamic>? statusMap) {
+    if (statusMap == null) return false;
+    for (final entry in statusMap.entries) {
+      final id = entry.key;
+      final s = entry.value?.toString() ?? '';
+      if (id != widget.callerId && s == 'joined') return true;
+    }
+    return false;
   }
 
   Future<void> _attachLocalStream() async {
@@ -120,16 +172,26 @@ class _VideoCallScreenGroupState extends State<VideoCallScreenGroup> with Widget
   }
 
   Future<void> _joinGroupIfNeeded() async {
-    if (_localHungUp) return; // do not join if user already hung up locally
+    if (_localHungUp || _hasJoined) return; // do not join if user already hung up or already joined
     try {
       // Ask manager to ensure published tracks exist (repairs missing publishes)
       await GroupRtcManager.ensurePublishedTracks(_groupKey, wantVideo: true);
-      // If the current user hasn't yet answered/joined, call answerGroupCall
+
+      // Only join (answer) when at least one other participant has joined (UI enforces this)
+      // But if user is a non-host and chose to answer manually, allow join via UI too.
+      final doc = await FirebaseFirestore.instance.collection('groupCalls').doc(widget.callId).get();
+      final statusMap = (doc.exists ? (doc.get('participantStatus') as Map?) : null)?.cast<String, dynamic>();
+      final someoneJoined = _anyOtherJoined(statusMap);
+      if (!someoneJoined && _isHost) {
+        // host should wait until someone joins; don't auto-join
+        debugPrint('[VideoGroup] host waiting for participants to join before entering room');
+        return;
+      }
+
       await GroupRtcManager.answerGroupCall(groupId: _groupKey, peerId: widget.callerId);
+      _hasJoined = true;
       if (!mounted) return;
-      setState(() {
-        isAnswered = true;
-      });
+      setState(() {});
       _maybeStartDurationTimer();
     } catch (e) {
       debugPrint('[VideoGroup] join/answer error: $e');
@@ -209,12 +271,22 @@ class _VideoCallScreenGroupState extends State<VideoCallScreenGroup> with Widget
           if (statusMap != null) {
             bool shouldSetState = false;
             statusMap.forEach((id, s) {
-              if (_participantStatus.containsKey(id) && _participantStatus[id] != s) {
-                _participantStatus[id] = s?.toString() ?? 'unknown';
+              if (id == widget.callerId) return;
+              final newS = s?.toString() ?? 'unknown';
+              if (_participantStatus[id] != newS) {
+                _participantStatus[id] = newS;
                 shouldSetState = true;
               }
             });
             if (shouldSetState && mounted) setState(() {});
+          }
+
+          // If we haven't joined yet, and someone else just joined, then join now.
+          if (!_hasJoined) {
+            final someoneJoinedNow = _anyOtherJoined(statusMap);
+            if (someoneJoinedNow) {
+              await _joinGroupIfNeeded();
+            }
           }
 
           // active speaker handling
@@ -238,7 +310,7 @@ class _VideoCallScreenGroupState extends State<VideoCallScreenGroup> with Widget
 
   void _maybeStartDurationTimer() {
     _durationTimer?.cancel();
-    if (isAnswered) {
+    if (_hasJoined) {
       _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (!mounted) return;
         _callDuration++;
@@ -282,9 +354,9 @@ class _VideoCallScreenGroupState extends State<VideoCallScreenGroup> with Widget
     _localHungUp = true;
 
     // stop UI interactions immediately
-    setState(() {
-      isAnswered = false;
-    });
+    try {
+      setState(() {});
+    } catch (_) {}
 
     try {
       // Ask manager to hang up and wait for it to finish
@@ -332,7 +404,6 @@ class _VideoCallScreenGroupState extends State<VideoCallScreenGroup> with Widget
     // If user left UI without explicitly hanging up, perform hangup so call doesn't remain
     if (!_localHungUp) {
       try {
-        // Fire-and-forget but block briefly to let cleanup run
         _localHungUp = true;
         GroupRtcManager.hangUpGroupCall(_groupKey).catchError((e) {
           debugPrint('[VideoGroup] hangUp during dispose failed: $e');
@@ -422,6 +493,20 @@ class _VideoCallScreenGroupState extends State<VideoCallScreenGroup> with Widget
         if (widget.participants != null)
           Positioned(bottom: isLandscape ? 80 : 120, left: 16, right: 16, child: Container(height: 100, child: ListView.builder(scrollDirection: Axis.horizontal, itemCount: widget.participants!.length, itemBuilder: (context, index) => _buildParticipantTile(widget.participants![index]))),),
         Positioned(top: 16, right: 16, child: Container(width: isLandscape ? 120 : 100, height: isLandscape ? 160 : 140, decoration: BoxDecoration(borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 6, offset: const Offset(0, 3))]), child: ClipRRect(borderRadius: BorderRadius.circular(12), child: RTCVideoView(_localRenderer, mirror: true))),),
+        // Show an overlay state when host is waiting for participants to join
+        if (!_hasJoined && _isHost)
+          Positioned.fill(
+            child: Container(
+              color: Colors.black54,
+              child: Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  const Text('Calling…', style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  const Text('Waiting for participants to join', style: TextStyle(color: Colors.white70)),
+                ]),
+              ),
+            ),
+          ),
       ],
     );
   }

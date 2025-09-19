@@ -1,14 +1,16 @@
-// group_rtc_manager.dart
+// lib/webrtc/group_rtc_manager.dart
+// GroupRtcManager: Manage LiveKit group rooms + Firestore + push notifications.
+// Improvements: safer lifecycle, event subscription tracking, robust publish/unpublish,
+// reconnect handling, and cautious LiveKit API usage.
+
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show debugPrint, unawaited;
-import 'package:flutter_webrtc/flutter_webrtc.dart'; // <-- needed for MediaStream
+import 'package:flutter_webrtc/flutter_webrtc.dart'; // provides MediaStream
 import 'package:livekit_client/livekit_client.dart' as lk;
 import 'package:uuid/uuid.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:http/http.dart' as http;
 import 'package:movie_app/services/fcm_sender.dart';
 
 /// Extension for null-safe firstOrNull
@@ -16,12 +18,19 @@ extension IterableExt<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }
 
+/// A CancelListenFunc is what livekit_client's `events.listen(...)` returns:
+/// a zero-arg function you call to remove the listener.
+typedef CancelListenFunc = void Function();
+
 /// GroupRtcManager: Manage LiveKit group rooms + Firestore signaling + push
 class GroupRtcManager {
   static final Map<String, lk.Room> _liveKitRooms = {};
   static final Map<String, lk.LocalParticipant?> _localParticipants = {};
   static final Map<String, Map<String, lk.RemoteParticipant>> _remoteParticipants = {};
   static final Map<String, Timer> _callTimers = {};
+
+  // event subscription per room: store cancel functions returned by room.events.listen(...)
+  static final Map<String, CancelListenFunc> _roomEventSubs = {};
 
   // Track reconnect attempts so we don't loop forever
   static final Map<String, int> _reconnectAttempts = {};
@@ -47,13 +56,12 @@ class GroupRtcManager {
   /// Connect with a small retry/backoff loop - returns connected room or throws.
   static Future<lk.Room> _connectWithRetry({int attempts = 3, Duration initialDelay = const Duration(milliseconds: 400)}) async {
     int attempt = 0;
-    late Exception lastEx;
+    Exception? lastEx;
     Duration delay = initialDelay;
     while (attempt < attempts) {
       attempt++;
       try {
         final room = lk.Room();
-        // connectOptions: autoSubscribe true keeps behavior consistent with 1:1 manager
         await room.connect(_sfuUrl, _devToken, connectOptions: lk.ConnectOptions(autoSubscribe: true));
         debugPrint('[GroupRtcManager] connected to LiveKit (attempt $attempt)');
         return room;
@@ -64,7 +72,7 @@ class GroupRtcManager {
         delay *= 2;
       }
     }
-    throw lastEx;
+    throw lastEx ?? Exception('unknown connect error');
   }
 
   /// Start a group call (voice/video) — publishes local tracks and creates Firestore call doc.
@@ -82,7 +90,7 @@ class GroupRtcManager {
       throw Exception("Permissions denied");
     }
 
-    lk.Room room;
+    late lk.Room room;
     try {
       room = await _connectWithRetry();
     } catch (e) {
@@ -94,7 +102,7 @@ class GroupRtcManager {
     _localParticipants[groupId] = room.localParticipant;
     _remoteParticipants[groupId] = {};
 
-    // register event handling
+    // register event handling (store cancel function so we can cancel later)
     _registerRoomEvents(groupId, room);
 
     lk.LocalVideoTrack? videoTrack;
@@ -134,7 +142,7 @@ class GroupRtcManager {
       rethrow;
     }
 
-    // send push notifications asynchronously (don't block the call start)
+    // send push notifications asynchronously (don't block)
     try {
       for (final participant in participants) {
         final token = (participant['fcmToken'] ?? participant['token'])?.toString() ?? '';
@@ -237,6 +245,7 @@ class GroupRtcManager {
         await _safePublishAudio(room, audioTrack);
       } catch (e) {
         debugPrint('[GroupRtcManager] publish while answering error: $e');
+        // not fatal for UI — keep trying
       }
 
       // update firestore participant status
@@ -286,7 +295,16 @@ class GroupRtcManager {
   /// Internal: register room events (participant/track/connection changes)
   static void _registerRoomEvents(String groupId, lk.Room room) {
     try {
-      room.events.listen((event) async {
+      // If we already have a cancel function for this group, call it to remove the previous listener
+      try {
+        final prevCancel = _roomEventSubs.remove(groupId);
+        try {
+          prevCancel?.call();
+        } catch (_) {}
+      } catch (_) {}
+
+      // LiveKit events.listen returns a CancelListenFunc (callable) rather than a StreamSubscription.
+      final CancelListenFunc cancel = room.events.listen((event) {
         try {
           // if ended by user, ignore events that try to reconnect
           if (_endedByUser.contains(groupId)) {
@@ -316,13 +334,14 @@ class GroupRtcManager {
               debugPrint('[GroupRtcManager] not reconnecting because call ended by user: $groupId');
             }
           } else {
-            // other events can be handled or logged
             debugPrint('[GroupRtcManager] room event: ${event.runtimeType}');
           }
         } catch (e, st) {
           debugPrint('[GroupRtcManager] room.events handler error: $e\n$st');
         }
       });
+
+      _roomEventSubs[groupId] = cancel;
     } catch (e, st) {
       debugPrint('[GroupRtcManager] _registerRoomEvents error: $e\n$st');
     }
@@ -361,6 +380,10 @@ class GroupRtcManager {
       _liveKitRooms[groupId] = room;
       _localParticipants[groupId] = room.localParticipant;
       _registerRoomEvents(groupId, room);
+
+      // try to republish audio/video if needed
+      await ensurePublishedTracks(groupId, wantVideo: true);
+
       _reconnectAttempts.remove(groupId);
       debugPrint('[GroupRtcManager] reconnect successful for $groupId');
     } catch (e) {
@@ -392,13 +415,15 @@ class GroupRtcManager {
       if (room != null) {
         try {
           final localParticipant = _localParticipants[groupId];
-          if (localParticipant != null) {
-            try {
-              await localParticipant.unpublishAllTracks();
-            } catch (e) {
-              debugPrint('[GroupRtcManager] unpublishAllTracks error: $e');
-            }
-          }
+
+          // Attempt to disable local mic/camera so remote peers stop receiving audio/video
+          try {
+            await localParticipant?.setMicrophoneEnabled(false);
+          } catch (_) {}
+          try {
+            await localParticipant?.setCameraEnabled(false);
+          } catch (_) {}
+
           // disconnect room safely
           try {
             if (room.connectionState != lk.ConnectionState.disconnected) {
@@ -407,6 +432,14 @@ class GroupRtcManager {
           } catch (e) {
             debugPrint('[GroupRtcManager] room.disconnect error: $e');
           }
+
+          // cancel and remove room event subscription (call stored cancel function)
+          try {
+            final cancel = _roomEventSubs.remove(groupId);
+            try {
+              cancel?.call();
+            } catch (_) {}
+          } catch (_) {}
         } catch (e) {
           debugPrint('[GroupRtcManager] error during room cleanup: $e');
         }
@@ -462,11 +495,13 @@ class GroupRtcManager {
   /// Public hang up for group calls (called by UI)
   static Future<void> hangUpGroupCall(String groupId) async {
     await _endCall(groupId, endedByUser: true);
-    // Also clear any lingering caches
+
+    // Also clear any lingering caches and attempt a final room dispose if available
     try {
       final room = _liveKitRooms[groupId];
       if (room != null) {
         try {
+          // attempt a dispose if available on this platform/version; it's safe inside try/catch
           room.dispose();
         } catch (e) {
           debugPrint('[GroupRtcManager] room.dispose error in hangUp: $e');
@@ -481,7 +516,7 @@ class GroupRtcManager {
       _callTimers[groupId]?.cancel();
       _callTimers.remove(groupId);
       _reconnectAttempts.remove(groupId);
-      _endedByUser.remove(groupId); // keep set short-lived; optional: comment out if you want to persist block
+      _endedByUser.remove(groupId); // optional: remove to keep set short-lived
     }
   }
 
@@ -565,14 +600,19 @@ class GroupRtcManager {
   static Future<void> _safePublishAudio(lk.Room room, lk.LocalAudioTrack audioTrack) async {
     try {
       final lp = room.localParticipant;
-      if (lp == null) return;
+      if (lp == null) {
+        // no participant attached — dispose created track to avoid leak
+        try {
+          await audioTrack.dispose();
+        } catch (_) {}
+        return;
+      }
 
       final already = lp.trackPublications.values.any((p) => p.kind == lk.TrackType.AUDIO && p.track != null);
       if (!already) {
         await lp.publishAudioTrack(audioTrack);
       } else {
         debugPrint('[GroupRtcManager] audio already published - skipping');
-        // still keep track of track (we may want to dispose the created one)
         try {
           await audioTrack.dispose();
         } catch (_) {}
@@ -587,7 +627,12 @@ class GroupRtcManager {
   static Future<void> _safePublishVideo(lk.Room room, lk.LocalVideoTrack videoTrack) async {
     try {
       final lp = room.localParticipant;
-      if (lp == null) return;
+      if (lp == null) {
+        try {
+          await videoTrack.dispose();
+        } catch (_) {}
+        return;
+      }
 
       final already = lp.trackPublications.values.any((p) => p.kind == lk.TrackType.VIDEO && p.track != null);
       if (!already) {
@@ -610,7 +655,6 @@ class GroupRtcManager {
   }
 
   /// Adjust quality by unpublishing and republishing with different encoding params.
-  /// Note: LiveKit generally prefers simulcast for client-driven quality. This method unpublishes & republishes.
   static Future<void> _adjustQuality(String groupId, {required bool lower}) async {
     final room = _liveKitRooms[groupId];
     if (room == null) return;
@@ -618,14 +662,13 @@ class GroupRtcManager {
     if (lp == null) return;
 
     try {
-      // unpublish everything first (safe API)
+      // Attempt to disable local tracks and re-publish
       try {
-        await lp.unpublishAllTracks();
-      } catch (e) {
-        debugPrint('[GroupRtcManager] unpublishAllTracks during adjustQuality error: $e');
-      }
+        await lp.setCameraEnabled(false);
+        await lp.setMicrophoneEnabled(false);
+      } catch (_) {}
 
-      // recreate and publish with new params
+      // create new video track with requested profile and publish
       final newVideo = await lk.LocalVideoTrack.createCameraTrack();
       await lp.publishVideoTrack(
         newVideo,
@@ -683,7 +726,7 @@ class GroupRtcManager {
     return null;
   }
 
-  /// Get any remote audio stream (first available) - helpful for audio-only UI previews
+  /// Get any remote audio stream (first available)
   static MediaStream? getAnyRemoteAudioStream(String groupId) {
     final map = _remoteParticipants[groupId];
     if (map == null) return null;
@@ -715,6 +758,13 @@ class GroupRtcManager {
     } catch (e) {
       debugPrint('[GroupRtcManager] dispose error: $e');
     } finally {
+      // cancel room event subscription if present (call stored cancel function)
+      try {
+        final cancel = _roomEventSubs.remove(groupId);
+        try {
+          cancel?.call();
+        } catch (_) {}
+      } catch (_) {}
       _liveKitRooms.remove(groupId);
       _localParticipants.remove(groupId);
       _remoteParticipants.remove(groupId);
