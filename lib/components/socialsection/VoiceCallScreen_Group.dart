@@ -1,497 +1,501 @@
-// lib/components/socialsection/voice_call_screen_group.dart
+// lib/components/socialsection/VoiceCallScreen_Group.dart
+// Group voice call UI wired to GroupRtcManager (LiveKit + Firestore signalling).
+// Named `VoiceCallScreen` so it matches the call sites in Group_chat_screen.dart
+
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:movie_app/webrtc/rtc_manager.dart';
-import 'package:movie_app/webrtc/group_rtc_manager.dart';
+import 'package:livekit_client/livekit_client.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:animate_do/animate_do.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:movie_app/webrtc/group_rtc_manager.dart';
 
 class VoiceCallScreen extends StatefulWidget {
   final String callId;
-  final String callerId;   // local user id (who's using the screen)
-  final String receiverId; // for 1:1 voice calls
-  final String? groupId;   // if present, use group manager
+  final String callerId;
+  final String groupId;
+  final String receiverId;
   final List<Map<String, dynamic>>? participants;
-  final Map<String, dynamic>? caller;
 
   const VoiceCallScreen({
     super.key,
     required this.callId,
     required this.callerId,
+    required this.groupId,
     required this.receiverId,
-    this.groupId,
     this.participants,
-    this.caller,
   });
 
   @override
   State<VoiceCallScreen> createState() => _VoiceCallScreenState();
 }
 
-class _VoiceCallScreenState extends State<VoiceCallScreen>
-    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
-  bool isMuted = false;
-  bool isSpeakerOn = false;
-  bool isRinging = false;
-  bool isAnswered = false;
+class _VoiceCallScreenState extends State<VoiceCallScreen> with SingleTickerProviderStateMixin {
+  Room? _room;
 
+  /// This can be either:
+  ///  - a StreamSubscription<RoomEvent> (if room.events is a Stream and .listen() was used),
+  ///  - or a CancelListenFunc / callable (some LiveKit bindings return a cancel function).
+  dynamic _roomEventsSub;
+
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _callSub;
+
+  bool _joined = false;
+  bool _micEnabled = true;
   Timer? _durationTimer;
-  int _callDuration = 0;
-  String _formattedDuration = '00:00';
+  Duration _callDuration = Duration.zero;
 
-  AnimationController? _pulseController;
-  final Map<String, String> _participantStatus = {};
-
-  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _statusSub;
-
-  /// Whether client has already joined (answered) the group
-  bool _hasJoined = false;
-
-  String get _groupKey => widget.groupId ?? widget.callId;
+  late final AnimationController _controlsAnim;
+  late final AnimationController _pulseAnim;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
+    _controlsAnim = AnimationController(vsync: this, duration: const Duration(milliseconds: 420));
+    _pulseAnim = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))..repeat();
+    _listenToCallDoc();
 
-    _pulseController =
-        AnimationController(vsync: this, duration: const Duration(milliseconds: 1000))
-          ..repeat(reverse: true);
-
-    // initialize participant statuses safely
-    if (widget.participants != null && widget.participants!.isNotEmpty) {
-      for (final p in widget.participants!) {
-        final id = (p['id']?.toString() ?? '');
-        if (id.isEmpty) continue;
-        if (id == widget.callerId) continue;
-        _participantStatus[id] = 'ringing';
-      }
-    } else {
-      if (widget.callerId != widget.receiverId) {
-        _participantStatus[widget.receiverId] = 'ringing';
-      }
-    }
-
-    _initCallState();
-    _listenForCallStatus();
-  }
-
-  Future<void> _initCallState() async {
-    // If group, only join when another participant has joined (host waits for participants)
-    if (widget.groupId != null) {
-      try {
-        final doc = await FirebaseFirestore.instance.collection('groupCalls').doc(widget.callId).get();
-        if (doc.exists) {
-          final data = doc.data()!;
-          final host = data['host']?.toString();
-          final isHost = host == widget.callerId;
-          final Map<String, dynamic>? statusMap = (data['participantStatus'] as Map?)?.cast<String, dynamic>();
-
-          // populate local statuses
-          if (statusMap != null) {
-            statusMap.forEach((k, v) {
-              if (k == widget.callerId) return;
-              _participantStatus[k] = v?.toString() ?? 'ringing';
-            });
-          }
-
-          final someoneJoined = _anyOtherJoined(statusMap);
-          if (someoneJoined) {
-            // safe to join now
-            await GroupRtcManager.answerGroupCall(groupId: _groupKey, peerId: widget.callerId);
-            _hasJoined = true;
-            setState(() { isAnswered = true; isRinging = false; });
-            _startDurationTimer();
-          } else {
-            // wait: host shows "calling", others show "ringing" (they can tap to answer)
-            setState(() {
-              isAnswered = false;
-              isRinging = !isHost; // host sees calling overlay (not ringing)
-            });
-          }
-        } else {
-          // no doc found — behave as ringing to be safe
-          setState(() {
-            isAnswered = false;
-            isRinging = true;
-          });
-        }
-      } catch (e) {
-        debugPrint('[VoiceGroup] initCallState error: $e');
-        // fallback to ringing for non-hosts
-        setState(() {
-          isAnswered = false;
-          isRinging = true;
-        });
-      }
-    } else {
-      // 1:1 call: show ringing until answered locally
-      setState(() {
-        isRinging = true;
-      });
+    // If caller is the current local user we auto-join (caller invited).
+    // Keep as-is unless you want to pass currentUserId into the widget.
+    if (widget.receiverId == widget.callerId) {
+      _joinVoice();
     }
   }
 
-  bool _anyOtherJoined(Map<String, dynamic>? statusMap) {
-    if (statusMap == null) return false;
-    for (final entry in statusMap.entries) {
-      final id = entry.key;
-      final s = entry.value?.toString() ?? '';
-      if (id != widget.callerId && s == 'joined') return true;
-    }
-    return false;
-  }
-
-  void _listenForCallStatus() {
-    final collection = widget.groupId != null ? 'groupCalls' : 'calls';
+  Future<void> _listenToCallDoc() async {
     try {
-      _statusSub = FirebaseFirestore.instance
-          .collection(collection)
-          .doc(widget.callId)
-          .snapshots()
-          .listen((snapshot) async {
-        final data = snapshot.data();
-        if (!mounted) return;
-        if (data == null) return;
-
-        final status = data['status'] as String?;
+      _callSub = GroupRtcManager.groupCallStream(widget.callId).listen((snap) async {
+        if (!snap.exists) return;
+        final data = snap.data() ?? {};
+        final status = data['status'] as String? ?? '';
         if (status == 'ended' || status == 'rejected') {
-          // verify terminal state with fresh read to avoid acting on transient snapshots
-          final fresh = await FirebaseFirestore.instance.collection(collection).doc(widget.callId).get();
-          final freshStatus = fresh.exists ? (fresh.get('status') as String?) : null;
-          if (freshStatus == 'ended' || freshStatus == 'rejected') {
-            if (mounted) Navigator.of(context).pop();
-            return;
-          }
+          await _leaveAndClose();
         }
-
-        // update participantStatus map safely
-        final statusRaw = data['participantStatus'];
-        if (statusRaw is Map) {
-          final statusMap = statusRaw.cast<String, dynamic>();
-          bool shouldSet = false;
-          statusMap.forEach((id, s) {
-            if (_participantStatus.containsKey(id) && _participantStatus[id] != s) {
-              _participantStatus[id] = s?.toString() ?? 'unknown';
-              shouldSet = true;
-            }
-          });
-          if (shouldSet && mounted) setState(() {});
-          // If we're in a group and haven't joined, and someone else became 'joined' -> join now
-          if (widget.groupId != null && !_hasJoined) {
-            final someoneJoined = _anyOtherJoined(statusMap);
-            if (someoneJoined) {
-              try {
-                await GroupRtcManager.answerGroupCall(groupId: _groupKey, peerId: widget.callerId);
-                _hasJoined = true;
-                if (mounted) {
-                  setState(() {
-                    isAnswered = true;
-                    isRinging = false;
-                  });
-                }
-                _startDurationTimer();
-              } catch (e) {
-                debugPrint('[VoiceGroup] error auto-joining when someone joined: $e');
-              }
-            }
-          }
-        }
-
-        if (status == 'answered' && !isAnswered) {
-          setState(() {
-            isAnswered = true;
-            isRinging = false;
-          });
-          _startDurationTimer();
+        if (!_joined && status == 'ongoing') {
+          await _joinVoice();
         }
       }, onError: (err) {
-        debugPrint('[VoiceCall] call status listen error: $err');
+        debugPrint('voice call doc listen error: $err');
       });
     } catch (e) {
-      debugPrint('[VoiceCall] listenForCallStatus setup failed: $e');
+      debugPrint('listenToCallDoc error: $e');
     }
   }
 
-  void _startDurationTimer() {
+  Future<void> _joinVoice() async {
+    if (_joined) return;
+    try {
+      final room = await GroupRtcManager.getTokenAndJoinGroup(
+        groupId: widget.callId,
+        userId: widget.receiverId,
+        userName: widget.receiverId,
+        enableAudio: true,
+        enableVideo: false,
+      );
+
+      // Subscribe to room events. Different LiveKit bindings may expose events differently:
+      // - some expose a Stream<RoomEvent> in `room.events`, so .listen(...) returns StreamSubscription
+      // - others return a CancelListenFunc (callable) when you attach a listener
+      try {
+        final eventsObj = room.events;
+        // try the common case: eventsObj is a Stream
+        if (eventsObj is Stream<RoomEvent>) {
+          _roomEventsSub = eventsObj.listen((event) {
+            if (!mounted) return;
+            setState(() {
+              final lp = room.localParticipant;
+              try {
+                _micEnabled = lp?.isMicrophoneEnabled() ?? _micEnabled;
+              } catch (_) {}
+            });
+          });
+        } else {
+          // fallback: attempt to call .listen if available
+          try {
+            _roomEventsSub = (eventsObj as dynamic).listen((event) {
+              if (!mounted) return;
+              setState(() {
+                final lp = room.localParticipant;
+                try {
+                  _micEnabled = lp?.isMicrophoneEnabled() ?? _micEnabled;
+                } catch (_) {}
+              });
+            });
+          } catch (_) {
+            // last-resort: if eventsObj is a function that accepts a callback and returns a cancel function
+            try {
+              final cancelFunc = (eventsObj as dynamic)((RoomEvent event) {
+                if (!mounted) return;
+                setState(() {
+                  final lp = room.localParticipant;
+                  try {
+                    _micEnabled = lp?.isMicrophoneEnabled() ?? _micEnabled;
+                  } catch (_) {}
+                });
+              });
+              _roomEventsSub = cancelFunc; // store cancel function to call later
+            } catch (err) {
+              debugPrint('unable to subscribe to room.events: $err');
+              _roomEventsSub = null;
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('room events listen error: $e');
+        _roomEventsSub = null;
+      }
+
+      setState(() {
+        _room = room;
+        _joined = true;
+        final lp = room.localParticipant;
+        try {
+          _micEnabled = lp?.isMicrophoneEnabled() ?? true;
+        } catch (_) {}
+      });
+
+      _startTimer();
+      _controlsAnim.forward();
+      _pulseAnim.stop();
+    } catch (e, st) {
+      debugPrint('join voice failed: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to join voice call')));
+        Navigator.of(context).maybePop();
+      }
+    }
+  }
+
+  void _startTimer() {
     _durationTimer?.cancel();
+    _callDuration = Duration.zero;
     _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      _callDuration++;
-      _formattedDuration = _formatDuration(_callDuration);
-      setState(() {});
+      setState(() => _callDuration += const Duration(seconds: 1));
     });
   }
 
-  String _formatDuration(int seconds) {
-    final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
-    final secs = (seconds % 60).toString().padLeft(2, '0');
-    return '$minutes:$secs';
-  }
-
-  Future<void> _answerCall() async {
+  Future<void> _toggleMic() async {
+    if (_room == null) return;
     try {
-      // request mic permission UI dialog
-      final mic = await Permission.microphone.request();
-      if (!mic.isGranted) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Microphone permission required')));
-        }
-        return;
-      }
-
-      if (widget.groupId != null) {
-        // If user explicitly taps "answer", join immediately (even if host was waiting)
-        await GroupRtcManager.answerGroupCall(groupId: _groupKey, peerId: widget.callerId);
-        _hasJoined = true;
-      } else {
-        await RtcManager.answerCall(callId: widget.callId, peerId: widget.callerId);
-      }
-
-      if (mounted) {
-        setState(() {
-          isAnswered = true;
-          isRinging = false;
-        });
-      }
-      _startDurationTimer();
-    } catch (e, st) {
-      debugPrint('[VoiceCall] answer error: $e\n$st');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to answer call')));
-      }
-    }
-  }
-
-  Future<void> _rejectCall() async {
-    try {
-      if (widget.groupId != null) {
-        await GroupRtcManager.rejectGroupCall(groupId: _groupKey, peerId: widget.callerId);
-      } else {
-        await RtcManager.rejectCall(callId: widget.callId, peerId: widget.callerId);
-      }
+      final enabled = await GroupRtcManager.toggleMic(_room!);
+      setState(() => _micEnabled = enabled);
     } catch (e) {
-      debugPrint('[VoiceCall] reject error: $e');
-    } finally {
-      if (mounted) Navigator.of(context).pop();
+      debugPrint('toggle mic error: $e');
     }
   }
 
-  Future<void> _hangUp() async {
-    try {
-      if (widget.groupId != null) {
-        await GroupRtcManager.hangUpGroupCall(_groupKey);
-      } else {
-        await RtcManager.hangUp(widget.callId);
+Future<void> _cancelRoomEventsSubscription() async {
+  final sub = _roomEventsSub;
+  if (sub == null) return;
+
+  try {
+    if (sub is StreamSubscription) {
+      await sub.cancel();
+    } else {
+      try {
+        await (sub as dynamic)(); // no need to store result
+      } catch (_) {
+        // ignore errors from cancel function
       }
-    } catch (e) {
-      debugPrint('[VoiceCall] hangUp error: $e');
-    } finally {
-      if (mounted) Navigator.of(context).pop();
     }
+  } catch (e) {
+    debugPrint('error cancelling room events subscription: $e');
+  } finally {
+    _roomEventsSub = null;
+  }
+}
+
+  Future<void> _leaveAndClose() async {
+    _durationTimer?.cancel();
+
+    await _cancelRoomEventsSubscription();
+
+    if (_room != null) {
+      try {
+        await GroupRtcManager.leaveRoom(_room!, groupId: widget.callId, userId: widget.receiverId);
+      } catch (_) {}
+      _room = null;
+    }
+
+    if (mounted) Navigator.of(context).maybePop();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // nothing needed for audio-only right now; hook for future improvements
+  Future<void> _endCall() async {
+    try {
+      await GroupRtcManager.endGroupCall(groupId: widget.callId, endedBy: widget.callerId);
+    } catch (_) {}
+    await _leaveAndClose();
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    try {
-      _pulseController?.dispose();
-    } catch (_) {}
     _durationTimer?.cancel();
-    try {
-      _statusSub?.cancel();
-    } catch (_) {}
+    _callSub?.cancel();
 
-    try {
-      if (_hasJoined) {
-        if (widget.groupId != null) {
-          GroupRtcManager.hangUpGroupCall(_groupKey);
-        } else {
-          RtcManager.hangUp(widget.callId);
-        }
-      }
-    } catch (e) {
-      debugPrint('[VoiceCall] hangUp during dispose error: $e');
+    // Cancel room events safely (do not await long-running tasks in dispose).
+    if (_roomEventsSub is StreamSubscription) {
+      try {
+        (_roomEventsSub as StreamSubscription).cancel();
+      } catch (_) {}
+    } else if (_roomEventsSub != null) {
+      // If it's a cancel function, call it but don't await.
+      try {
+        final c = _roomEventsSub;
+        (c as dynamic)();
+      } catch (_) {}
     }
+    _roomEventsSub = null;
+
+    if (_room != null) {
+      // best-effort leave; do not await in dispose
+      try {
+        GroupRtcManager.leaveRoom(_room!, groupId: widget.callId, userId: widget.receiverId);
+      } catch (_) {}
+      _room = null;
+    }
+
+    _controlsAnim.dispose();
+    _pulseAnim.dispose();
     super.dispose();
   }
 
-  Widget _buildRingingScreen() {
-    // Resolve caller object safely (from participants list or widget.caller)
-    Map<String, dynamic>? callerMap;
-    if (widget.participants != null) {
-      try {
-        final found = widget.participants!.firstWhere(
-          (p) => (p['id']?.toString() ?? '') == widget.callerId,
-          orElse: () => <String, dynamic>{},
-        );
-        if (found is Map && found.isNotEmpty) callerMap = Map<String, dynamic>.from(found);
-      } catch (_) {}
+  String _formatDuration(Duration d) {
+    final mm = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final ss = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final hh = d.inHours;
+    if (hh > 0) {
+      final hStr = hh.toString().padLeft(2, '0');
+      return '$hStr:$mm:$ss';
     }
-    callerMap ??= widget.caller;
-
-    final username = (callerMap != null && callerMap['username'] != null) ? callerMap['username'].toString() : 'Unknown';
-    final photo = (callerMap != null && callerMap['photoUrl'] != null) ? callerMap['photoUrl'].toString() : null;
-
-    return Center(
-      child: FadeIn(
-        duration: const Duration(milliseconds: 500),
-        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Pulse(
-            controller: (c) => c.repeat(reverse: true),
-            child: CircleAvatar(
-              radius: 60,
-              backgroundImage: photo != null ? NetworkImage(photo) : null,
-              child: photo == null ? const Icon(Icons.person, size: 60) : null,
-            ),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            widget.groupId != null ? 'Incoming Group Call' : 'Incoming Voice Call from $username',
-            style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 40),
-          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.green,
-                shape: const CircleBorder(),
-                padding: const EdgeInsets.all(20),
-              ),
-              onPressed: _answerCall,
-              child: const Icon(Icons.call, size: 30, color: Colors.white),
-            ),
-            const SizedBox(width: 40),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                shape: const CircleBorder(),
-                padding: const EdgeInsets.all(20),
-              ),
-              onPressed: _rejectCall,
-              child: const Icon(Icons.call_end, size: 30, color: Colors.white),
-            ),
-          ]),
-        ]),
-      ),
-    );
+    return '$mm:$ss';
   }
 
-  Widget _buildCallScreen() {
-    final displayName = (widget.caller != null && widget.caller!['username'] != null)
-        ? widget.caller!['username'].toString()
-        : 'Voice Call';
-
-    return Center(
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Pulse(
-          controller: (c) => c.repeat(reverse: true),
-          child: CircleAvatar(
-            radius: 60,
-            backgroundImage: (widget.caller != null && widget.caller!['photoUrl'] != null)
-                ? NetworkImage(widget.caller!['photoUrl'].toString())
-                : null,
-            child: (widget.caller == null || widget.caller!['photoUrl'] == null) ? const Icon(Icons.person, size: 60) : null,
-          ),
-        ),
-        const SizedBox(height: 20),
-        Text(displayName, style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 10),
-        Text(_formattedDuration, style: const TextStyle(color: Colors.white70, fontSize: 20)),
-        const SizedBox(height: 10),
-        Text("Voice Call", style: TextStyle(color: const Color.fromRGBO(158, 158, 158, 1), fontSize: 16)),
-        const SizedBox(height: 20),
-        if (widget.participants != null)
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: widget.participants!
-                .where((p) => (p['id']?.toString() ?? '') != widget.callerId)
-                .map((participant) {
-              final pid = participant['id']?.toString() ?? '';
-              final username = participant['username']?.toString() ?? 'Participant';
-              final photo = participant['photoUrl']?.toString();
-              final status = _participantStatus[pid] ?? 'ringing';
-
-              final Color backgroundColor = status == 'joined'
-                  ? const Color.fromRGBO(76, 175, 80, 0.7) // green 500 with alpha
-                  : const Color.fromRGBO(255, 235, 59, 0.7); // yellow 500 with alpha
-
-              return Chip(
-                label: Text(username, style: const TextStyle(color: Colors.white)),
-                avatar: CircleAvatar(
-                  backgroundImage: photo != null ? NetworkImage(photo) : null,
-                  child: photo == null ? const Icon(Icons.person) : null,
-                ),
-                backgroundColor: backgroundColor,
-              );
-            }).toList(),
-          ),
-      ]),
-    );
+  Map<String, dynamic>? _metaForParticipant(String id) {
+    final parts = widget.participants;
+    if (parts == null) return null;
+    try {
+      final casted = parts.cast<Map<String, dynamic>>();
+      final found = casted.firstWhere((m) => (m['id']?.toString() ?? '') == id, orElse: () => <String, dynamic>{});
+      return found.isEmpty ? null : found;
+    } catch (_) {
+      return null;
+    }
   }
 
-  Widget _buildControlButtons() {
-    return Positioned(
-      bottom: 16,
-      left: 16,
-      right: 16,
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(30)),
+  Widget _buildTopBar(String displayName, String? avatarUrl) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
         child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
-            IconButton(
-              icon: Icon(isMuted ? Icons.mic_off : Icons.mic, color: isMuted ? Colors.red : Colors.white, size: 32),
-              onPressed: () {
-                setState(() => isMuted = !isMuted);
-                if (widget.groupId != null) {
-                  GroupRtcManager.toggleMute(_groupKey, isMuted);
-                } else {
-                  RtcManager.toggleMute(widget.callId, isMuted);
-                }
-              },
+            InkWell(
+                onTap: () => Navigator.of(context).maybePop(),
+                child: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withOpacity(0.28), shape: BoxShape.circle), child: const Icon(Icons.arrow_back, size: 20))),
+            const SizedBox(width: 12),
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: Colors.grey[800],
+              backgroundImage: avatarUrl != null && avatarUrl.isNotEmpty ? CachedNetworkImageProvider(avatarUrl) : null,
+              child: (avatarUrl == null || avatarUrl.isEmpty) ? Text(displayName.isNotEmpty ? displayName[0] : 'U', style: const TextStyle(color: Colors.white)) : null,
             ),
-            IconButton(
-              icon: Icon(isSpeakerOn ? Icons.volume_up : Icons.volume_off, color: isSpeakerOn ? Colors.white : Colors.grey, size: 32),
-              onPressed: () {
-                setState(() => isSpeakerOn = !isSpeakerOn);
-                // platform-specific speaker toggle can be implemented if desired
-              },
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.red, shape: const CircleBorder(), padding: const EdgeInsets.all(16)),
-              onPressed: _hangUp,
-              child: const Icon(Icons.call_end, size: 32, color: Colors.white),
-            ),
+            const SizedBox(width: 10),
+            Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(displayName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 2),
+              Text(_joined ? _formatDuration(_callDuration) : 'Connecting...', style: const TextStyle(fontSize: 12, color: Colors.white70))
+            ])),
+            IconButton(onPressed: () {}, icon: const Icon(Icons.more_vert)),
           ],
         ),
       ),
     );
   }
 
+  Widget _buildPulseAvatar(String? avatarUrl, String displayName) {
+    return SizedBox(
+      width: 160,
+      height: 160,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          AnimatedBuilder(
+            animation: _pulseAnim,
+            builder: (context, child) {
+              final t = _pulseAnim.value;
+              final scale1 = 1.0 + t * 0.9;
+              final opacity1 = (1.0 - t).clamp(0.0, 1.0);
+              return Stack(
+                alignment: Alignment.center,
+                children: [
+                  Transform.scale(scale: scale1, child: Container(width: 140, height: 140, decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.blue.withOpacity(0.06 * opacity1)))),
+                  Transform.scale(scale: 1.0 + (t * 0.4), child: Container(width: 110, height: 110, decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.blue.withOpacity(0.03 * opacity1)))),
+                ],
+              );
+            },
+          ),
+          CircleAvatar(
+            radius: 46,
+            backgroundColor: Colors.grey[850],
+            backgroundImage: avatarUrl != null && avatarUrl.isNotEmpty ? CachedNetworkImageProvider(avatarUrl) : null,
+            child: (avatarUrl == null || avatarUrl.isEmpty) ? Text(displayName.isNotEmpty ? displayName[0].toUpperCase() : 'U', style: const TextStyle(fontSize: 32)) : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    final meta = _metaForParticipant(widget.callerId) ?? {};
+    final avatar = (meta['avatarUrl'] as String?) ?? '';
+    final displayName = (meta['username'] as String?) ?? widget.callerId;
+
+    if (!_joined) {
+      final isCaller = widget.receiverId == widget.callerId;
+      return Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        _buildPulseAvatar(avatar.isNotEmpty ? avatar : null, displayName),
+        const SizedBox(height: 14),
+        Text(displayName, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 8),
+        Text(isCaller ? 'Calling...' : 'Incoming voice call', style: const TextStyle(color: Colors.white70)),
+        const SizedBox(height: 20),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(color: Colors.black.withOpacity(0.35), borderRadius: BorderRadius.circular(12)),
+          child: isCaller
+              ? Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                  ElevatedButton.icon(onPressed: _endCall, icon: const Icon(Icons.call_end), label: const Text('Cancel'), style: ElevatedButton.styleFrom(backgroundColor: Colors.red)),
+                  TextButton(onPressed: () {}, child: const Text('Message', style: TextStyle(color: Colors.white70))),
+                ])
+              : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  ElevatedButton.icon(
+                    onPressed: () async {
+                      try {
+                        await GroupRtcManager.answerGroupCall(groupId: widget.callId, peerId: widget.receiverId);
+                        await _joinVoice();
+                      } catch (e) {
+                        debugPrint('accept voice error: $e');
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to accept call')));
+                      }
+                    },
+                    icon: const Icon(Icons.call),
+                    label: const Text('Accept'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                  ),
+                  const SizedBox(width: 12),
+                  ElevatedButton.icon(
+                    onPressed: () async {
+                      await GroupRtcManager.rejectGroupCall(groupId: widget.callId, peerId: widget.receiverId);
+                      if (mounted) Navigator.of(context).maybePop();
+                    },
+                    icon: const Icon(Icons.call_end),
+                    label: const Text('Reject'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                  ),
+                ]),
+        ),
+      ]);
+    }
+
+    return Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      _buildPulseAvatar(avatar.isNotEmpty ? avatar : null, displayName),
+      const SizedBox(height: 14),
+      Text(displayName, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+      const SizedBox(height: 8),
+      Text(_formatDuration(_callDuration), style: const TextStyle(fontSize: 16)),
+      const SizedBox(height: 20),
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(color: Colors.black.withOpacity(0.35), borderRadius: BorderRadius.circular(12)),
+        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          ElevatedButton.icon(
+            onPressed: _toggleMic,
+            icon: Icon(_micEnabled ? Icons.mic : Icons.mic_off),
+            label: Text(_micEnabled ? 'Mute' : 'Unmute'),
+            style: ElevatedButton.styleFrom(backgroundColor: _micEnabled ? Colors.orange : Colors.grey[700]),
+          ),
+          const SizedBox(width: 14),
+          ElevatedButton(
+            onPressed: _endCall,
+            style: ElevatedButton.styleFrom(shape: const CircleBorder(), padding: const EdgeInsets.all(16), backgroundColor: Colors.red),
+            child: const Icon(Icons.call_end, size: 28),
+          ),
+          const SizedBox(width: 14),
+          IconButton(onPressed: () {}, icon: const Icon(Icons.more_horiz), color: Colors.white70),
+        ]),
+      ),
+      const SizedBox(height: 18),
+      _participantsStrip(),
+    ]);
+  }
+
+  Widget _participantsStrip() {
+    final members = widget.participants ?? [];
+    if (members.isEmpty) return const SizedBox.shrink();
+    final visible = members.take(12).toList();
+    return SizedBox(
+      height: 86,
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        scrollDirection: Axis.horizontal,
+        itemBuilder: (context, idx) {
+          final m = visible[idx];
+          final avatar = (m['avatarUrl'] as String?) ?? '';
+          final name = (m['username'] as String?) ?? 'User';
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircleAvatar(
+                radius: 24,
+                backgroundColor: Colors.grey[850],
+                backgroundImage: avatar.isNotEmpty ? CachedNetworkImageProvider(avatar) : null,
+                child: avatar.isEmpty ? Text(name.isNotEmpty ? name[0].toUpperCase() : 'U') : null,
+              ),
+              const SizedBox(height: 6),
+              SizedBox(
+                width: 60,
+                child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+              ),
+            ],
+          );
+        },
+        separatorBuilder: (_, __) => const SizedBox(width: 12),
+        itemCount: visible.length,
+      ),
+    );
+  }
+
+  Widget _buildBackground() {
+    return Stack(
+      children: [
+        Positioned.fill(child: Container(decoration: const BoxDecoration(gradient: LinearGradient(colors: [Color(0xFF060606), Color(0xFF0D0F14)], begin: Alignment.topLeft, end: Alignment.bottomRight)))),
+        Positioned(left: -120, top: -120, child: Container(width: 300, height: 300, decoration: BoxDecoration(shape: BoxShape.circle, gradient: RadialGradient(colors: [Colors.deepPurple.withOpacity(0.14), Colors.transparent])))),
+        Positioned(right: -120, bottom: -120, child: Container(width: 260, height: 260, decoration: BoxDecoration(shape: BoxShape.circle, gradient: RadialGradient(colors: [Colors.teal.withOpacity(0.10), Colors.transparent])))),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final meta = _metaForParticipant(widget.callerId) ?? {};
+    final displayName = (meta['username'] as String?) ?? 'Contact';
+    final avatar = (meta['avatarUrl'] as String?) ?? '';
+
     return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Colors.blue.shade900, Colors.black]),
-        ),
-        child: SafeArea(
-          child: Stack(
-            children: [
-              if (isRinging) _buildRingingScreen() else _buildCallScreen(),
-              _buildControlButtons(),
-            ],
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          _buildBackground(),
+          SafeArea(
+            child: Column(
+              children: [
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0), child: _buildTopBar(displayName, avatar)),
+                Expanded(child: Center(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 18.0), child: _buildBody()))),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 14.0, vertical: 14.0), child: FadeTransition(opacity: CurvedAnimation(parent: _controlsAnim, curve: Curves.easeIn), child: const SizedBox.shrink())),
+              ],
+            ),
           ),
-        ),
+        ],
       ),
     );
   }

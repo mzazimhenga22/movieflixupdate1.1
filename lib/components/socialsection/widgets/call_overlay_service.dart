@@ -1,4 +1,4 @@
-// lib/services/call_overlay_service.dart
+// lib/components/socialsection/widgets/call_overlay_service.dart
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
@@ -316,9 +316,11 @@ class CallOverlayService extends ChangeNotifier {
     // Answer at the RTC layer (group vs 1:1)
     try {
       if (isGroup) {
+        // keep GroupRtcManager API as-is (peerId param often used)
         await GroupRtcManager.answerGroupCall(groupId: callId, peerId: _userId ?? '');
       } else {
-        await RtcManager.answerCall(callId: callId, peerId: _userId ?? '');
+        // updated to new RtcManager API
+        await RtcManager.acceptCall(callId: callId, userId: _userId ?? '');
       }
     } catch (e, st) {
       debugPrint('[CallOverlayService] Answer failed (proceeding to navigate): $e\n$st');
@@ -337,7 +339,7 @@ class CallOverlayService extends ChangeNotifier {
           // fetch host info
           try {
             final hostDoc = await FirebaseFirestore.instance.collection('users').doc(hostId).get();
-            if (hostDoc.exists) callerData = {...?hostDoc.data(), 'id': hostDoc.id};
+            if (hostDoc.exists) callerData = {...(hostDoc.data() ?? {}), 'id': hostDoc.id};
           } catch (_) {}
           // collect participants list (IDs). Try to fetch user docs for nicer UI
           final partIds = (data['participants'] as List?)?.map((e) => e.toString()).toList() ?? [];
@@ -345,21 +347,24 @@ class CallOverlayService extends ChangeNotifier {
           for (final pid in partIds) {
             try {
               final pDoc = await FirebaseFirestore.instance.collection('users').doc(pid).get();
-              if (pDoc.exists) participants.add({...?pDoc.data(), 'id': pDoc.id});
-              else participants.add({'id': pid, 'username': 'Unknown'});
+              if (pDoc.exists) {
+                participants.add({...(pDoc.data() ?? {}), 'id': pDoc.id});
+              } else {
+                participants.add({'id': pid, 'username': 'Unknown'});
+              }
             } catch (_) {
               participants.add({'id': pid, 'username': 'Unknown'});
             }
           }
           // receiver info (local)
           final recDoc = await FirebaseFirestore.instance.collection('users').doc(_userId).get();
-          if (recDoc.exists) receiverData = {...?recDoc.data(), 'id': recDoc.id};
+          if (recDoc.exists) receiverData = {...(recDoc.data() ?? {}), 'id': recDoc.id};
         }
       } else {
         final callerDoc = await FirebaseFirestore.instance.collection('users').doc(callerId).get();
-        if (callerDoc.exists) callerData = {...?callerDoc.data(), 'id': callerDoc.id};
+        if (callerDoc.exists) callerData = {...(callerDoc.data() ?? {}), 'id': callerDoc.id};
         final recDoc = await FirebaseFirestore.instance.collection('users').doc(_userId).get();
-        if (recDoc.exists) receiverData = {...?recDoc.data(), 'id': recDoc.id};
+        if (recDoc.exists) receiverData = {...(recDoc.data() ?? {}), 'id': recDoc.id};
       }
     } catch (_) {}
 
@@ -379,6 +384,7 @@ class CallOverlayService extends ChangeNotifier {
             ),
           ));
         } else {
+          // <<< FIX: removed invalid `caller:` named parameter here that didn't exist on VoiceCallScreen constructor
           _navigatorKey!.currentState!.push(MaterialPageRoute(
             builder: (_) => VoiceCallScreen(
               callId: callId,
@@ -386,7 +392,6 @@ class CallOverlayService extends ChangeNotifier {
               receiverId: _userId ?? '',
               groupId: callId,
               participants: participants,
-              caller: callerData,
             ),
           ));
         }
@@ -399,8 +404,8 @@ class CallOverlayService extends ChangeNotifier {
               callerId: callerId,
               receiverId: _userId ?? '',
               currentUserId: _userId ?? '',
-              caller: callerData,
-              receiver: receiverData,
+              caller: callerData ?? <String, dynamic>{},
+              receiver: receiverData ?? <String, dynamic>{},
             ),
           ));
         } else {
@@ -410,8 +415,8 @@ class CallOverlayService extends ChangeNotifier {
               callerId: callerId,
               receiverId: _userId ?? '',
               currentUserId: _userId ?? '',
-              caller: callerData,
-              receiver: receiverData,
+              caller: callerData ?? <String, dynamic>{},
+              receiver: receiverData ?? <String, dynamic>{},
             ),
           ));
         }
@@ -427,7 +432,8 @@ class CallOverlayService extends ChangeNotifier {
       if (isGroup) {
         await GroupRtcManager.rejectGroupCall(groupId: callId, peerId: peerId);
       } else {
-        await RtcManager.rejectCall(callId: callId, peerId: peerId);
+        // updated to new RtcManager API: rejectedBy
+        await RtcManager.rejectCall(callId: callId, rejectedBy: peerId);
       }
     } catch (e) {
       debugPrint('[CallOverlayService] reject failed: $e');

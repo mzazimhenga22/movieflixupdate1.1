@@ -394,6 +394,8 @@ class MessagesController extends ChangeNotifier {
     }
   }
 
+  
+
   /// Public API: send a message (will attempt immediately; if network fails it goes to outbox)
   /// messagePayload should include at least: senderId, text or type, optionally attachments, timestamp (optional)
   Future<void> sendMessage(String chatId, Map<String, dynamic> messagePayload, {required bool isGroup}) async {
@@ -452,6 +454,53 @@ class MessagesController extends ChangeNotifier {
       _scheduleOutboxProcessing(immediate: true);
     }
   }
+
+  /// Compatibility helper: UI code may call `.refresh()` on the controller.
+/// This forces a one-off refresh of summaries from Firestore and restarts listeners.
+Future<void> refresh() async {
+  try {
+    final uid = currentUser['id'] as String?;
+    if (uid == null || uid.isEmpty) return;
+
+    // Cancel realtime listeners to avoid duplicates while we do a one-off refresh.
+    try { await _chatsSub?.cancel(); } catch (_) {}
+    try { await _groupsSub?.cancel(); } catch (_) {}
+
+    // one-off fetch current remote chat/group docs and apply them to in-memory summaries
+    try {
+      final chatsSnap = await FirebaseFirestore.instance
+          .collection('chats')
+          .where('userIds', arrayContains: uid)
+          .get();
+      _processDocsChanged(chatsSnap.docs, isGroup: false);
+    } catch (e, st) {
+      debugPrint('[MessagesController] refresh: failed to fetch chats: $e\n$st');
+    }
+
+    try {
+      final groupsSnap = await FirebaseFirestore.instance
+          .collection('groups')
+          .where('userIds', arrayContains: uid)
+          .get();
+      _processDocsChanged(groupsSnap.docs, isGroup: true);
+    } catch (e, st) {
+      debugPrint('[MessagesController] refresh: failed to fetch groups: $e\n$st');
+    }
+
+    // restart realtime listeners (so future updates stream in normally)
+    _startRealtimeListeners();
+
+    // optional housekeeping: refresh cached lists and notify UI
+    _saveCachedLists();
+    _recomputeTotalUnread();
+    notifyListeners();
+  } catch (e, st) {
+    debugPrint('[MessagesController] refresh error: $e\n$st');
+  }
+}
+
+
+  
 
   // ---------------------
   // Real-time listeners

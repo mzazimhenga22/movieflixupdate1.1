@@ -455,8 +455,9 @@ Future<void> handleIncomingCallTap(Map<String, dynamic> data) async {
           callerId: callerId,
           receiverId: receiverId,
           currentUserId: receiverId,
-          caller: null,
-          receiver: null,
+          // pass empty map if we don't have caller/receiver metadata
+          caller: <String, dynamic>{},
+          receiver: <String, dynamic>{},
         ),
       ));
     } else {
@@ -466,8 +467,8 @@ Future<void> handleIncomingCallTap(Map<String, dynamic> data) async {
           callerId: callerId,
           receiverId: receiverId,
           currentUserId: receiverId,
-          caller: null,
-          receiver: null,
+          caller: <String, dynamic>{},
+          receiver: <String, dynamic>{},
         ),
       ));
     }
@@ -739,46 +740,50 @@ void main() async {
         try {
           switch (normData['event']) {
             case 'ACTION_CALL_ACCEPT':
-              Map<String, dynamic>? callerData;
-              Map<String, dynamic>? receiverData;
-              try {
-                final callerDoc = await FirebaseFirestore.instance.collection('users').doc(callerId).get();
-                if (callerDoc.exists) callerData = {...callerDoc.data()!, 'id': callerDoc.id};
-                final recDoc = await FirebaseFirestore.instance.collection('users').doc(userId).get();
-                if (recDoc.exists) receiverData = {...recDoc.data()!, 'id': recDoc.id};
-              } catch (_) {}
+  Map<String, dynamic>? callerData;
+  Map<String, dynamic>? receiverData;
+  try {
+    final callerDoc = await FirebaseFirestore.instance.collection('users').doc(callerId).get();
+    if (callerDoc.exists) callerData = {...callerDoc.data()!, 'id': callerDoc.id};
+    final recDoc = await FirebaseFirestore.instance.collection('users').doc(userId).get();
+    if (recDoc.exists) receiverData = {...recDoc.data()!, 'id': recDoc.id};
+  } catch (_) {}
 
-              if (navigatorKey.currentState != null) {
-                await RtcManager.answerCall(callId: callId, peerId: userId);
-                if (callType == 'video') {
-                  navigatorKey.currentState!.push(MaterialPageRoute(
-                    builder: (_) => VideoCallScreen1to1(
-                      callId: callId,
-                      callerId: callerId,
-                      receiverId: userId,
-                      currentUserId: userId,
-                      caller: callerData,
-                      receiver: receiverData,
-                    ),
-                  ));
-                } else {
-                  navigatorKey.currentState!.push(MaterialPageRoute(
-                    builder: (_) => VoiceCallScreen1to1(
-                      callId: callId,
-                      callerId: callerId,
-                      receiverId: userId,
-                      currentUserId: userId,
-                      caller: callerData,
-                      receiver: receiverData,
-                    ),
-                  ));
-                }
-              }
-              break;
+  if (navigatorKey.currentState != null) {
+    // Updated to match RtcManager API: acceptCall(callId: ..., userId: ...)
+    await RtcManager.acceptCall(callId: callId, userId: userId);
+
+    if (callType == 'video') {
+      navigatorKey.currentState!.push(MaterialPageRoute(
+        builder: (_) => VideoCallScreen1to1(
+          callId: callId,
+          callerId: callerId,
+          receiverId: userId,
+          currentUserId: userId,
+          caller: callerData ?? <String, dynamic>{},
+          receiver: receiverData ?? <String, dynamic>{},
+        ),
+      ));
+    } else {
+      navigatorKey.currentState!.push(MaterialPageRoute(
+        builder: (_) => VoiceCallScreen1to1(
+          callId: callId,
+          callerId: callerId,
+          receiverId: userId,
+          currentUserId: userId,
+          caller: callerData ?? <String, dynamic>{},
+          receiver: receiverData ?? <String, dynamic>{},
+        ),
+      ));
+    }
+  }
+  break;
+
 
             case 'ACTION_CALL_DECLINE':
             case 'ACTION_CALL_TIMEOUT':
-              await RtcManager.rejectCall(callId: callId, peerId: userId);
+              // Updated to match RtcManager API: rejectCall(callId: ..., rejectedBy: ...)
+              await RtcManager.rejectCall(callId: callId, rejectedBy: userId);
               await FlutterCallkitIncoming.endAllCalls();
               break;
             default:

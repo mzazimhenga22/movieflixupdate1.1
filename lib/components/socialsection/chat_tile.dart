@@ -1,4 +1,6 @@
+// chat_tile.dart
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart'; // for Timestamp detection
 import 'messages_controller.dart';
 
 class ChatTile extends StatelessWidget {
@@ -47,6 +49,30 @@ class ChatTile extends StatelessWidget {
     return months[month];
   }
 
+  /// Flexible parser for presence lastSeen values (String / int / DateTime / Timestamp)
+  DateTime? _parseLastSeen(dynamic raw) {
+    try {
+      if (raw == null) return null;
+      if (raw is DateTime) return raw;
+      if (raw is int) return DateTime.fromMillisecondsSinceEpoch(raw);
+      if (raw is String) return DateTime.tryParse(raw);
+      if (raw is Timestamp) return raw.toDate();
+    } catch (_) {}
+    return null;
+  }
+
+  String _formatLastSeen(BuildContext context, DateTime dt) {
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff < const Duration(minutes: 1)) return 'Last seen just now';
+    if (diff < const Duration(hours: 24)) {
+      final t = TimeOfDay.fromDateTime(dt);
+      return 'Last seen ${t.format(context)}';
+    }
+    // older: show short date
+    return 'Last seen ${dt.day}/${dt.month}/${dt.year}';
+  }
+
   @override
   Widget build(BuildContext context) {
     final isPinned = summary.isPinned || controller.isChatPinned(summary.id);
@@ -54,21 +80,33 @@ class ChatTile extends StatelessWidget {
     final isBlocked = summary.isBlocked; // controller.block list is reflected into summary
     final unread = (summary.unreadCount > 0);
 
+    // --- presence: read from summary.otherUser if available; fallback false/null ---
+    final other = summary.otherUser ?? <String, dynamic>{};
+    final dynamic onlineVal = other['isOnline'] ?? other['online'];
+    final bool isOnline = onlineVal == true;
+    final lastSeenRaw = other['lastSeen'] ?? other['lastSeenAt'] ?? other['last_seen'];
+    final DateTime? lastSeenDt = _parseLastSeen(lastSeenRaw);
+
     final titleStyle = TextStyle(
       color: accentColor,
       fontWeight: unread ? FontWeight.bold : FontWeight.w600,
       fontSize: 16,
     );
 
-    final subtitleStyle = TextStyle(
+    final subtitleMsgStyle = TextStyle(
       color: isBlocked ? Colors.grey : Colors.white70,
       fontWeight: unread ? FontWeight.bold : FontWeight.normal,
       fontSize: 13,
     );
 
+    final statusStyle = TextStyle(
+      color: isOnline ? Colors.greenAccent : Colors.white54,
+      fontSize: 11,
+      fontWeight: FontWeight.w500,
+    );
+
     // avatar
     Widget avatar;
-    final other = summary.otherUser;
     final photoUrl = other != null ? (other['photoUrl'] ?? '') as String : '';
     final initials = summary.isGroup
         ? 'G'
@@ -118,6 +156,7 @@ class ChatTile extends StatelessWidget {
               clipBehavior: Clip.none,
               children: [
                 avatar,
+                // story ring OR small indicator (preserve your group icon)
                 if (summary.isGroup)
                   Positioned(
                     right: -4,
@@ -129,6 +168,21 @@ class ChatTile extends StatelessWidget {
                         color: Colors.black87,
                       ),
                       child: const Icon(Icons.group, size: 12, color: Colors.white70),
+                    ),
+                  ),
+                // presence dot (bottom-right)
+                if (isOnline)
+                  Positioned(
+                    right: -2,
+                    bottom: -2,
+                    child: Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: Colors.greenAccent,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.black87, width: 2),
+                      ),
                     ),
                   ),
               ],
@@ -152,15 +206,23 @@ class ChatTile extends StatelessWidget {
             ),
             subtitle: Padding(
               padding: const EdgeInsets.only(top: 6.0),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Text(
-                      summary.lastMessageText.isNotEmpty ? summary.lastMessageText : 'No messages yet',
-                      style: subtitleStyle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                  // last message snippet
+                  Text(
+                    summary.lastMessageText.isNotEmpty ? summary.lastMessageText : 'No messages yet',
+                    style: subtitleMsgStyle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  // presence/status line
+                  Text(
+                    isOnline
+                        ? 'Online'
+                        : (lastSeenDt != null ? _formatLastSeen(context, lastSeenDt) : ''),
+                    style: statusStyle,
                   ),
                 ],
               ),
