@@ -798,4 +798,46 @@ class _VideoCallScreen1to1State extends State<VideoCallScreen1to1> with SingleTi
           child: Container(
             width: 320,
             height: 320,
-            decorati
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: RadialGradient(
+                colors: [Colors.teal.withOpacity(0.12), Colors.transparent],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          _buildBackground(),
+          SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
+                  child: _FrostedContainer(
+                    borderRadius: BorderRadius.circular(14),
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                    child: _buildTopBar(),
+                  ),
+                ),
+                Expanded(child: _buildVideoArea()),
+                FadeTransition(
+                  opacity: CurvedAnimation(parent: _controlsAnim, curve: Curves.easeIn),
+                  child: _buildControls(),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
